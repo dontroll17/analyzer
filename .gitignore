@@ -1,0 +1,31 @@
+# Gigacode
+.gigacode/
+
+# Chrome extension build files
+*.crx
+*.pem
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+job.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node modules (если будут использоваться)
+node_modules/
+
+# Distribution files
+dist/
+build/
+
+# Temporary files
+*.tmp
+*.log
+
+# Backup files
+*~
