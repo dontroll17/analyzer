@@ -1,3 +1,6 @@
+// Note: AudioWorklet doesn't support ES6 imports, so we inline the RMS function from rms.js
+// RMS utility is available as separate module for testing in rms-test.js
+
 class AudioAnalyzer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -11,14 +14,16 @@ class AudioAnalyzer extends AudioWorkletProcessor {
 
   /**
    * Calculate RMS value from audio buffer
+   * Uses RMS utility class from rms.js (inlined for AudioWorklet compatibility)
    */
   calculateRMS(buffer) {
     let sum = 0;
-    for (let i = 0; i < buffer.length; i++) {
+    const length = buffer.length;
+    for (let i = 0; i < length; i++) {
       const sample = buffer[i];
       sum += sample * sample;
     }
-    return Math.sqrt(sum / buffer.length);
+    return Math.sqrt(sum / length);
   }
 
   /**
