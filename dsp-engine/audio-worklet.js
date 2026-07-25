@@ -130,17 +130,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       }
     }
     
-    // Pass audio through to output (loopback)
-    const output = outputs[0];
-    if (output.length > 0 && input.length > 0) {
-      const outputChannel = output[0];
-      const inputChannel = input[0];
-      
-      for (let i = 0; i < inputChannel.length; i++) {
-        outputChannel[i] = inputChannel[i];
-      }
-    }
-    
+    // Do NOT pass audio through to avoid feedback loop
+    // We only need to analyze the audio, not play it back
     return true;
   }
 
