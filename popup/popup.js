@@ -5,20 +5,19 @@ const statusDiv = document.getElementById('status');
 const rmsSection = document.getElementById('rmsSection');
 const rmsValue = document.getElementById('rmsValue');
 const rmsLevel = document.getElementById('rmsLevel');
+const rmsBar = document.getElementById('rmsBar');
+const freqBandsSection = document.getElementById('freqBandsSection');
+const bassBar = document.getElementById('bassBar');
+const midBar = document.getElementById('midBar');
+const trebleBar = document.getElementById('trebleBar');
+const bassValue = document.getElementById('bassValue');
+const midValue = document.getElementById('midValue');
+const trebleValue = document.getElementById('trebleValue');
 
-// RMS Utility (inline for popup)
-const RMS = {
-  classifyLevel: function(rmsValue) {
-    if (rmsValue < 0.01) return 'SILENCE';
-    else if (rmsValue < 0.1) return 'LOW';
-    else if (rmsValue < 0.3) return 'MEDIUM';
-    else if (rmsValue < 0.7) return 'HIGH';
-    else return 'CRITICAL';
-  },
-  rmsToPercentage: function(rmsValue) {
-    return Math.min(100, Math.max(0, rmsValue * 100));
-  }
-};
+// Use the RMS class from dsp-engine/rms.js (loaded before this script)
+// The RMS class is available globally as window.RMS after loading rms.js
+// Note: No need to declare RMS here since it's already defined globally by rms.js
+// Access it directly as window.RMS when needed
 
 // Update UI state
 function updateUI(connected) {
@@ -28,6 +27,7 @@ function updateUI(connected) {
     statusDiv.textContent = 'Connected - Capturing Audio';
     statusDiv.className = 'connected';
     rmsSection.style.display = 'block';
+    freqBandsSection.style.display = 'block';
   } else {
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -36,17 +36,16 @@ function updateUI(connected) {
     rmsSection.style.display = 'none';
     rmsValue.textContent = '0.0000';
     rmsLevel.textContent = 'Level: --';
+    rmsBar.style.width = '0%';
+    
+    // Reset frequency bands
+    bassBar.style.width = '0%';
+    midBar.style.width = '0%';
+    trebleBar.style.width = '0%';
+    bassValue.textContent = '0%';
+    midValue.textContent = '0%';
+    trebleValue.textContent = '0%';
   }
-}
-
-// Update RMS display
-function updateRMSDisplay(rmsValueNum) {
-  const rmsFormatted = rmsValueNum.toFixed(4);
-  const level = RMS.classifyLevel(rmsValueNum);
-  
-  rmsValue.textContent = rmsFormatted;
-  rmsValue.style.color = getLevelColor(level);
-  rmsLevel.textContent = 'Level: ' + level + ' (' + RMS.rmsToPercentage(rmsValueNum).toFixed(1) + '%)';
 }
 
 // Get color based on RMS level
@@ -59,6 +58,40 @@ function getLevelColor(level) {
     case 'CRITICAL': return '#d9363e';
     default: return '#333';
   }
+}
+
+// Update RMS display with visual feedback
+function updateRMSDisplay(rmsValueNum) {
+  const rmsFormatted = rmsValueNum.toFixed(4);
+  const level = window.RMS.classifyLevel(rmsValueNum);
+  const percentage = window.RMS.rmsToPercentage(rmsValueNum);
+  
+  rmsValue.textContent = rmsFormatted;
+  rmsValue.style.color = getLevelColor(level);
+  rmsLevel.textContent = 'Level: ' + level + ' (' + percentage.toFixed(1) + '%)';
+  rmsBar.style.width = percentage + '%';
+  rmsBar.style.backgroundColor = getLevelColor(level);
+}
+
+// Update frequency bands display
+function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
+  // Handle invalid values (NaN, Infinity, negative)
+  const isValid = (val) => typeof val === 'number' && isFinite(val) && val >= 0;
+  
+  // Normalize energy values to percentage (0-100)
+  const bassPercent = isValid(bass) ? Math.min(100, (bass / maxEnergy) * 100) : 0;
+  const midPercent = isValid(mid) ? Math.min(100, (mid / maxEnergy) * 100) : 0;
+  const treblePercent = isValid(treble) ? Math.min(100, (treble / maxEnergy) * 100) : 0;
+  
+  // Update bars
+  bassBar.style.width = bassPercent + '%';
+  midBar.style.width = midPercent + '%';
+  trebleBar.style.width = treblePercent + '%';
+  
+  // Update text values
+  bassValue.textContent = Math.round(bassPercent) + '%';
+  midValue.textContent = Math.round(midPercent) + '%';
+  trebleValue.textContent = Math.round(treblePercent) + '%';
 }
 
 // Event Listeners
@@ -242,8 +275,14 @@ function handlePopupWorkletMessage(data) {
       rms: data.rms
     });
     
-    // Update UI
+    // Update RMS display
     updateRMSDisplay(data.rms);
+    
+    // Update frequency bands display
+    // Use a reasonable max energy value for normalization
+    // If values are too small, use dynamic normalization based on max of the three
+    const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
+    updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
   } else if (data.type === 'ERROR') {
     console.error('Worklet error:', data.message);
   } else if (data.type === 'READY') {

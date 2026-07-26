@@ -53,36 +53,51 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
-   * Calculate frequency band energy
+   * Calculate frequency band energy with normalization
    */
   calculateFrequencyBands(fftData, sampleRate) {
     const numBins = fftData.length;
     const nyquist = sampleRate / 2;
     
     // Define frequency bands (in bins)
-    const lowEnd = 10;      // 0-10 bins ≈ 0-220Hz at 44.1kHz
-    const midEnd = 100;     // 10-100 bins ≈ 220-4400Hz
-    const highEnd = 256;    // 100-256 bins ≈ 4400-22000Hz
+    // Define frequency bands based on 256 bins and 44.1kHz sample rate
+    // Bass: 0-220Hz, Mid: 220-4400Hz, Treble: 4.4-22kHz
+    // Bin width = sampleRate / (2 * numBins) = 44100 / 512 ≈ 86.13 Hz per bin
     
-    let lowSum = 0;
+    // Bass (0-220Hz): approximately bins 0-2 (220/86.13 ≈ 2.55)
+    const bassEnd = 3;
+    
+    // Mid (220-4400Hz): approximately bins 3-51 (4400/86.13 ≈ 51.08)
+    const midEnd = 52;
+    
+    // Treble (4.4-22kHz): approximately bins 52-256 (22000/86.13 ≈ 255.4)
+    const highEnd = numBins;    // 100-256 bins ≈ 4400-22000Hz
+    
+    let bassSum = 0;
     let midSum = 0;
-    let highSum = 0;
+    let trebleSum = 0;
+    let totalSum = 0;
     
     for (let i = 0; i < numBins; i++) {
       const energy = fftData[i] * fftData[i]; // Power
-      if (i < lowEnd) {
-        lowSum += energy;
+      totalSum += energy;
+      if (i < bassEnd) {
+        bassSum += energy;
       } else if (i < midEnd) {
         midSum += energy;
       } else if (i < highEnd) {
-        highSum += energy;
+        trebleSum += energy;
       }
     }
     
+    // Normalize to percentage of total energy (0-100)
+    // This gives meaningful percentages that work well with the UI
+    const normalize = (val) => totalSum > 0 ? (val / totalSum) * 100 : 0;
+    
     return {
-      bass: lowSum,
-      mid: midSum,
-      treble: highSum
+      bass: normalize(bassSum),
+      mid: normalize(midSum),
+      treble: normalize(trebleSum)
     };
   }
 
