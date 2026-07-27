@@ -25,6 +25,19 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // The sample rate should be stored before this processor is instantiated
     this.sampleRate = storedSampleRate;
     
+    // Glitch detector configuration
+    this.glitchConfig = {
+      highFreqThreshold: 0.75,      // 75% energy in HF band (default)
+      minTotalEnergy: 0.01,         // Ignore silence (RMS < 0.01)
+      debounceTimeout: 1000,        // ms between glitches
+      warningThreshold: 0.60        // 60% = warning before glitch
+    };
+    
+    // Glitch detection state
+    this.glitchState = 'STABLE';    // STABLE, WARNING, GLITCH
+    this.glitchCount = 0;
+    this.lastGlitchTime = 0;
+    
     // Log sample rate for debugging
     this.port.postMessage({
       type: 'DEBUG',
@@ -142,6 +155,45 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
+   * Check if current metrics indicate a glitch
+   * Returns: { isGlitch: boolean, state: string }
+   */
+  checkGlitchState(rms, highFreqRatio) {
+    const config = this.glitchConfig;
+    const now = Date.now();
+    
+    // Check if total energy is sufficient (ignore silence)
+    if (rms < config.minTotalEnergy) {
+      this.glitchState = 'STABLE';
+      return { isGlitch: false, state: 'STABLE' };
+    }
+    
+    // Check for glitch condition
+    if (highFreqRatio >= config.highFreqThreshold) {
+      // Check debounce timeout
+      if (now - this.lastGlitchTime > config.debounceTimeout) {
+        this.glitchCount++;
+        this.lastGlitchTime = now;
+        this.glitchState = 'GLITCH';
+        return { isGlitch: true, state: 'GLITCH' };
+      } else {
+        // Within debounce period, stay in current state
+        return { isGlitch: false, state: this.glitchState };
+      }
+    }
+    
+    // Check for warning condition
+    if (highFreqRatio >= config.warningThreshold) {
+      this.glitchState = 'WARNING';
+      return { isGlitch: false, state: 'WARNING' };
+    }
+    
+    // Normal state
+    this.glitchState = 'STABLE';
+    return { isGlitch: false, state: 'STABLE' };
+  }
+
+  /**
    * Main processing function called by AudioWorklet
    */
   process(inputs, outputs, parameters) {
@@ -182,6 +234,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
     
+    // Check glitch state
+    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
+    
     // Send metrics to main thread
     this.port.postMessage({
       type: 'METRICS',
@@ -192,7 +247,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       bass: bands.bass,
       mid: bands.mid,
       treble: bands.treble,
-      highFreqAnomaly: highFreqAnomaly
+      highFreqAnomaly: highFreqAnomaly,
+      isGlitch: glitchInfo.isGlitch,
+      glitchState: glitchInfo.state,
+      glitchCount: this.glitchCount
     });
   }
 }
