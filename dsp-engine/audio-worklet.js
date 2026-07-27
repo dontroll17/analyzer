@@ -1,6 +1,16 @@
 // Note: AudioWorklet doesn't support ES6 imports, so we inline the RMS function from rms.js
 // RMS utility is available as separate module for testing in rms-test.js
 
+// Store sample rate for use in constructor
+// AudioWorkletProcessor runs in a separate context, so we need to access
+// the sample rate that was set in the main thread's global scope
+let storedSampleRate = 44100;
+
+// Try to get sample rate from global scope (set by popup.js before instantiation)
+if (typeof globalThis !== 'undefined' && typeof globalThis.workletSampleRate === 'number') {
+  storedSampleRate = globalThis.workletSampleRate;
+}
+
 class AudioAnalyzer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -10,6 +20,16 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.inputBuffer = new Float32Array(this.bufferSize);
     this.bufferCount = 0;
     this.frameCount = 0;
+    
+    // Use stored sample rate - AudioWorkletProcessor doesn't receive sampleRate directly
+    // The sample rate should be stored before this processor is instantiated
+    this.sampleRate = storedSampleRate;
+    
+    // Log sample rate for debugging
+    this.port.postMessage({
+      type: 'DEBUG',
+      message: 'AudioAnalyzer initialized with sampleRate: ' + this.sampleRate
+    });
   }
 
   /**
@@ -55,11 +75,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   /**
    * Calculate frequency band energy with normalization
    */
-  calculateFrequencyBands(fftData, sampleRate) {
+  calculateFrequencyBands(fftData) {
     const numBins = fftData.length;
+    const sampleRate = this.sampleRate;
     const nyquist = sampleRate / 2;
     
-    // Define frequency bands (in bins)
     // Define frequency bands based on 256 bins and 44.1kHz sample rate
     // Bass: 0-220Hz, Mid: 220-4400Hz, Treble: 4.4-22kHz
     // Bin width = sampleRate / (2 * numBins) = 44100 / 512 ≈ 86.13 Hz per bin
@@ -85,7 +105,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
         bassSum += energy;
       } else if (i < midEnd) {
         midSum += energy;
-      } else if (i < highEnd) {
+      } else {
         trebleSum += energy;
       }
     }
@@ -159,7 +179,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Calculate metrics
     const rms = this.calculateRMS(this.inputBuffer);
     const fft = this.calculateFFT(this.inputBuffer, 256);
-    const bands = this.calculateFrequencyBands(fft, this.sampleRate);
+    const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
     
     // Send metrics to main thread

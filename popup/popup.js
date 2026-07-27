@@ -78,10 +78,13 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   // Handle invalid values (NaN, Infinity, negative)
   const isValid = (val) => typeof val === 'number' && isFinite(val) && val >= 0;
   
-  // Normalize energy values to percentage (0-100)
-  const bassPercent = isValid(bass) ? Math.min(100, (bass / maxEnergy) * 100) : 0;
-  const midPercent = isValid(mid) ? Math.min(100, (mid / maxEnergy) * 100) : 0;
-  const treblePercent = isValid(treble) ? Math.min(100, (treble / maxEnergy) * 100) : 0;
+  // Worklet already sends normalized values (0-100), but we still need to handle
+  // the case where values might be too small to see in UI
+  // Use the maxEnergy parameter to scale values if needed
+  const scale = maxEnergy > 0 ? 1 : 1;
+  const bassPercent = isValid(bass) ? Math.min(100, bass * scale) : 0;
+  const midPercent = isValid(mid) ? Math.min(100, mid * scale) : 0;
+  const treblePercent = isValid(treble) ? Math.min(100, treble * scale) : 0;
   
   // Update bars
   bassBar.style.width = bassPercent + '%';
@@ -96,8 +99,6 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
 
 // Event Listeners
 startBtn.addEventListener('click', () => {
-  console.log('Starting capture from popup...');
-  
   // Use getDisplayMedia as alternative to tabCapture
   // This allows capturing screen/tab with user permission
   const constraints = {
@@ -109,10 +110,6 @@ startBtn.addEventListener('click', () => {
   
   navigator.mediaDevices.getDisplayMedia(constraints)
     .then((stream) => {
-      console.log('Got stream from getDisplayMedia:', stream);
-      console.log('Stream ID:', stream.id);
-      console.log('Stream tracks:', stream.getTracks());
-      
       // Initialize audio processing directly in popup context
       initAudioProcessing(stream);
       
@@ -123,8 +120,6 @@ startBtn.addEventListener('click', () => {
       console.error('Error starting capture with getDisplayMedia:', error);
       
       // Fallback to regular tab capture if getDisplayMedia fails
-      console.log('Trying chrome.tabCapture.capture as fallback...');
-      
       chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
         if (chrome.runtime.lastError || !tabs || tabs.length === 0) {
           console.error('Error querying active tab:', chrome.runtime.lastError);
@@ -133,7 +128,6 @@ startBtn.addEventListener('click', () => {
         }
         
         const activeTab = tabs[0];
-        console.log('Active tab:', activeTab);
         
         // Check if this is a Chrome system page
         if (activeTab.url && (activeTab.url.startsWith('chrome://') || activeTab.url.startsWith('edge://') || activeTab.url.startsWith('chrome-extension://'))) {
@@ -161,8 +155,6 @@ startBtn.addEventListener('click', () => {
             return;
           }
           
-          console.log('Got stream from tabCapture fallback:', stream);
-          
           // Initialize audio processing
           initAudioProcessing(stream);
           
@@ -188,18 +180,17 @@ function initAudioProcessing(stream) {
       sampleRate: 44100,
     });
     
-    console.log('Popup AudioContext created with sampleRate:', popupAudioContext.sampleRate);
-    
     // Create MediaStreamSource from tabCapture stream
     popupMediaStreamSource = popupAudioContext.createMediaStreamSource(stream);
     
     // Register AudioWorklet
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
-    console.log('Loading AudioWorklet from:', workletPath);
     
     popupAudioContext.audioWorklet.addModule(workletPath)
       .then(() => {
-        console.log('AudioWorklet module loaded successfully');
+        // Store sample rate in global scope for worklet access
+        // This is needed because AudioWorkletProcessor constructor doesn't receive sampleRate directly
+        globalThis.workletSampleRate = popupAudioContext.sampleRate;
         
         // Create AudioWorkletNode
         popupWorkletNode = new AudioWorkletNode(popupAudioContext, 'audio-analyzer', {
@@ -213,8 +204,6 @@ function initAudioProcessing(stream) {
         // Connect source to worklet for analysis only
         // Do NOT connect to destination to avoid audio feedback loop
         popupMediaStreamSource.connect(popupWorkletNode);
-        
-        console.log('AudioWorkletNode created and connected');
         
         // Listen for messages from worklet
         popupWorkletNode.port.onmessage = (event) => {
@@ -263,12 +252,6 @@ function stopAudioProcessing() {
 
 function handlePopupWorkletMessage(data) {
   if (data.type === 'METRICS') {
-    console.log('[Popup - Worklet Metrics]');
-    console.log('  RMS:', data.rms.toFixed(4));
-    console.log('  Bass:', data.bass.toFixed(2));
-    console.log('  Mid:', data.mid.toFixed(2));
-    console.log('  Treble:', data.treble.toFixed(2));
-    
     // Send RMS to background for logging (optional)
     chrome.runtime.sendMessage({
       type: 'WORKLET_METRICS',
@@ -279,19 +262,22 @@ function handlePopupWorkletMessage(data) {
     updateRMSDisplay(data.rms);
     
     // Update frequency bands display
+    // Data from worklet is already normalized to percentage (0-100)
     // Use a reasonable max energy value for normalization
     // If values are too small, use dynamic normalization based on max of the three
     const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
     updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
+    
+    // Debug logging
+    console.log('Frequency bands:', data.bass.toFixed(2) + '%', data.mid.toFixed(2) + '%', data.treble.toFixed(2) + '%');
   } else if (data.type === 'ERROR') {
     console.error('Worklet error:', data.message);
   } else if (data.type === 'READY') {
-    console.log('AudioWorklet is ready');
+    // AudioWorklet is ready
   }
 }
 
 stopBtn.addEventListener('click', () => {
-  console.log('Stopping capture from popup...');
   stopAudioProcessing();
 });
 
