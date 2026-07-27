@@ -11,6 +11,12 @@
   "host_permissions": [
     "<all_urls>"
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["dsp-engine/audio-worklet.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "background": {
     "service_worker": "background.js"
   },

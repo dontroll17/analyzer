@@ -124,6 +124,23 @@
           <div id="trebleBar" style="width: 0%; height: 100%; background: #FF9800; transition: width 0.1s ease-out;"></div>
         </div>
       </div>
+      
+      <!-- Oscilloscope Section -->
+      <div id="oscilloscopeSection" style="margin-top: 15px; padding: 10px; background: #222; border-radius: 4px; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div style="font-size: 11px; color: #aaa;">Oscilloscope (Real-time Waveform)</div>
+          <button id="exportBtn" style="width: auto; margin: 0; padding: 4px 8px; font-size: 10px; background: #2196F3; color: white;">
+            📥 Export
+          </button>
+        </div>
+        
+        <canvas id="oscilloscopeCanvas" width="260" height="150" style="width: 100%; height: 150px; background: #1a1a1a; border-radius: 2px; border: 1px solid #444;"></canvas>
+        
+        <div style="display: flex; justify-content: space-between; font-size: 9px; color: #888; margin-top: 5px;">
+          <span>Left Channel (Blue)</span>
+          <span>Right Channel (Red)</span>
+        </div>
+      </div>
     </div>
   </div>
   

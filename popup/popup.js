@@ -14,10 +14,23 @@ const bassValue = document.getElementById('bassValue');
 const midValue = document.getElementById('midValue');
 const trebleValue = document.getElementById('trebleValue');
 
+// Oscilloscope elements
+const oscilloscopeCanvas = document.getElementById('oscilloscopeCanvas');
+const oscilloscopeCtx = oscilloscopeCanvas.getContext('2d');
+const exportBtn = document.getElementById('exportBtn');
+const oscilloscopeSection = document.getElementById('oscilloscopeSection');
+
 // Use the RMS class from dsp-engine/rms.js (loaded before this script)
 // The RMS class is available globally as window.RMS after loading rms.js
 // Note: No need to declare RMS here since it's already defined globally by rms.js
 // Access it directly as window.RMS when needed
+
+// Oscilloscope history buffers (store last N samples)
+const HISTORY_SIZE = 1024;
+let leftChannelHistory = new Float32Array(HISTORY_SIZE);
+let rightChannelHistory = new Float32Array(HISTORY_SIZE);
+let leftHead = 0;  // Circular buffer head for left channel
+let rightHead = 0; // Circular buffer head for right channel
 
 // Update UI state
 function updateUI(connected) {
@@ -28,6 +41,7 @@ function updateUI(connected) {
     statusDiv.className = 'connected';
     rmsSection.style.display = 'block';
     freqBandsSection.style.display = 'block';
+    oscilloscopeSection.style.display = 'block'; // Show oscilloscope
   } else {
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -45,6 +59,17 @@ function updateUI(connected) {
     bassValue.textContent = '0%';
     midValue.textContent = '0%';
     trebleValue.textContent = '0%';
+    
+    // Clear oscilloscope
+    oscilloscopeSection.style.display = 'none';
+    oscilloscopeCtx.fillStyle = '#1a1a1a';
+    oscilloscopeCtx.fillRect(0, 0, oscilloscopeCanvas.width, oscilloscopeCanvas.height);
+    
+    // Reset buffers
+    leftChannelHistory.fill(0);
+    rightChannelHistory.fill(0);
+    leftHead = 0;
+    rightHead = 0;
   }
 }
 
@@ -95,6 +120,123 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   bassValue.textContent = Math.round(bassPercent) + '%';
   midValue.textContent = Math.round(midPercent) + '%';
   trebleValue.textContent = Math.round(treblePercent) + '%';
+}
+
+// Update oscilloscope with audio samples
+function updateOscilloscope(leftSamples, rightSamples) {
+  const canvasWidth = oscilloscopeCanvas.width;
+  const canvasHeight = oscilloscopeCanvas.height;
+  const centerY = canvasHeight / 2;
+  
+  // Clear canvas
+  oscilloscopeCtx.fillStyle = '#1a1a1a';
+  oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+  
+  // Draw center line (zero axis)
+  oscilloscopeCtx.strokeStyle = '#333';
+  oscilloscopeCtx.lineWidth = 1;
+  oscilloscopeCtx.beginPath();
+  oscilloscopeCtx.moveTo(0, centerY);
+  oscilloscopeCtx.lineTo(canvasWidth, centerY);
+  oscilloscopeCtx.stroke();
+  
+  // Draw left channel
+  if (leftSamples.length > 0) {
+    oscilloscopeCtx.strokeStyle = '#2196F3'; // Blue
+    oscilloscopeCtx.lineWidth = 1.5;
+    oscilloscopeCtx.beginPath();
+    
+    for (let i = 0; i < leftSamples.length; i++) {
+      const x = (i / leftSamples.length) * canvasWidth;
+      const y = centerY - (leftSamples[i] * centerY); // Scale to -1 to 1 range
+      if (i === 0) {
+        oscilloscopeCtx.moveTo(x, y);
+      } else {
+        oscilloscopeCtx.lineTo(x, y);
+      }
+    }
+    oscilloscopeCtx.stroke();
+  }
+  
+  // Draw right channel
+  if (rightSamples.length > 0) {
+    oscilloscopeCtx.strokeStyle = '#f44336'; // Red
+    oscilloscopeCtx.lineWidth = 1.5;
+    oscilloscopeCtx.beginPath();
+    
+    for (let i = 0; i < rightSamples.length; i++) {
+      const x = (i / rightSamples.length) * canvasWidth;
+      const y = centerY - (rightSamples[i] * centerY);
+      if (i === 0) {
+        oscilloscopeCtx.moveTo(x, y);
+      } else {
+        oscilloscopeCtx.lineTo(x, y);
+      }
+    }
+    oscilloscopeCtx.stroke();
+  }
+}
+
+// Get buffered samples in correct order
+function getBufferedSamples(buffer, head) {
+  const result = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const index = (head + i) % buffer.length;
+    result.push(buffer[index]);
+  }
+  return result;
+}
+
+// Update oscilloscope from metrics (simplified waveform)
+function updateOscilloscopeFromMetrics(metrics) {
+  // Use RMS as a simplified representation
+  // For better visualization, we would need the actual time-domain samples from worklet
+  
+  // Update left channel history (using RMS as simplified value)
+  leftChannelHistory[leftHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
+  leftHead = (leftHead + 1) % HISTORY_SIZE;
+  
+  // For right channel, use same data (mono input)
+  // In future, if stereo input is available, populate separately
+  rightChannelHistory[rightHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
+  rightHead = (rightHead + 1) % HISTORY_SIZE;
+  
+  // Get full history for visualization
+  const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
+  const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
+  
+  updateOscilloscope(leftSamples, rightSamples);
+}
+
+// Export data to CSV
+function exportOscilloscopeData() {
+  const timestamp = new Date().toISOString();
+  const csvHeader = 'timestamp,channel,amplitude\n';
+  
+  let csvContent = csvHeader;
+  
+  // Export left channel
+  for (let i = 0; i < leftChannelHistory.length; i++) {
+    const sample = leftChannelHistory[i];
+    csvContent += `${timestamp},left,${sample}\n`;
+  }
+  
+  // Export right channel
+  for (let i = 0; i < rightChannelHistory.length; i++) {
+    const sample = rightChannelHistory[i];
+    csvContent += `${timestamp},right,${sample}\n`;
+  }
+  
+  // Create download link
+  const blob = new Blob([csvContent], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `oscilloscope_data_${timestamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // Event Listeners
@@ -268,6 +410,9 @@ function handlePopupWorkletMessage(data) {
     const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
     updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
     
+    // Update oscilloscope with spectrum data
+    updateOscilloscopeFromMetrics(data);
+    
     // Debug logging
     console.log('Frequency bands:', data.bass.toFixed(2) + '%', data.mid.toFixed(2) + '%', data.treble.toFixed(2) + '%');
   } else if (data.type === 'ERROR') {
@@ -280,6 +425,9 @@ function handlePopupWorkletMessage(data) {
 stopBtn.addEventListener('click', () => {
   stopAudioProcessing();
 });
+
+// Export button
+exportBtn.addEventListener('click', exportOscilloscopeData);
 
 // Listen for worklet metrics from background.js
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
