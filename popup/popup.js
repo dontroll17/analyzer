@@ -1,3 +1,5 @@
+import { RMS } from '../dsp-engine/rms.js';
+
 // DOM Elements
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
@@ -16,64 +18,74 @@ const trebleValue = document.getElementById('trebleValue');
 
 // Oscilloscope elements
 const oscilloscopeCanvas = document.getElementById('oscilloscopeCanvas');
-const oscilloscopeCtx = oscilloscopeCanvas.getContext('2d');
+const oscilloscopeCtx = oscilloscopeCanvas ? oscilloscopeCanvas.getContext('2d') : null;
 const exportBtn = document.getElementById('exportBtn');
 const oscilloscopeSection = document.getElementById('oscilloscopeSection');
 
-// Use the RMS class from dsp-engine/rms.js (loaded before this script)
-// The RMS class is available globally as window.RMS after loading rms.js
-// Note: No need to declare RMS here since it's already defined globally by rms.js
-// Access it directly as window.RMS when needed
-
-// Oscilloscope history buffers (store last N samples)
+// Oscilloscope history buffers
 const HISTORY_SIZE = 1024;
 let leftChannelHistory = new Float32Array(HISTORY_SIZE);
 let rightChannelHistory = new Float32Array(HISTORY_SIZE);
-let leftHead = 0;  // Circular buffer head for left channel
-let rightHead = 0; // Circular buffer head for right channel
+let leftHead = 0;
+let rightHead = 0;
+
+// Context & Streams state
+let popupAudioContext = null;
+let popupMediaStreamSource = null;
+let popupWorkletNode = null;
+let popupCaptureStream = null;
+
+let smoothedBass = 0;
+let smoothedMid = 0;
+let smoothedTreble = 0;
+
+// Коэффициент сглаживания (от 0.05 до 0.3):
+// Меньше = более плавно/инертно, Больше = более резко
+const SMOOTHING_FACTOR = 0.15;
 
 // Update UI state
 function updateUI(connected) {
   if (connected) {
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    statusDiv.textContent = 'Connected - Capturing Audio';
-    statusDiv.className = 'connected';
-    rmsSection.style.display = 'block';
-    freqBandsSection.style.display = 'block';
-    oscilloscopeSection.style.display = 'block'; // Show oscilloscope
+    if (startBtn) startBtn.disabled = true;
+    if (stopBtn) stopBtn.disabled = false;
+    if (statusDiv) {
+      statusDiv.textContent = 'Connected - Capturing Audio';
+      statusDiv.className = 'status connected';
+    }
+    if (rmsSection) rmsSection.style.display = 'block';
+    if (freqBandsSection) freqBandsSection.style.display = 'block';
+    if (oscilloscopeSection) oscilloscopeSection.style.display = 'block';
   } else {
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    statusDiv.textContent = 'Not Connected';
-    statusDiv.className = 'disconnected';
-    rmsSection.style.display = 'none';
-    rmsValue.textContent = '0.0000';
-    rmsLevel.textContent = 'Level: --';
-    rmsBar.style.width = '0%';
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+    if (statusDiv) {
+      statusDiv.textContent = 'Not Connected';
+      statusDiv.className = 'status disconnected';
+    }
+    if (rmsSection) rmsSection.style.display = 'none';
+    if (freqBandsSection) freqBandsSection.style.display = 'none';
+    if (oscilloscopeSection) oscilloscopeSection.style.display = 'none';
+
+    // Сброс всех сглаженных переменных и счетчиков
+    smoothedBass = 0;
+    smoothedMid = 0;
+    smoothedTreble = 0;
+
+    if (rmsValue) rmsValue.textContent = '0.0000';
+    if (rmsLevel) rmsLevel.textContent = 'Level: --';
+    if (rmsBar) rmsBar.style.width = '0%';
     
-    // Reset frequency bands
-    bassBar.style.width = '0%';
-    midBar.style.width = '0%';
-    trebleBar.style.width = '0%';
-    bassValue.textContent = '0%';
-    midValue.textContent = '0%';
-    trebleValue.textContent = '0%';
+    if (bassBar) bassBar.style.width = '0%';
+    if (midBar) midBar.style.width = '0%';
+    if (trebleBar) trebleBar.style.width = '0%';
     
-    // Clear oscilloscope
-    oscilloscopeSection.style.display = 'none';
-    oscilloscopeCtx.fillStyle = '#1a1a1a';
-    oscilloscopeCtx.fillRect(0, 0, oscilloscopeCanvas.width, oscilloscopeCanvas.height);
-    
-    // Reset buffers
-    leftChannelHistory.fill(0);
-    rightChannelHistory.fill(0);
-    leftHead = 0;
-    rightHead = 0;
+    if (glitchStatus) {
+      glitchStatus.textContent = 'STABLE';
+      glitchStatus.style.color = '#4CAF50';
+    }
   }
 }
 
-// Get color based on RMS level
 function getLevelColor(level) {
   switch (level) {
     case 'SILENCE': return '#ff6b6b';
@@ -85,54 +97,62 @@ function getLevelColor(level) {
   }
 }
 
-// Update RMS display with visual feedback
 function updateRMSDisplay(rmsValueNum) {
   const rmsFormatted = rmsValueNum.toFixed(4);
-  const level = window.RMS.classifyLevel(rmsValueNum);
-  const percentage = window.RMS.rmsToPercentage(rmsValueNum);
+  const level = RMS.classifyLevel(rmsValueNum);
+  const percentage = RMS.rmsToPercentage(rmsValueNum);
   
-  rmsValue.textContent = rmsFormatted;
-  rmsValue.style.color = getLevelColor(level);
-  rmsLevel.textContent = 'Level: ' + level + ' (' + percentage.toFixed(1) + '%)';
-  rmsBar.style.width = percentage + '%';
-  rmsBar.style.backgroundColor = getLevelColor(level);
+  if (rmsValue) {
+    rmsValue.textContent = rmsFormatted;
+    rmsValue.style.color = getLevelColor(level);
+  }
+  if (rmsLevel) {
+    rmsLevel.textContent = 'Level: ' + level + ' (' + percentage.toFixed(1) + '%)';
+  }
+  if (rmsBar) {
+    rmsBar.style.width = percentage + '%';
+    rmsBar.style.backgroundColor = getLevelColor(level);
+  }
 }
 
-// Update frequency bands display
 function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
-  // Handle invalid values (NaN, Infinity, negative)
   const isValid = (val) => typeof val === 'number' && isFinite(val) && val >= 0;
   
-  // Worklet already sends normalized values (0-100), but we still need to handle
-  // the case where values might be too small to see in UI
-  // Use the maxEnergy parameter to scale values if needed
-  const scale = maxEnergy > 0 ? 1 : 1;
-  const bassPercent = isValid(bass) ? Math.min(100, bass * scale) : 0;
-  const midPercent = isValid(mid) ? Math.min(100, mid * scale) : 0;
-  const treblePercent = isValid(treble) ? Math.min(100, treble * scale) : 0;
-  
-  // Update bars
-  bassBar.style.width = bassPercent + '%';
-  midBar.style.width = midPercent + '%';
-  trebleBar.style.width = treblePercent + '%';
-  
-  // Update text values
-  bassValue.textContent = Math.round(bassPercent) + '%';
-  midValue.textContent = Math.round(midPercent) + '%';
-  trebleValue.textContent = Math.round(treblePercent) + '%';
+  const rawBass = isValid(bass) ? bass : 0;
+  const rawMid = isValid(mid) ? mid : 0;
+  const rawTreble = isValid(treble) ? treble : 0;
+
+  // Формула сглаживания LERP (Linear Interpolation):
+  // Current = Current + (Target - Current) * Factor
+  smoothedBass += (rawBass - smoothedBass) * SMOOTHING_FACTOR;
+  smoothedMid += (rawMid - smoothedMid) * SMOOTHING_FACTOR;
+  smoothedTreble += (rawTreble - smoothedTreble) * SMOOTHING_FACTOR;
+
+  const bassPercent = Math.min(100, Math.max(0, smoothedBass));
+  const midPercent = Math.min(100, Math.max(0, smoothedMid));
+  const treblePercent = Math.min(100, Math.max(0, smoothedTreble));
+
+  // Обновляем ширину полос
+  if (bassBar) bassBar.style.width = bassPercent + '%';
+  if (midBar) midBar.style.width = midPercent + '%';
+  if (trebleBar) trebleBar.style.width = treblePercent + '%';
+
+  // Обновляем текстовые значения
+  if (bassValue) bassValue.textContent = Math.round(bassPercent) + '%';
+  if (midValue) midValue.textContent = Math.round(midPercent) + '%';
+  if (trebleValue) trebleValue.textContent = Math.round(treblePercent) + '%';
 }
 
-// Update oscilloscope with audio samples
 function updateOscilloscope(leftSamples, rightSamples) {
+  if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
   const centerY = canvasHeight / 2;
   
-  // Clear canvas
   oscilloscopeCtx.fillStyle = '#1a1a1a';
   oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
   
-  // Draw center line (zero axis)
   oscilloscopeCtx.strokeStyle = '#333';
   oscilloscopeCtx.lineWidth = 1;
   oscilloscopeCtx.beginPath();
@@ -140,44 +160,35 @@ function updateOscilloscope(leftSamples, rightSamples) {
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
   
-  // Draw left channel
   if (leftSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = '#2196F3'; // Blue
+    oscilloscopeCtx.strokeStyle = '#2196F3';
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
     
     for (let i = 0; i < leftSamples.length; i++) {
       const x = (i / leftSamples.length) * canvasWidth;
-      const y = centerY - (leftSamples[i] * centerY); // Scale to -1 to 1 range
-      if (i === 0) {
-        oscilloscopeCtx.moveTo(x, y);
-      } else {
-        oscilloscopeCtx.lineTo(x, y);
-      }
+      const y = centerY - (leftSamples[i] * centerY);
+      if (i === 0) oscilloscopeCtx.moveTo(x, y);
+      else oscilloscopeCtx.lineTo(x, y);
     }
     oscilloscopeCtx.stroke();
   }
   
-  // Draw right channel
   if (rightSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = '#f44336'; // Red
+    oscilloscopeCtx.strokeStyle = '#f44336';
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
     
     for (let i = 0; i < rightSamples.length; i++) {
       const x = (i / rightSamples.length) * canvasWidth;
       const y = centerY - (rightSamples[i] * centerY);
-      if (i === 0) {
-        oscilloscopeCtx.moveTo(x, y);
-      } else {
-        oscilloscopeCtx.lineTo(x, y);
-      }
+      if (i === 0) oscilloscopeCtx.moveTo(x, y);
+      else oscilloscopeCtx.lineTo(x, y);
     }
     oscilloscopeCtx.stroke();
   }
 }
 
-// Get buffered samples in correct order
 function getBufferedSamples(buffer, head) {
   const result = [];
   for (let i = 0; i < buffer.length; i++) {
@@ -187,254 +198,147 @@ function getBufferedSamples(buffer, head) {
   return result;
 }
 
-// Update oscilloscope from metrics (simplified waveform)
 function updateOscilloscopeFromMetrics(metrics) {
-  // Use RMS as a simplified representation
-  // For better visualization, we would need the actual time-domain samples from worklet
-  
-  // Update left channel history (using RMS as simplified value)
   leftChannelHistory[leftHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
   leftHead = (leftHead + 1) % HISTORY_SIZE;
   
-  // For right channel, use same data (mono input)
-  // In future, if stereo input is available, populate separately
   rightChannelHistory[rightHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
   rightHead = (rightHead + 1) % HISTORY_SIZE;
   
-  // Get full history for visualization
   const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
   const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
   
   updateOscilloscope(leftSamples, rightSamples);
 }
 
-// Export data to CSV
-function exportOscilloscopeData() {
-  const timestamp = new Date().toISOString();
-  const csvHeader = 'timestamp,channel,amplitude\n';
-  
-  let csvContent = csvHeader;
-  
-  // Export left channel
-  for (let i = 0; i < leftChannelHistory.length; i++) {
-    const sample = leftChannelHistory[i];
-    csvContent += `${timestamp},left,${sample}\n`;
-  }
-  
-  // Export right channel
-  for (let i = 0; i < rightChannelHistory.length; i++) {
-    const sample = rightChannelHistory[i];
-    csvContent += `${timestamp},right,${sample}\n`;
-  }
-  
-  // Create download link
-  const blob = new Blob([csvContent], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `oscilloscope_data_${timestamp}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-// Event Listeners
-startBtn.addEventListener('click', () => {
-  // Use getDisplayMedia as alternative to tabCapture
-  // This allows capturing screen/tab with user permission
-  const constraints = {
-    video: {
-      displaySurface: "tab"  // Try to capture the current tab
-    },
-    audio: true
-  };
-  
-  navigator.mediaDevices.getDisplayMedia(constraints)
-    .then((stream) => {
-      // Initialize audio processing directly in popup context
-      initAudioProcessing(stream);
-      
-      // Update UI
-      updateUI(true);
-    })
-    .catch((error) => {
-      console.error('Error starting capture with getDisplayMedia:', error);
-      
-      // Fallback to regular tab capture if getDisplayMedia fails
-      chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-        if (chrome.runtime.lastError || !tabs || tabs.length === 0) {
-          console.error('Error querying active tab:', chrome.runtime.lastError);
-          alert('Error: No active tab found. Please switch to a tab first.');
-          return;
-        }
-        
-        const activeTab = tabs[0];
-        
-        // Check if this is a Chrome system page
-        if (activeTab.url && (activeTab.url.startsWith('chrome://') || activeTab.url.startsWith('edge://') || activeTab.url.startsWith('chrome-extension://'))) {
-          console.error('Cannot capture Chrome system pages');
-          alert('Cannot capture Chrome system pages (chrome://, edge://, etc.)');
-          return;
-        }
-        
-        // Request tab capture with audio only
-        const tabCaptureConstraints = {
-          audio: true,
-          video: false
-        };
-        
-        chrome.tabCapture.capture(tabCaptureConstraints, (stream) => {
-          if (chrome.runtime.lastError) {
-            console.error('Error starting tab capture:', chrome.runtime.lastError);
-            alert('Error starting capture: ' + chrome.runtime.lastError.message);
-            return;
-          }
-          
-          if (!stream) {
-            console.error('No stream returned from tabCapture');
-            alert('No stream returned from tabCapture');
-            return;
-          }
-          
-          // Initialize audio processing
-          initAudioProcessing(stream);
-          
-          // Update UI
-          updateUI(true);
-        });
-      });
-    });
-});
-
-// Initialize audio processing in popup context
-let popupAudioContext = null;
-let popupMediaStreamSource = null;
-let popupWorkletNode = null;
-let popupCaptureStream = null;
-
-function initAudioProcessing(stream) {
+// Инициализация Audio Processing и сквозного проброса звука
+async function initAudioProcessing(stream) {
   popupCaptureStream = stream;
   
   try {
-    // Create AudioContext
-    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 44100,
-    });
+    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
     
-    // Create MediaStreamSource from tabCapture stream
+    if (popupAudioContext.state === 'suspended') {
+      await popupAudioContext.resume();
+    }
+
     popupMediaStreamSource = popupAudioContext.createMediaStreamSource(stream);
-    
-    // Register AudioWorklet
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
     
-    popupAudioContext.audioWorklet.addModule(workletPath)
-      .then(() => {
-        // Store sample rate in global scope for worklet access
-        // This is needed because AudioWorkletProcessor constructor doesn't receive sampleRate directly
-        globalThis.workletSampleRate = popupAudioContext.sampleRate;
-        
-        // Create AudioWorkletNode
-        popupWorkletNode = new AudioWorkletNode(popupAudioContext, 'audio-analyzer', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          channelCount: 1,
-          channelCountMode: 'explicit',
-          channelInterpretation: 'discrete'
-        });
-        
-        // Connect source to worklet for analysis only
-        // Do NOT connect to destination to avoid audio feedback loop
-        popupMediaStreamSource.connect(popupWorkletNode);
-        
-        // Listen for messages from worklet
-        popupWorkletNode.port.onmessage = (event) => {
-          handlePopupWorkletMessage(event.data);
-        };
-        
-        popupWorkletNode.port.onmessageerror = (event) => {
-          console.error('Error receiving message from worklet:', event);
-        };
-        
-        popupWorkletNode.port.onerror = (error) => {
-          console.error('Worklet port error:', error);
-        };
-      })
-      .catch((error) => {
-        console.error('Error loading AudioWorklet:', error);
-        alert('Error loading AudioWorklet: ' + error.message);
-        stopAudioProcessing();
-      });
-      
+    await popupAudioContext.audioWorklet.addModule(workletPath);
+
+    popupWorkletNode = new AudioWorkletNode(popupAudioContext, 'audio-analyzer', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'discrete'
+    });
+
+    // 1. Источник направляем в воркет для спектрального анализа
+    popupMediaStreamSource.connect(popupWorkletNode);
+
+    // 2. ВАЖНО: Подключаем воркет (или источник) к колонкам/наушникам, 
+    // чтобы не было глушения оригинального звука
+    popupWorkletNode.connect(popupAudioContext.destination);
+
+    popupWorkletNode.port.onmessage = (event) => {
+      const data = event.data;
+      if (data.type === 'METRICS') {
+        // Обновляем RMS и эквалайзер
+        updateRMSDisplay(data.rms);
+        const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
+        updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
+        updateOscilloscopeFromMetrics(data);
+
+        // 🎯 ОБРАБОТКА ДЕТЕКТОРА ГЛИЧЕЙ
+        updateGlitchStatus(data.glitchState, data.glitchCount);
+      }
+    };
+
+    // Функция визуализации состояния глитч-детектора
+    function updateGlitchStatus(state, count) {
+      const statusEl = document.getElementById('glitchStatus');
+      const countEl = document.getElementById('glitchCount');
+
+      if (countEl) countEl.textContent = count;
+
+      if (!statusEl) return;
+
+      statusEl.textContent = state;
+      switch (state) {
+        case 'GLITCH':
+          statusEl.style.color = '#f44336'; // Красный при сбое
+          break;
+        case 'WARNING':
+          statusEl.style.color = '#FF9800'; // Оранжевый при аномалии
+          break;
+        case 'STABLE':
+        default:
+          statusEl.style.color = '#4CAF50'; // Зеленый в норме
+          break;
+      }
+    }
+
+    updateUI(true);
   } catch (error) {
-    console.error('Error initializing popup audio context:', error);
-    alert('Error initializing audio: ' + error.message);
+    console.error('Error initializing audio:', error);
+    alert('Audio init error: ' + error.message);
     stopAudioProcessing();
   }
 }
 
 function stopAudioProcessing() {
+  if (popupMediaStreamSource) {
+    popupMediaStreamSource.disconnect();
+    popupMediaStreamSource = null;
+  }
+
+  if (popupWorkletNode) {
+    popupWorkletNode.disconnect();
+    popupWorkletNode = null;
+  }
+
   if (popupAudioContext) {
     popupAudioContext.close().catch(console.error);
     popupAudioContext = null;
   }
   
   if (popupCaptureStream) {
-    popupCaptureStream.getTracks().forEach((track) => {
-      track.stop();
-    });
+    popupCaptureStream.getTracks().forEach(track => track.stop());
     popupCaptureStream = null;
   }
-  
-  popupMediaStreamSource = null;
-  popupWorkletNode = null;
   
   updateUI(false);
 }
 
-function handlePopupWorkletMessage(data) {
-  if (data.type === 'METRICS') {
-    // Send RMS to background for logging (optional)
-    chrome.runtime.sendMessage({
-      type: 'WORKLET_METRICS',
-      rms: data.rms
-    });
-    
-    // Update RMS display
-    updateRMSDisplay(data.rms);
-    
-    // Update frequency bands display
-    // Data from worklet is already normalized to percentage (0-100)
-    // Use a reasonable max energy value for normalization
-    // If values are too small, use dynamic normalization based on max of the three
-    const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
-    updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
-    
-    // Update oscilloscope with spectrum data
-    updateOscilloscopeFromMetrics(data);
-    
-    // Debug logging
-    console.log('Frequency bands:', data.bass.toFixed(2) + '%', data.mid.toFixed(2) + '%', data.treble.toFixed(2) + '%');
-  } else if (data.type === 'ERROR') {
-    console.error('Worklet error:', data.message);
-  } else if (data.type === 'READY') {
-    // AudioWorklet is ready
-  }
-}
+// Захват звука прямо из вкладки через tabCapture
+startBtn.addEventListener('click', () => {
+  chrome.tabCapture.capture({ audio: true, video: false }, (stream) => {
+    if (chrome.runtime.lastError || !stream) {
+      console.error('tabCapture error:', chrome.runtime.lastError);
+      alert('Ошибка захвата аудио. Убедитесь, что на вкладке воспроизводится звук.');
+      return;
+    }
+
+    initAudioProcessing(stream);
+  });
+});
 
 stopBtn.addEventListener('click', () => {
   stopAudioProcessing();
 });
 
-// Export button
-exportBtn.addEventListener('click', exportOscilloscopeData);
+chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
+  if (chrome.runtime.lastError) {
+    // В случае если background еще не готов или отдал ошибку
+    updateUI(false);
+    return;
+  }
 
-// Listen for worklet metrics from background.js
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'WORKLET_METRICS' && message.rms !== undefined) {
-    updateRMSDisplay(message.rms);
+  if (response && response.isCapturing) {
+    updateUI(true);
+  } else {
+    updateUI(false);
   }
 });
-
-// Initialize UI state on load
-updateUI(false);

@@ -1,31 +1,35 @@
 // Background script for Stream Sensation Analyzer
 // In MV3, stream processing is handled in popup context
-
+let isCapturing = false;
 // Handle messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Received message from popup:', message);
   
-  if (message.type === 'START_CAPTURE_WITH_STREAM') {
-    // In MV3, stream processing is now handled directly in popup context.
-    console.log('Received START_CAPTURE_WITH_STREAM message');
-    console.log('Note: Stream processing is now handled in popup context (MV3 limitation)');
-    
-    sendResponse({ 
-      type: 'STATUS_UPDATE', 
-      connected: false,
-      note: 'Stream processing handled in popup context (MV3 limitation)'
+  if (message.action === 'START_CAPTURE') {
+    // Получаем capture stream через tabCapture API на уровне background
+    chrome.tabCapture.getMediaStreamId({ targetTabId: sender.tab?.id }, (streamId) => {
+      if (chrome.runtime.lastError || !streamId) {
+        sendResponse({ success: false, error: chrome.runtime.lastError?.message || 'No stream ID' });
+        return;
+      }
+      
+      // Здесь инициализируем Offscreen Document для безопасной работы с AudioContext
+      isCapturing = true;
+      sendResponse({ success: true });
     });
-    return true;
-  } else if (message.type === 'STOP_CAPTURE') {
-    // Background no longer maintains audio context in MV3
-    console.log('Stop message received (background context)');
-    sendResponse({ type: 'STATUS_UPDATE', connected: false });
-    return true;
-  } else if (message.type === 'GET_STATUS') {
-    sendResponse({ type: 'STATUS_UPDATE', connected: false });
-  } else if (message.type === 'WORKLET_METRICS') {
-    // Forward metrics from popup to logging
-    console.log('[Background - Worklet Metrics]', message);
+    return true; // Асинхронный отклик
+
+  }
+   if (message.action === 'STOP_CAPTURE') {
+    isCapturing = false;
+    sendResponse({ success: true });
+  }
+
+  if (message.action === 'GET_STATUS') {
+    sendResponse({ isCapturing });
+  }
+  if (message.type === 'GET_CAPTURE_STATUS') {
+    sendResponse({ isCapturing: isCapturing });
   }
 });
 
