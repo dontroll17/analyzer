@@ -1,11 +1,41 @@
 import { RMS } from '../dsp-engine/rms.js';
 
+// ============================================
+// Theme Colors
+// ============================================
+const THEME_COLORS = {
+  dark: {
+    glitch: { GLITCH: '#f44336', DRIFT: '#FF9800', STABLE: '#4CAF50' },
+    rms: { SILENCE: '#ff6b6b', LOW: '#ffa94d', MEDIUM: '#95df6c', HIGH: '#3ac7a3', CRITICAL: '#d9363e', default: '#333' },
+    canvas: { bg: '#1a1a1a', grid: '#333333', oscLeft: '#2196F3', oscRight: '#f44336', timelineRef: '#333' },
+    channel: { stereo: '#4CAF50', mono: '#888' }
+  },
+  light: {
+    glitch: { GLITCH: '#E53935', DRIFT: '#FB8C00', STABLE: '#43A047' },
+    rms: { SILENCE: '#ef5350', LOW: '#FFA726', MEDIUM: '#66BB6A', HIGH: '#26A69A', CRITICAL: '#D32F2F', default: '#bdbdbd' },
+    canvas: { bg: '#fafafa', grid: '#e0e0e0', oscLeft: '#1E88E5', oscRight: '#E53935', timelineRef: '#e0e0e0' },
+    channel: { stereo: '#43A047', mono: '#666' }
+  }
+};
+
+function getTheme() {
+  return document.documentElement.getAttribute('data-theme') || 'dark';
+}
+
+function tc(key) {
+  return THEME_COLORS[getTheme()][key];
+}
+
+// ============================================
 // DOM Elements
+// ============================================
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const statusDiv = document.getElementById('status');
+const themeToggle = document.getElementById('themeToggle');
 const rmsSection = document.getElementById('rmsSection');
 const rmsValue = document.getElementById('rmsValue');
+const peakValue = document.getElementById('peakValue');
 const rmsLevel = document.getElementById('rmsLevel');
 const rmsBar = document.getElementById('rmsBar');
 const freqBandsSection = document.getElementById('freqBandsSection');
@@ -22,6 +52,17 @@ const oscilloscopeCtx = oscilloscopeCanvas ? oscilloscopeCanvas.getContext('2d')
 const exportBtn = document.getElementById('exportBtn');
 const exportLogBtn = document.getElementById('exportLogBtn');
 const oscilloscopeSection = document.getElementById('oscilloscopeSection');
+const timelineCanvas = document.getElementById('timelineCanvas');
+const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
+const timelineSection = document.getElementById('timelineSection');
+const channelIndicator = document.getElementById('channelIndicator');
+
+// Entropy section elements
+const entropySection = document.getElementById('entropySection');
+const entropyValue = document.getElementById('entropyValue');
+const entropyState = document.getElementById('entropyState');
+const flatnessValue = document.getElementById('flatnessValue');
+const entropyHint = document.getElementById('entropyHint');
 
 // Glitch settings elements
 const thresholdSlider = document.getElementById('thresholdSlider');
@@ -36,6 +77,12 @@ const GLITCH_LOG_MAX = 500;
 let glitchLog = [];
 let currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
 let lastGlitchState = 'STABLE';
+
+// Glitch timeline history
+var TIMELINE_MAX = 300;
+var glitchHistory = [];
+var lastTimelineRecord = 0;
+var CAPTURE_START_TIME = 0;
 
 // Oscilloscope history buffers
 const HISTORY_SIZE = 1024;
@@ -59,6 +106,8 @@ function updateGlitchStatus(state, count) {
   const statusEl = document.getElementById('glitchStatus');
   const countEl = document.getElementById('glitchCount');
   const dotEl = document.getElementById('glitchStateDot');
+  const glitchSectionEl = document.getElementById('glitchSection');
+  const colors = tc('glitch');
 
   if (countEl) countEl.textContent = count;
   if (!statusEl) return;
@@ -67,20 +116,23 @@ function updateGlitchStatus(state, count) {
 
   switch (state) {
     case 'GLITCH':
-      statusEl.style.color = '#f44336';
-      if (dotEl) dotEl.style.background = '#f44336';
+      statusEl.style.color = colors.GLITCH;
+      if (dotEl) dotEl.style.background = colors.GLITCH;
+      if (glitchSectionEl) glitchSectionEl.classList.add('glitch-pulse');
       if (lastGlitchState !== 'GLITCH') {
         addGlitchLogEntry(count);
       }
       break;
     case 'DRIFT':
-      statusEl.style.color = '#FF9800';
-      if (dotEl) dotEl.style.background = '#FF9800';
+      statusEl.style.color = colors.DRIFT;
+      if (dotEl) dotEl.style.background = colors.DRIFT;
+      if (glitchSectionEl) glitchSectionEl.classList.remove('glitch-pulse');
       break;
     case 'STABLE':
     default:
-      statusEl.style.color = '#4CAF50';
-      if (dotEl) dotEl.style.background = '#4CAF50';
+      statusEl.style.color = colors.STABLE;
+      if (dotEl) dotEl.style.background = colors.STABLE;
+      if (glitchSectionEl) glitchSectionEl.classList.remove('glitch-pulse');
       break;
   }
   lastGlitchState = state;
@@ -103,6 +155,9 @@ function updateUI(connected) {
     if (freqBandsSection) freqBandsSection.style.display = 'block';
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'block';
     if (glitchSettings) glitchSettings.style.display = 'block';
+    if (timelineSection) timelineSection.style.display = 'block';
+    if (entropySection) entropySection.style.display = '';
+    if (entropyHint) entropyHint.style.display = '';
   } else {
     if (startBtn) startBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = true;
@@ -114,14 +169,21 @@ function updateUI(connected) {
     if (freqBandsSection) freqBandsSection.style.display = 'none';
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'none';
     if (glitchSettings) glitchSettings.style.display = 'none';
+    if (timelineSection) timelineSection.style.display = 'none';
+    if (entropySection) entropySection.style.display = 'none';
+    if (entropyHint) entropyHint.style.display = 'none';
 
     // Сброс всех сглаженных переменных и счетчиков
     smoothedBass = 0;
     smoothedMid = 0;
     smoothedTreble = 0;
     glitchLog = [];
+    glitchHistory = [];
+    CAPTURE_START_TIME = 0;
+    lastTimelineRecord = 0;
 
     if (rmsValue) rmsValue.textContent = '0.0000';
+    if (peakValue) peakValue.textContent = 'Peak: --';
     if (rmsLevel) rmsLevel.textContent = 'Level: --';
     if (rmsBar) rmsBar.style.width = '0%';
     
@@ -131,40 +193,30 @@ function updateUI(connected) {
     
     if (glitchStatus) {
       glitchStatus.textContent = 'STABLE';
-      glitchStatus.style.color = '#4CAF50';
+      glitchStatus.style.color = tc('glitch').STABLE;
     }
     if (glitchStateDot) {
-      glitchStateDot.style.background = '#4CAF50';
+      glitchStateDot.style.background = tc('glitch').STABLE;
     }
+    if (glitchSettings) glitchSettings.classList.remove('glitch-pulse');
     if (thresholdSlider) thresholdSlider.value = 85;
     if (thresholdValue) thresholdValue.textContent = '85%';
 
-    const entropySection = document.getElementById('entropySection');
-    const entropyValue = document.getElementById('entropyValue');
-    const entropyState = document.getElementById('entropyState');
-    const flatnessValue = document.getElementById('flatnessValue');
-    if (entropySection) entropySection.style.display = 'none';
     if (entropyValue) entropyValue.textContent = '0.00';
     if (flatnessValue) flatnessValue.textContent = '0.00';
     if (entropyState) {
       entropyState.textContent = 'STABLE';
-      entropyState.style.color = '#4CAF50';
+      entropyState.style.color = tc('glitch').STABLE;
     }
   }
 }
 
 function getLevelColor(level) {
-  switch (level) {
-    case 'SILENCE': return '#ff6b6b';
-    case 'LOW': return '#ffa94d';
-    case 'MEDIUM': return '#95df6c';
-    case 'HIGH': return '#3ac7a3';
-    case 'CRITICAL': return '#d9363e';
-    default: return '#333';
-  }
+  const colors = tc('rms');
+  return colors[level] || colors.default;
 }
 
-function updateRMSDisplay(rmsValueNum) {
+function updateRMSDisplay(rmsValueNum, peakRms) {
   const rmsFormatted = rmsValueNum.toFixed(4);
   const level = RMS.classifyLevel(rmsValueNum);
   const percentage = RMS.rmsToPercentage(rmsValueNum);
@@ -172,6 +224,9 @@ function updateRMSDisplay(rmsValueNum) {
   if (rmsValue) {
     rmsValue.textContent = rmsFormatted;
     rmsValue.style.color = getLevelColor(level);
+  }
+  if (peakValue && peakRms !== undefined) {
+    peakValue.textContent = 'Peak: ' + peakRms.toFixed(4);
   }
   if (rmsLevel) {
     rmsLevel.textContent = 'Level: ' + level + ' (' + percentage.toFixed(1) + '%)';
@@ -216,22 +271,23 @@ function updateOscilloscope(leftSamples, rightSamples) {
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
   const centerY = canvasHeight / 2;
-  
-  oscilloscopeCtx.fillStyle = '#1a1a1a';
+  const colors = tc('canvas');
+
+  oscilloscopeCtx.fillStyle = colors.bg;
   oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
-  
-  oscilloscopeCtx.strokeStyle = '#333';
+
+  oscilloscopeCtx.strokeStyle = colors.grid;
   oscilloscopeCtx.lineWidth = 1;
   oscilloscopeCtx.beginPath();
   oscilloscopeCtx.moveTo(0, centerY);
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
-  
+
   if (leftSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = '#2196F3';
+    oscilloscopeCtx.strokeStyle = colors.oscLeft;
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
-    
+
     for (let i = 0; i < leftSamples.length; i++) {
       const x = (i / leftSamples.length) * canvasWidth;
       const y = centerY - (leftSamples[i] * centerY);
@@ -240,12 +296,12 @@ function updateOscilloscope(leftSamples, rightSamples) {
     }
     oscilloscopeCtx.stroke();
   }
-  
+
   if (rightSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = '#f44336';
+    oscilloscopeCtx.strokeStyle = colors.oscRight;
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
-    
+
     for (let i = 0; i < rightSamples.length; i++) {
       const x = (i / rightSamples.length) * canvasWidth;
       const y = centerY - (rightSamples[i] * centerY);
@@ -265,62 +321,135 @@ function getBufferedSamples(buffer, head) {
   return result;
 }
 
-function updateOscilloscopeFromWaveform(waveform, hold) {
+function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
   // No waveform data and no hold signal — skip (canvas keeps previous frame)
   if (!waveform || waveform.length === 0) return;
   
-  const wave = waveform;
-  for (let i = 0; i < wave.length && i < HISTORY_SIZE; i++) {
-    leftChannelHistory[i] = wave[i];
-    rightChannelHistory[i] = wave[i];
-  }
-  for (let i = wave.length; i < HISTORY_SIZE; i++) {
-    leftChannelHistory[i] = 0;
-    rightChannelHistory[i] = 0;
+  if (waveformRight && waveformRight.length > 0) {
+    // Stereo: separate L/R waveforms
+    var waveL = waveform;
+    var waveR = waveformRight;
+    for (let i = 0; i < waveL.length && i < HISTORY_SIZE; i++) {
+      leftChannelHistory[i] = waveL[i];
+    }
+    for (let i = 0; i < waveR.length && i < HISTORY_SIZE; i++) {
+      rightChannelHistory[i] = waveR[i];
+    }
+    for (let i = waveL.length; i < HISTORY_SIZE; i++) {
+      leftChannelHistory[i] = 0;
+    }
+    for (let i = waveR.length; i < HISTORY_SIZE; i++) {
+      rightChannelHistory[i] = 0;
+    }
+  } else {
+    // Mono: same data for both channels
+    var wave = waveform;
+    for (let i = 0; i < wave.length && i < HISTORY_SIZE; i++) {
+      leftChannelHistory[i] = wave[i];
+      rightChannelHistory[i] = wave[i];
+    }
+    for (let i = wave.length; i < HISTORY_SIZE; i++) {
+      leftChannelHistory[i] = 0;
+      rightChannelHistory[i] = 0;
+    }
   }
   leftHead = 0;
   rightHead = 0;
   
-  const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
-  const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
+  var leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
+  var rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
   updateOscilloscope(leftSamples, rightSamples);
 }
 
-function updateGlitchDisplay(state, count, entropy, entropyState, flatness) {
+function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
   updateGlitchStatus(state, count);
-  
-  const entropyEl = document.getElementById('entropyValue');
-  const entropyStateEl = document.getElementById('entropyState');
-  const flatnessEl = document.getElementById('flatnessValue');
-  const entropySection = document.getElementById('entropySection');
-  
+
   if (entropySection && entropy !== undefined) {
     entropySection.style.display = 'block';
   }
-  if (entropyEl && entropy !== undefined) {
-    entropyEl.textContent = entropy.toFixed(2);
+  if (entropyValue && entropy !== undefined) {
+    entropyValue.textContent = entropy.toFixed(2);
   }
-  if (flatnessEl && flatness !== undefined) {
-    flatnessEl.textContent = flatness.toFixed(2);
+  if (flatnessValue !== null && flatness !== undefined) {
+    flatnessValue.textContent = flatness.toFixed(2);
   }
-  if (entropyStateEl && entropyState) {
-    entropyStateEl.textContent = entropyState;
-    switch (entropyState) {
+  if (entropyState !== null && entropyStateVal) {
+    entropyState.textContent = entropyStateVal;
+    const colors = tc('glitch');
+    switch (entropyStateVal) {
       case 'GLITCH':
-        entropyStateEl.style.color = '#f44336';
+        entropyState.style.color = colors.GLITCH;
         break;
       case 'DRIFT':
-        entropyStateEl.style.color = '#FF9800';
+        entropyState.style.color = colors.DRIFT;
         break;
       case 'STABLE':
       default:
-        entropyStateEl.style.color = '#4CAF50';
+        entropyState.style.color = colors.STABLE;
         break;
     }
   }
+}
+
+function drawTimeline() {
+  if (!timelineCtx || !timelineCanvas) return;
+
+  var canvasWidth = timelineCanvas.width;
+  var canvasHeight = timelineCanvas.height;
+  var padding = 5;
+  const colors = tc('canvas');
+
+  timelineCtx.fillStyle = colors.bg;
+  timelineCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+  if (glitchHistory.length < 2) return;
+
+  // Draw RMS line with color coding
+  timelineCtx.lineWidth = 1.5;
+  timelineCtx.beginPath();
+
+  for (var i = 0; i < glitchHistory.length; i++) {
+    var point = glitchHistory[i];
+    var x = (point.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
+    var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
+
+    var color;
+    switch (point.state) {
+      case 'GLITCH': color = tc('glitch').GLITCH; break;
+      case 'DRIFT': color = tc('glitch').DRIFT; break;
+      default: color = tc('glitch').STABLE; break;
+    }
+
+    if (i === 0) {
+      timelineCtx.strokeStyle = color;
+      timelineCtx.moveTo(x, y);
+    } else {
+      var prevPoint = glitchHistory[i - 1];
+      var prevX = (prevPoint.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
+      var prevY = canvasHeight - padding - (prevPoint.rms * (canvasHeight - padding * 2));
+      timelineCtx.moveTo(prevX, prevY);
+      timelineCtx.lineTo(x, y);
+      timelineCtx.stroke();
+      timelineCtx.strokeStyle = color;
+      timelineCtx.beginPath();
+      timelineCtx.moveTo(x, y);
+    }
+  }
+  timelineCtx.stroke();
+
+  // Draw 0.1 reference line
+  timelineCtx.strokeStyle = colors.timelineRef;
+  timelineCtx.lineWidth = 1;
+  timelineCtx.setLineDash([3, 3]);
+  var refY = canvasHeight - padding - (0.1 * (canvasHeight - padding * 2));
+  timelineCtx.beginPath();
+  timelineCtx.moveTo(padding, refY);
+  timelineCtx.lineTo(canvasWidth - padding, refY);
+  timelineCtx.stroke();
+  timelineCtx.setLineDash([]);
 }
 
 // Инициализация Audio Processing и сквозного проброса звука
@@ -345,8 +474,8 @@ async function initAudioProcessing(stream) {
     popupWorkletNode = new AudioWorkletNode(popupAudioContext, 'audio-analyzer', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 1,
-      channelCountMode: 'explicit',
+      channelCount: 2,
+      channelCountMode: 'max',
       channelInterpretation: 'discrete'
     });
 
@@ -363,10 +492,30 @@ async function initAudioProcessing(stream) {
       const data = event.data;
       if (data.type === 'METRICS') {
         // Обновляем RMS и эквалайзер
-        updateRMSDisplay(data.rms);
-        const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
-        updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
-        updateOscilloscopeFromWaveform(data.waveform, data.waveformHold);
+        updateRMSDisplay(data.rms, data.peakRMS);
+        
+        // Stereo: combine L+R for overall bands, or use mono data
+        var isStereoMode = data.bassRight !== undefined;
+        var combinedBass = isStereoMode
+          ? (data.bass + data.bassRight) / 2
+          : data.bass;
+        var combinedMid = isStereoMode
+          ? (data.mid + data.midRight) / 2
+          : data.mid;
+        var combinedTreble = isStereoMode
+          ? (data.treble + data.trebleRight) / 2
+          : data.treble;
+        
+        // Update channel indicator
+        if (channelIndicator) {
+          const chColors = tc('channel');
+          channelIndicator.textContent = isStereoMode ? 'STEREO' : 'MONO';
+          channelIndicator.style.color = isStereoMode ? chColors.stereo : chColors.mono;
+        }
+        
+        const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
+        updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+        updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
 
         // 🎯 ОБРАБОТКА ДЕТЕКТОРА ГЛИЧЕЙ
         currentMetrics = {
@@ -374,9 +523,25 @@ async function initAudioProcessing(stream) {
           bass: data.bass,
           mid: data.mid,
           treble: data.treble,
-          highFreqAnomaly: data.highFreqAnomaly
+          highFreqAnomaly: data.highFreqAnomaly,
+          rmsRight: data.rmsRight
         };
         updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+
+        // Запись в timeline (throttle ~5 Hz)
+        if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+        if (data.timestamp - lastTimelineRecord > 200) {
+          glitchHistory.push({
+            time: data.timestamp - CAPTURE_START_TIME,
+            rms: data.rms,
+            state: data.glitchState
+          });
+          lastTimelineRecord = data.timestamp;
+          if (glitchHistory.length > TIMELINE_MAX) {
+            glitchHistory.shift();
+          }
+        }
+        drawTimeline();
       }
     };
 
@@ -454,6 +619,33 @@ function exportGlitchLog() {
   console.log('[Glitch Log] Exported', glitchLog.length, 'entries');
 }
 
+function exportCSV() {
+  var leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
+  var rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
+
+  if (leftSamples.length === 0) {
+    alert('Нет данных. Запустите захват аудио.');
+    return;
+  }
+
+  var csv = 'timestamp_ms,left_channel,right_channel\n';
+  var ts = Date.now();
+  for (var i = 0; i < leftSamples.length; i++) {
+    csv += ts + ',' + leftSamples[i].toFixed(6) + ',' + rightSamples[i].toFixed(6) + '\n';
+  }
+
+  var blob = new Blob([csv], { type: 'text/csv' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'oscilloscope-' + Date.now() + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  console.log('[CSV Export] Exported', leftSamples.length, 'samples');
+}
+
 function sendSensitivityToWorklet(percentage) {
   if (!popupWorkletNode) return;
   const threshold = percentage / 100;
@@ -498,13 +690,49 @@ function updateMetricsFromOffscreen(data) {
     bass: data.bass,
     mid: data.mid,
     treble: data.treble,
-    highFreqAnomaly: data.highFreqAnomaly
+    highFreqAnomaly: data.highFreqAnomaly,
+    rmsRight: data.rmsRight
   };
-  updateRMSDisplay(data.rms);
-  const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
-  updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
-  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold);
+  updateRMSDisplay(data.rms, data.peakRMS);
+  
+  // Stereo: combine L+R for overall bands
+  var isStereoMode = data.bassRight !== undefined;
+  var combinedBass = isStereoMode
+    ? (data.bass + data.bassRight) / 2
+    : data.bass;
+  var combinedMid = isStereoMode
+    ? (data.mid + data.midRight) / 2
+    : data.mid;
+  var combinedTreble = isStereoMode
+    ? (data.treble + data.trebleRight) / 2
+    : data.treble;
+  
+  // Update channel indicator
+  if (channelIndicator) {
+    const chColors = tc('channel');
+    channelIndicator.textContent = isStereoMode ? 'STEREO' : 'MONO';
+    channelIndicator.style.color = isStereoMode ? chColors.stereo : chColors.mono;
+  }
+  
+  const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
+  updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
   updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+
+  // Запись в timeline (throttle ~5 Hz)
+  if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+  if (data.timestamp - lastTimelineRecord > 200) {
+    glitchHistory.push({
+      time: data.timestamp - CAPTURE_START_TIME,
+      rms: data.rms,
+      state: data.glitchState
+    });
+    lastTimelineRecord = data.timestamp;
+    if (glitchHistory.length > TIMELINE_MAX) {
+      glitchHistory.shift();
+    }
+  }
+  drawTimeline();
 }
 
 startBtn.addEventListener('click', () => {
@@ -608,6 +836,54 @@ if (exportLogBtn) {
   exportLogBtn.addEventListener('click', exportGlitchLog);
 }
 
+// Кнопка экспорта CSV осциллографа
+if (exportBtn) {
+  exportBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    exportCSV();
+  });
+  exportBtn.addEventListener('mousedown', function(e) {
+    e.stopPropagation();
+  });
+}
+
+// ============================================
+// Theme Management
+// ============================================
+
+const THEME_KEY = 'theme';
+const THEME_DEFAULT = 'dark';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  if (themeToggle) {
+    themeToggle.textContent = theme === 'dark' ? '\u263C' : '\u263E';
+  }
+  console.log('[Theme] Applied:', theme);
+}
+
+// Load saved theme on startup
+chrome.storage.local.get([THEME_KEY], (result) => {
+  const saved = result[THEME_KEY];
+  if (saved === 'dark' || saved === 'light') {
+    applyTheme(saved);
+  } else {
+    // Detect system preference
+    const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+    applyTheme(prefersLight ? 'light' : 'dark');
+  }
+});
+
+if (themeToggle) {
+  themeToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const current = getTheme();
+    const next = current === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    chrome.storage.local.set({ [THEME_KEY]: next });
+  });
+}
+
 // ============================================
 // Prevent popup closing on internal control clicks
 // ============================================
@@ -624,6 +900,10 @@ if (resetSensitivityBtn) {
 if (exportLogBtn) {
   exportLogBtn.addEventListener('click', (e) => e.stopPropagation());
 }
+if (themeToggle) {
+  themeToggle.addEventListener('click', (e) => e.stopPropagation());
+  themeToggle.addEventListener('mousedown', (e) => e.stopPropagation());
+}
 
 // Cleanup when popup closes
 window.addEventListener('beforeunload', () => {
@@ -635,3 +915,4 @@ window.addEventListener('beforeunload', () => {
     bgPort = null;
   }
 });
+ 

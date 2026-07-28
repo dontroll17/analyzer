@@ -38,7 +38,13 @@ async function startCapture() {
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
     await audioContext.audioWorklet.addModule(workletPath);
     
-    const workletNode = new AudioWorkletNode(audioContext, 'audio-analyzer');
+    const workletNode = new AudioWorkletNode(audioContext, 'audio-analyzer', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 2,
+      channelCountMode: 'max',
+      channelInterpretation: 'discrete'
+    });
     source.connect(workletNode);
     
     workletNode.port.onmessage = (event) => {

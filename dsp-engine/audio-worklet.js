@@ -42,12 +42,15 @@ class AudioAnalyzer extends AudioWorkletProcessor {
 
   calculateRMS(buffer) {
     let sum = 0;
+    let peak = 0;
     const length = buffer.length;
     for (let i = 0; i < length; i++) {
       const sample = buffer[i];
       sum += sample * sample;
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
     }
-    return Math.sqrt(sum / length);
+    return { rms: Math.sqrt(sum / length), peak };
   }
 
   /**
@@ -263,7 +266,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.frameCount++;
     this.waveformFrameCounter++;
     
-    const rms = this.calculateRMS(this.inputBuffer);
+    const { rms, peak } = this.calculateRMS(this.inputBuffer);
     const fft = this.calculateFFT(this.inputBuffer, 64);
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
@@ -291,6 +294,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       timestamp: Date.now(),
       frame: this.frameCount,
       rms: rms,
+      peakRMS: peak,
       spectrum: Array.from(fft),
       bass: bands.bass,
       mid: bands.mid,
