@@ -19,6 +19,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.leftFrameData = null;
     this.rightFrameData = null;
     
+    // Detected channel count (fixed for session)
+    this.channelCount = 0;
+    
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
     this.WAVEFORM_THROTTLE = 1; // send waveform every frame for debugging
@@ -48,7 +51,6 @@ class AudioAnalyzer extends AudioWorkletProcessor {
             event.data.highFreqThreshold >= 0.60 &&
             event.data.highFreqThreshold <= 0.90) {
           this.glitchConfig.highFreqThreshold = event.data.highFreqThreshold;
-          console.log('[AudioWorklet] Sensitivity updated:', event.data.highFreqThreshold);
         }
       }
     };
@@ -280,11 +282,6 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const input = inputs[0];
     const output = outputs[0];
     
-    // Debug: log first few frames
-    if (this.frameCount < 3) {
-      console.log('[Worklet] Frame', this.frameCount, '- input:', input ? input.length + ' channels' : 'null', '- input[0]:', input ? input[0] ? 'exists' : 'null' : 'N/A');
-    }
-    
     // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
       for (let channel = 0; channel < input.length; channel++) {
@@ -297,6 +294,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // 2. Буферизация по каналам
     // inputs[0] — массив блоков: inputs[0][0] = левый, inputs[0][1] = правый
     if (input && input.length > 0) {
+      // Определяем количество каналов при первом вызове (фиксируем на всю сессию)
+      if (this.channelCount === 0) {
+        this.channelCount = input.length;
+      }
+      
       for (let ch = 0; ch < input.length; ch++) {
         const channelData = input[ch];
         const numSamples = channelData.length;
@@ -312,9 +314,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
         }
       }
       
-      // Отправляем фрейм как только левый канал готов (он всегда есть)
-      // Правый канал — опционален (mono input даст rightReady = false)
-      if (this.leftReady) {
+      // Отправляем фрейм когда ВСЕ каналы заполнены:
+      // Mono (channelCount=1): достаточно левого
+      // Stereo (channelCount=2): нужны оба канала — иначе мерцает MONO/STEREO
+      if (this.leftReady && (this.channelCount === 1 || this.rightReady)) {
         this.processFrame();
         this.leftReady = false;
         this.rightReady = false;
@@ -416,15 +419,6 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     };
     
     if (includeWaveform) {
-      // Debug: log first few frames to verify waveform data
-      if (this.frameCount < 5) {
-        let sum = 0;
-        for (let i = 0; i < this.waveformLeft.length; i++) {
-          sum += Math.abs(this.waveformLeft[i]);
-        }
-        console.log(`[Worklet] Frame ${this.frameCount}: waveformLeft sum of abs = ${sum.toFixed(4)}, nonZero = ${this.waveformLeft.filter(v => Math.abs(v) > 0.001).length}/${this.waveformLeft.length}`);
-      }
-      
       // Create a copy BEFORE serialization — serialization converts Float32Array to plain object {0: val, 1: val}
       // Object.values() correctly extracts values in order: [val0, val1, ...]
       payload.waveform = Object.values(this.waveformLeft);
