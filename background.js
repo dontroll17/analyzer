@@ -39,7 +39,8 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('[BG]', sender.type, ':', message.type);
+  const senderType = sender?.type || (sender?.id ? 'extension' : 'unknown');
+  console.log('[BG]', senderType, ':', message.type);
   
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {

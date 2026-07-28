@@ -1,5 +1,5 @@
 # Gigacode
-.gigacode/
+.gigacode_vsc/
 
 # Chrome extension build files
 *.crx

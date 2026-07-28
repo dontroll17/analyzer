@@ -138,6 +138,18 @@ function updateUI(connected) {
     }
     if (thresholdSlider) thresholdSlider.value = 85;
     if (thresholdValue) thresholdValue.textContent = '85%';
+
+    const entropySection = document.getElementById('entropySection');
+    const entropyValue = document.getElementById('entropyValue');
+    const entropyState = document.getElementById('entropyState');
+    const flatnessValue = document.getElementById('flatnessValue');
+    if (entropySection) entropySection.style.display = 'none';
+    if (entropyValue) entropyValue.textContent = '0.00';
+    if (flatnessValue) flatnessValue.textContent = '0.00';
+    if (entropyState) {
+      entropyState.textContent = 'STABLE';
+      entropyState.style.color = '#4CAF50';
+    }
   }
 }
 
@@ -253,17 +265,62 @@ function getBufferedSamples(buffer, head) {
   return result;
 }
 
-function updateOscilloscopeFromMetrics(metrics) {
-  leftChannelHistory[leftHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
-  leftHead = (leftHead + 1) % HISTORY_SIZE;
+function updateOscilloscopeFromWaveform(waveform, hold) {
+  // Hold frame: keep current drawing, skip update
+  if (hold === true) return;
   
-  rightChannelHistory[rightHead] = metrics.rms * (Math.random() > 0.5 ? 1 : -1);
-  rightHead = (rightHead + 1) % HISTORY_SIZE;
+  // No waveform data and no hold signal — skip (canvas keeps previous frame)
+  if (!waveform || waveform.length === 0) return;
+  
+  const wave = waveform;
+  for (let i = 0; i < wave.length && i < HISTORY_SIZE; i++) {
+    leftChannelHistory[i] = wave[i];
+    rightChannelHistory[i] = wave[i];
+  }
+  for (let i = wave.length; i < HISTORY_SIZE; i++) {
+    leftChannelHistory[i] = 0;
+    rightChannelHistory[i] = 0;
+  }
+  leftHead = 0;
+  rightHead = 0;
   
   const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
   const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
-  
   updateOscilloscope(leftSamples, rightSamples);
+}
+
+function updateGlitchDisplay(state, count, entropy, entropyState, flatness) {
+  updateGlitchStatus(state, count);
+  
+  const entropyEl = document.getElementById('entropyValue');
+  const entropyStateEl = document.getElementById('entropyState');
+  const flatnessEl = document.getElementById('flatnessValue');
+  const entropySection = document.getElementById('entropySection');
+  
+  if (entropySection && entropy !== undefined) {
+    entropySection.style.display = 'block';
+  }
+  if (entropyEl && entropy !== undefined) {
+    entropyEl.textContent = entropy.toFixed(2);
+  }
+  if (flatnessEl && flatness !== undefined) {
+    flatnessEl.textContent = flatness.toFixed(2);
+  }
+  if (entropyStateEl && entropyState) {
+    entropyStateEl.textContent = entropyState;
+    switch (entropyState) {
+      case 'GLITCH':
+        entropyStateEl.style.color = '#f44336';
+        break;
+      case 'DRIFT':
+        entropyStateEl.style.color = '#FF9800';
+        break;
+      case 'STABLE':
+      default:
+        entropyStateEl.style.color = '#4CAF50';
+        break;
+    }
+  }
 }
 
 // Инициализация Audio Processing и сквозного проброса звука
@@ -309,7 +366,7 @@ async function initAudioProcessing(stream) {
         updateRMSDisplay(data.rms);
         const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
         updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
-        updateOscilloscopeFromMetrics(data);
+        updateOscilloscopeFromWaveform(data.waveform, data.waveformHold);
 
         // 🎯 ОБРАБОТКА ДЕТЕКТОРА ГЛИЧЕЙ
         currentMetrics = {
@@ -319,7 +376,7 @@ async function initAudioProcessing(stream) {
           treble: data.treble,
           highFreqAnomaly: data.highFreqAnomaly
         };
-        updateGlitchStatus(data.glitchState, data.glitchCount);
+        updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
       }
     };
 
@@ -332,7 +389,6 @@ async function initAudioProcessing(stream) {
 }
 
 function stopAudioProcessing() {
-  // Очищаем лог глитчей при остановке захвата
   glitchLog = [];
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
@@ -341,26 +397,21 @@ function stopAudioProcessing() {
     popupMediaStreamSource.disconnect();
     popupMediaStreamSource = null;
   }
-
   if (popupWorkletNode) {
     popupWorkletNode.disconnect();
     popupWorkletNode = null;
   }
-
   if (popupAudioContext) {
     popupAudioContext.close().catch(console.error);
     popupAudioContext = null;
   }
-  
   if (popupCaptureStream) {
     popupCaptureStream.getTracks().forEach(track => track.stop());
     popupCaptureStream = null;
   }
-  
   updateUI(false);
 }
 
-// Добавление записи в лог глитчей (FIFO, max 500)
 function addGlitchLogEntry(glitchCount) {
   const entry = {
     timestamp: Date.now(),
@@ -372,35 +423,27 @@ function addGlitchLogEntry(glitchCount) {
     treble: currentMetrics.treble,
     highFreqAnomaly: currentMetrics.highFreqAnomaly
   };
-  
   glitchLog.push(entry);
-  
-  // FIFO: удаляем старые записи, если превышен лимит
   if (glitchLog.length > GLITCH_LOG_MAX) {
     glitchLog.shift();
   }
-  
   console.log('[Glitch Log] Entry added. Total entries:', glitchLog.length);
 }
 
-// Экспорт лога глитчей в JSON
 function exportGlitchLog() {
   if (glitchLog.length === 0) {
     alert('Лог глитчей пуст. Запустите захват аудио и дождитесь срабатывания детектора.');
     return;
   }
-  
   const exportData = {
     exportDate: new Date().toISOString(),
     totalGlitches: glitchLog.length,
     maxEntries: GLITCH_LOG_MAX,
     entries: glitchLog
   };
-  
   const jsonStr = JSON.stringify(exportData, null, 2);
   const blob = new Blob([jsonStr], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  
   const a = document.createElement('a');
   a.href = url;
   a.download = `glitch-log-${Date.now()}.json`;
@@ -408,36 +451,26 @@ function exportGlitchLog() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  
   console.log('[Glitch Log] Exported', glitchLog.length, 'entries');
 }
 
-// Отправка настроек чувствительности в AudioWorklet
 function sendSensitivityToWorklet(percentage) {
   if (!popupWorkletNode) return;
-  
   const threshold = percentage / 100;
   popupWorkletNode.port.postMessage({
     type: 'SET_GITCH_CONFIG',
     highFreqThreshold: threshold
   });
-  
   console.log('[Sensitivity] Updated highFreqThreshold:', threshold);
 }
-
-// ============================================
-// Захват звука через offscreen document
-// ============================================
 
 let captureActive = false;
 let bgPort = null;
 
-// Establish persistent connection to background for metrics relay
 function connectToBackground() {
-  if (bgPort) return; // Already connected
+  if (bgPort) return;
   bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
   console.log('[Popup] Connected to background');
-  
   bgPort.onMessage.addListener((data) => {
     if (data && data.type === 'METRICS') {
       updateMetricsFromOffscreen(data);
@@ -451,21 +484,13 @@ function connectToBackground() {
       startBtn.disabled = false;
     }
   });
-  
   bgPort.onDisconnect.addListener(() => {
     console.log('[Popup] Background connection lost');
     bgPort = null;
   });
 }
 
-// Connect on load
 connectToBackground();
-
-// Keep popup alive during capture (prevent auto-close)
-if (captureActive) {
-  document.addEventListener('click', (e) => e.stopPropagation());
-  document.addEventListener('mousedown', (e) => e.stopPropagation());
-}
 
 function updateMetricsFromOffscreen(data) {
   currentMetrics = {
@@ -478,8 +503,8 @@ function updateMetricsFromOffscreen(data) {
   updateRMSDisplay(data.rms);
   const maxVal = Math.max(data.bass, data.mid, data.treble, 1);
   updateFrequencyBands(data.bass, data.mid, data.treble, maxVal);
-  updateOscilloscopeFromMetrics(data);
-  updateGlitchStatus(data.glitchState, data.glitchCount);
+  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold);
+  updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
 }
 
 startBtn.addEventListener('click', () => {
@@ -534,6 +559,22 @@ chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
 // Slider & Sensitivity Controls
 // ============================================
 
+const SENSITIVITY_KEY = 'glitchSensitivity';
+const SENSITIVITY_DEFAULT = 85;
+
+// Load saved sensitivity on startup
+chrome.storage.local.get([SENSITIVITY_KEY], (result) => {
+  const saved = result[SENSITIVITY_KEY];
+  if (typeof saved === 'number' && saved >= 60 && saved <= 90) {
+    if (thresholdSlider) thresholdSlider.value = saved;
+    if (thresholdValue) thresholdValue.textContent = saved + '%';
+    console.log('[Sensitivity] Loaded from storage:', saved);
+  } else if (thresholdSlider) {
+    thresholdSlider.value = SENSITIVITY_DEFAULT;
+    if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
+  }
+});
+
 // Обновление значения слайдера
 if (thresholdSlider) {
   thresholdSlider.addEventListener('input', (e) => {
@@ -543,16 +584,22 @@ if (thresholdSlider) {
     }
     // Отправляем настройку в AudioWorklet в реальном времени
     sendSensitivityToWorklet(parseInt(value));
+    // Сохраняем настройку
+    chrome.storage.local.set({ [SENSITIVITY_KEY]: parseInt(value) }, () => {
+      console.log('[Sensitivity] Saved:', value);
+    });
   });
 }
 
 // Кнопка сброса чувствительности
 if (resetSensitivityBtn) {
   resetSensitivityBtn.addEventListener('click', () => {
-    if (thresholdSlider) thresholdSlider.value = 85;
-    if (thresholdValue) thresholdValue.textContent = '85%';
-    sendSensitivityToWorklet(85);
-    console.log('[Sensitivity] Reset to default: 85%');
+    if (thresholdSlider) thresholdSlider.value = SENSITIVITY_DEFAULT;
+    if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
+    sendSensitivityToWorklet(SENSITIVITY_DEFAULT);
+    chrome.storage.local.set({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT }, () => {
+      console.log('[Sensitivity] Reset and saved:', SENSITIVITY_DEFAULT);
+    });
   });
 }
 

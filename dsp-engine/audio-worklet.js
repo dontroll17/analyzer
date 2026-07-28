@@ -6,6 +6,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.inputBuffer = new Float32Array(this.bufferSize);
     this.bufferCount = 0;
     this.frameCount = 0;
+    this.waveformFrameCounter = 0;
+    this.WAVEFORM_THROTTLE = 4; // send waveform every 4 frames ≈ 10 Hz at 43 fps
     
     // Используем штатную глобальную переменную sampleRate воркета
     this.sampleRate = typeof sampleRate !== 'undefined' ? sampleRate : 44100;
@@ -67,6 +69,61 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     }
     
     return bins;
+  }
+
+  calculateBandEntropy(fftData) {
+    // 4-band entropy: Bass(0-350Hz) | Voice(350-2000Hz) | Speech(2000-6000Hz) | Noise(6000-22050Hz)
+    // Bass must include bin 0 (0-344Hz) since FFT resolution is ~344Hz/bin
+    const numBins = fftData.length;
+    const nyquist = this.sampleRate / 2;
+    const binWidth = nyquist / numBins;
+    
+    const boundaries = [350, 2000, 6000, nyquist];
+    const edges = [0, ...boundaries.slice(0, -1)];
+    
+    let bandEnergies = [];
+    let totalEnergy = 0;
+    
+    for (let b = 0; b < 4; b++) {
+      const startBin = Math.floor(edges[b] / binWidth);
+      const endBin = Math.min(numBins, Math.floor(boundaries[b] / binWidth));
+      let energy = 0;
+      for (let i = startBin; i < endBin; i++) {
+        energy += fftData[i] * fftData[i];
+      }
+      bandEnergies.push(energy);
+      totalEnergy += energy;
+    }
+    
+    if (totalEnergy < 1e-10) return 0;
+    
+    let entropy = 0;
+    for (let i = 0; i < 4; i++) {
+      if (bandEnergies[i] < 1e-10) continue;
+      const p = bandEnergies[i] / totalEnergy;
+      entropy -= p * Math.log2(p);
+    }
+    return { entropy, bandEnergies, totalEnergy };
+  }
+
+  detectSpectralFlatness(fftData) {
+    // How "flat" the spectrum is — noise has flat spectrum, voice/music has peaks
+    // Returns [0..1]: 0 = tonal (peaks), 1 = flat (noise)
+    const n = fftData.length;
+    let arithmeticMean = 0;
+    let geometricMean = 0;
+    let logSum = 0;
+    
+    for (let i = 0; i < n; i++) {
+      const power = fftData[i] * fftData[i];
+      arithmeticMean += power;
+      if (power > 1e-10) logSum += Math.log(power);
+    }
+    arithmeticMean /= n;
+    geometricMean = n > 0 ? Math.exp(logSum / n) : 0;
+    
+    if (arithmeticMean < 1e-10) return 0;
+    return geometricMean / arithmeticMean;
   }
 
   calculateFrequencyBands(fftData) {
@@ -204,6 +261,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
 
   processFrame() {
     this.frameCount++;
+    this.waveformFrameCounter++;
     
     const rms = this.calculateRMS(this.inputBuffer);
     const fft = this.calculateFFT(this.inputBuffer, 64);
@@ -211,7 +269,24 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
     const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
     
-    this.port.postMessage({
+    // 4-band entropy + spectral flatness for robust detection
+    const bandEnt = this.calculateBandEntropy(fft);
+    const flatness = this.detectSpectralFlatness(fft);
+    const entropy = bandEnt.entropy;
+    
+    // Voice: concentrated in Voice+Speech bands, NOT flat → STABLE/DRIFT
+    // Noise: spread across all 4 bands + flat spectrum → GLITCH
+    // Music: Bass/Voice dominant → STABLE
+    let entropyState = 'STABLE';
+    if (entropy > 1.5 && flatness > 0.4) {
+      entropyState = 'GLITCH';
+    } else if (entropy > 1.0 || (flatness > 0.6 && entropy > 0.8)) {
+      entropyState = 'DRIFT';
+    }
+    
+    // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
+    const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
+    const payload = {
       type: 'METRICS',
       timestamp: Date.now(),
       frame: this.frameCount,
@@ -221,10 +296,21 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       mid: bands.mid,
       treble: bands.treble,
       highFreqAnomaly: highFreqAnomaly,
+      entropy: entropy,
+      flatness: flatness,
+      entropyState: entropyState,
       isGlitch: glitchInfo.isGlitch,
       glitchState: glitchInfo.state,
       glitchCount: this.glitchCount
-    });
+    };
+    
+    if (includeWaveform) {
+      payload.waveform = Array.from(this.inputBuffer);
+    } else {
+      payload.waveformHold = true;
+    }
+    
+    this.port.postMessage(payload);
   }
 }
 
