@@ -15,7 +15,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       highFreqThreshold: 0.85,      // Подняли с 0.75 до 0.85 (речь не перевалит за 85%)
       minTotalEnergy: 0.04,         // Игнорируем вдохи и тихий фон (RMS < 0.04)
       debounceTimeout: 800,         // Таймаут между глитчами
-      warningThreshold: 0.70,       // Предупреждение с 70%
+      driftThreshold: 0.70,         // DRIFT (бывш. WARNING) с 70%
       requiredConsecutiveFrames: 2  // Требуем 2 кадра аномалии подряд!
     };
 
@@ -24,6 +24,18 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.glitchState = 'STABLE';
     this.glitchCount = 0;
     this.lastGlitchTime = 0;
+    
+    // Обработка сообщений из main thread (настройки чувствительности)
+    this.port.onmessage = (event) => {
+      if (event.data && event.data.type === 'SET_GITCH_CONFIG') {
+        if (typeof event.data.highFreqThreshold === 'number' &&
+            event.data.highFreqThreshold >= 0.60 &&
+            event.data.highFreqThreshold <= 0.90) {
+          this.glitchConfig.highFreqThreshold = event.data.highFreqThreshold;
+          console.log('[AudioWorklet] Sensitivity updated:', event.data.highFreqThreshold);
+        }
+      }
+    };
   }
 
   calculateRMS(buffer) {
@@ -148,10 +160,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Сбрасываем счетчик последовательных кадров, если всплеск прекратился
     this.consecutiveGlitchFrames = 0;
 
-    // 3. Проверка на предупреждение (WARNING)
-    if (highFreqRatio >= config.warningThreshold) {
-    this.glitchState = 'WARNING';
-    return { isGlitch: false, state: 'WARNING' };
+    // 3. Проверка на DRIFT (бывш. WARNING)
+    if (highFreqRatio >= config.driftThreshold) {
+    this.glitchState = 'DRIFT';
+    return { isGlitch: false, state: 'DRIFT' };
     }
 
     this.glitchState = 'STABLE';
