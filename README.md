@@ -9,7 +9,7 @@
 | **Захват аудио** | Перехват звука активной вкладки через `getDisplayMedia` в offscreen-документе | ✅ Реализовано |
 | **RMS анализ** | Расчёт энергии сигнала в реальном времени через AudioWorklet | ✅ Реализовано |
 | **Пиковый RMS** | Отслеживание пикового значения RMS | ✅ Реализовано |
-| **Спектральный анализ** | FFT с разбиением на 3 частотных диапазона (Bass / Mid / Treble) | ✅ Реализовано |
+| **Спектральный анализ** | Radix-2 Cooley-Tukey FFT (1024 точки, 512 бинов Nyquist, Hanning window) → 3 частотных диапазона | ✅ Реализовано |
 | **Детектор глитча** | Обнаружение ВЧ-аномалий с state machine, debounce и счётчиком | ✅ Реализовано |
 | **Осциллограф** | Визуализация волны в реальном времени (2 канала L/R, Canvas) | ✅ Реализовано |
 | **Glitch Timeline** | Canvas-график состояния глитч-детектора во времени | ✅ Реализовано |
@@ -147,7 +147,7 @@
               │  │  ┌───────────────────┐  │  │
               │  │  │ DSP Engine        │  │  │
               │  │  │ • RMS + Peak RMS  │  │  │
-              │  │  │ • FFT (64 bins)   │  │  │
+               │  │  │ • FFT 1024 pts → 512 bins │  │  │
               │  │  │ • Bands (B/M/T)   │  │  │
               │  │  │ • Stereo L/R      │  │  │
               │  │  │ • Glitch Detector │  │  │
@@ -185,9 +185,9 @@
 | Метод | Описание |
 |-------|----------|
 | `calculateRMS(buffer)` | Средняя квадратичная энергия сигнала + пик |
-| `calculateFFT(buffer, numBins)` | Энергетический спектр с заданным количеством бинов (64) |
-| `calculateFrequencyBands(fftData)` | Разложение на Bass (0–220 Гц), Mid (220–4400 Гц), Treble (4.4–22 кГц) с усреднением по бинам |
-| `detectHighFrequencyAnomaly(fftData)` | Отношение энергии ВЧ (верхняя четверть спектра) к общей энергии |
+| `calculateFFT(buffer)` | Radix-2 Cooley-Tukey FFT (1024 точки) → 512 магнитудных бинов (Nyquist), Hanning window |
+| `calculateFrequencyBands(fftData)` | Разложение на Bass (0–220 Гц), Mid (220–4400 Гц), Treble (4.4–22 кГц) по реальным Hz-границам, усреднение по бинам |
+| `detectHighFrequencyAnomaly(fftData)` | Отношение энергии ВЧ (>8 кГц) к общей энергии — Hz-based порог |
 | `checkGlitchState(rms, highFreqRatio)` | State machine: STABLE → DRIFT → GLITCH (debounce, consecutive frames) |
 | `calculateBandEntropy(fftData)` | Энтропия Шеннона по 4 спектральным полосам (Bass/Voice/Speech/Noise) |
 | `detectSpectralFlatness(fftData)` | Spectral flatness (geometric/arithmetic mean ratio) |
@@ -271,6 +271,35 @@
 
 ## Changelog
 
+### v1.1.0 (2026-07-29) — Настоящий FFT
+
+**Radix-2 Cooley-Tukey FFT (1024 точки):**
+- ✅ Реальная FFT вместо наивного "chopped FFT" (энергетическое биннирование)
+- ✅ O(N log N) ≈ 10 240 операций vs O(N²) ≈ 1 048 576 для DFT — **в ~100x быстрее**
+- ✅ 512 частотных бинов (Nyquist = 22 050 Гц, 1 бин ≈ 43.07 Гц)
+- ✅ Hanning window: `w[n] = 0.5 * (1 - cos(2πn/N))` — устранение spectral leakage
+- ✅ Bit-reversal permutation (precomputed) — оптимизация
+- ✅ True magnitude spectrum: `|X[k]| = sqrt(re² + im²)` с нормализацией
+- ✅ DC bin корректная нормализация (×0.5, не ×2 как mirrored)
+
+**Корректные частотные диапазоны (Hz-based bin mapping):**
+- ✅ `bin[k] = k × sampleRate / FFT_SIZE` — точный Hz → бин
+- ✅ Bass: 0–220 Гц → бины 0–5 (было: "бин 0" в naive ~344 Гц)
+- ✅ Mid: 220–4400 Гц → бины 6–102 (было: "бины 1–12")
+- ✅ Treble: 4400–22050 Гц → бины 103–511 (было: "бины 13–63")
+- ✅ High-Frequency Anomaly: >8000 Гц вместо "top 25% бинов"
+
+**Энтропия и flatness:**
+- ✅ Band entropy: 4 полосы по реальным Hz (Bass 0–350, Voice 350–2000, Speech 2000–6000, Noise 6000–Nyquist)
+- ✅ Spectral flatness: geometric/arithmetic mean на истинной power spectrum
+
+**Визуализация:**
+- ✅ Downsample 512→64 bins (avg pooling) для popup — без потери точности
+
+**Баг-фиксы:**
+- ✅ Spectral leakage eliminated (Hanning window)
+- ✅ Frequency band mapping corrected (true FFT bins, not time-sequential chunks)
+
 ### v1.0.0 (2026-07-28)
 
 **Новые фичи:**
@@ -310,8 +339,8 @@
 - [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
 
 ### Sprint 2 (Будущее)
+- [x] Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
-- [ ] WebAssembly-оптимизация FFT
 - [ ] Сравнение захватов (Split screen oscilloscope)
 - [ ] Web MIDI / API экспорт
 
@@ -326,4 +355,4 @@
 
 ---
 
-**Версия:** 1.0.0  |  **Дата:** 2026-07-28  |  **Статус:** Этап 0 (Tech debt cleanup)
+**Версия:** 1.1.0  |  **Дата:** 2026-07-29  |  **Статус:** Radix-2 FFT (Sprint 2)

@@ -1,3 +1,102 @@
+// ============================================================
+// Real FFT: radix-2 Cooley-Tukey DIT (1024 points, real input)
+// O(N log N) instead of O(N²) naive DFT — ~200x faster for N=1024
+// ============================================================
+const FFT_SIZE = 1024;
+const HALF_N = FFT_SIZE / 2; // 512 frequency bins (Nyquist)
+
+// Precomputed Hanning window: w[n] = 0.5 * (1 - cos(2πn/N))
+// Eliminates spectral leakage at frame boundaries
+const HANNING = new Float32Array(FFT_SIZE);
+for (let i = 0; i < FFT_SIZE; i++) {
+  HANNING[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / FFT_SIZE));
+}
+
+// Precomputed bit-reversal permutation table
+const BIT_REVERSE = new Uint16Array(FFT_SIZE);
+{
+  const bits = Math.log2(FFT_SIZE); // 10
+  for (let i = 0; i < FFT_SIZE; i++) {
+    let rev = 0;
+    for (let j = 0; j < bits; j++) {
+      rev = (rev << 1) | ((i >> j) & 1);
+    }
+    BIT_REVERSE[i] = rev;
+  }
+}
+
+/**
+ * In-place radix-2 FFT (DIT) — real input → complex output
+ * Uses precomputed tables: BIT_REVERSE for permutation, HANNING for windowing.
+ * Output: Float32Array of size 2*N interleaved [re0, im0, re1, im1, ..., reN-1, imN-1]
+ * For real input, bins k and (N-k) are conjugate symmetric — only first N/2 are unique.
+ */
+function fftReal1024(input) {
+  const N = FFT_SIZE;
+  const tmp = new Float32Array(2 * N); // [re, im] interleaved
+
+  // 1) Apply Hanning window
+  for (let i = 0; i < N; i++) {
+    tmp[2 * i] = input[i] * HANNING[i]; // re: real part
+    tmp[2 * i + 1] = 0;                 // im: imaginary part = 0
+  }
+
+  // 2) Bit-reversal permutation
+  const perm = new Float32Array(2 * N);
+  for (let i = 0; i < N; i++) {
+    const j = BIT_REVERSE[i];
+    perm[2 * i] = tmp[2 * j];
+    perm[2 * i + 1] = tmp[2 * j + 1];
+  }
+
+  // 3) Cooley-Tukey iterative DIT FFT
+  let m = 2; // sub-DFT size: 2, 4, 8, ..., 1024
+  while (m <= N) {
+    const halfM = m >> 1;
+    const angle = -2 * Math.PI / m;
+    const wRe = Math.cos(angle);
+    const wIm = Math.sin(angle);
+
+    for (let k = 0; k < N; k += m) {
+      let wReCur = 1;
+      let wImCur = 0;
+      for (let j = 0; j < halfM; j++) {
+        const tRe = wReCur * perm[2 * (k + halfM + j)] - wImCur * perm[2 * (k + halfM + j) + 1];
+        const tIm = wReCur * perm[2 * (k + halfM + j) + 1] + wImCur * perm[2 * (k + halfM + j)];
+        
+        const uRe = perm[2 * (k + j)];
+        const uIm = perm[2 * (k + j) + 1];
+        
+        perm[2 * (k + j)] = uRe + tRe;
+        perm[2 * (k + j) + 1] = uIm + tIm;
+        perm[2 * (k + halfM + j)] = uRe - tRe;
+        perm[2 * (k + halfM + j) + 1] = uIm - tIm;
+      }
+
+      // Twiddle factor multiplication (recursive update)
+      const newWRe = wRe * wReCur - wIm * wImCur;
+      const newWIm = wRe * wImCur + wIm * wReCur;
+      wReCur = newWRe;
+      wImCur = newWIm;
+    }
+    m <<= 1;
+  }
+
+  // 4) Extract magnitude spectrum: |X[k]| = sqrt(re² + im²)
+  //    Only first N/2 bins are unique (symmetric for real input)
+  const magnitude = new Float32Array(HALF_N);
+  const scale = 2.0 / N; // normalization factor
+  for (let k = 0; k < HALF_N; k++) {
+    const re = perm[2 * k];
+    const im = perm[2 * k + 1];
+    magnitude[k] = Math.sqrt(re * re + im * im) * scale;
+  }
+  // DC bin (k=0) is not doubled — only bins 1..N/2-1 are mirrored
+  magnitude[0] *= 0.5;
+
+  return magnitude;
+}
+
 class AudioAnalyzer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -10,8 +109,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.waveformLeft = new Float32Array(this.bufferSize);
     this.waveformRight = new Float32Array(this.bufferSize);
     
-    // Pre-allocate combinedFFT buffer (buffer pooling — zero GC per frame)
-    this.combinedFFT = new Float32Array(64);
+    // Pre-allocate combinedFFT buffer (512 bins for 1024-point FFT — zero GC per frame)
+    this.combinedFFT = new Float32Array(HALF_N);
     
     // State per channel
     this.leftReady = false;
@@ -70,44 +169,59 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
-   * Оптимизированный спектральный анализ (64 бина)
-   * Убирает зависания UI и лаги в воркете
+   * Настоящий radix-2 FFT (1024 точки) → 512 магнитудных бинов (0..Nyquist)
+   * O(N log N) вместо O(N²) naive DFT — в ~200x быстрее для N=1024
+   * 
+   * С применением Hanning window для устранения spectral leakage
+   * 
+   * @param {Float32Array} buffer — 1024 сэмпла
+   * @returns {Float32Array} magnitude spectrum, 512 бинов, |X[k]|
    */
-  calculateFFT(buffer, numBins = 64) {
-    const bins = new Float32Array(numBins);
-    const step = Math.floor(buffer.length / numBins);
+  calculateFFT(buffer) {
+    return fftReal1024(buffer);
+  }
 
-    for (let bin = 0; bin < numBins; bin++) {
+  /**
+   * Преобразует Hz в индекс бина: bin[k] = k * sampleRate / FFT_SIZE
+   * @param {number} hz — частота в Гц
+   * @returns {number} индекс бина
+   */
+  _hzToBin(hz) {
+    return Math.floor(hz * FFT_SIZE / this.sampleRate);
+  }
+
+  /**
+   * Downsample 512 true FFT bins → 64 bins for popup visualization
+   * Uses averaging (mean magnitude) per group — preserves energy distribution.
+   */
+  _downsampleSpectrum(source) {
+    const out = new Float32Array(64);
+    const groupSize = source.length / 64; // 8
+    for (let g = 0; g < 64; g++) {
       let sum = 0;
-      const start = bin * step;
-      for (let i = 0; i < step; i++) {
-        const sample = buffer[start + i];
-        sum += sample * sample;
+      for (let i = 0; i < groupSize; i++) {
+        sum += source[g * groupSize + i];
       }
-      bins[bin] = Math.sqrt(sum / step);
+      out[g] = sum / groupSize;
     }
-    
-    return bins;
+    return out;
   }
 
   calculateBandEntropy(fftData) {
-    // 4-band entropy: Bass(0-350Hz) | Voice(350-2000Hz) | Speech(2000-6000Hz) | Noise(6000-22050Hz)
-    // Bass must include bin 0 (0-344Hz) since FFT resolution is ~344Hz/bin
-    const numBins = fftData.length;
-    const nyquist = this.sampleRate / 2;
-    const binWidth = nyquist / numBins;
-    
-    const boundaries = [350, 2000, 6000, nyquist];
+    // 4-band entropy с реальными Hz границами:
+    // Bass(0-350Hz) | Voice(350-2000Hz) | Speech(2000-6000Hz) | Noise(6000-Nyquist)
+    const boundaries = [350, 2000, 6000, this.sampleRate / 2];
     const edges = [0, ...boundaries.slice(0, -1)];
     
     let bandEnergies = [];
     let totalEnergy = 0;
     
     for (let b = 0; b < 4; b++) {
-      const startBin = Math.floor(edges[b] / binWidth);
-      const endBin = Math.min(numBins, Math.floor(boundaries[b] / binWidth));
+      const startBin = this._hzToBin(edges[b]);
+      const endBin = this._hzToBin(boundaries[b]);
+      const clampedEnd = Math.min(fftData.length, endBin);
       let energy = 0;
-      for (let i = startBin; i < endBin; i++) {
+      for (let i = startBin; i < clampedEnd; i++) {
         energy += fftData[i] * fftData[i];
       }
       bandEnergies.push(energy);
@@ -126,11 +240,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   detectSpectralFlatness(fftData) {
-    // How "flat" the spectrum is — noise has flat spectrum, voice/music has peaks
-    // Returns [0..1]: 0 = tonal (peaks), 1 = flat (noise)
+    // Spectral flatness (Wiener entropy): ratio of geometric to arithmetic mean of power spectrum
+    // Returns [0..1]: 0 = tonal (peaks), 1 = flat (white noise)
+    // Uses true FFT power spectrum (magnitude²)
     const n = fftData.length;
     let arithmeticMean = 0;
-    let geometricMean = 0;
     let logSum = 0;
     
     for (let i = 0; i < n; i++) {
@@ -139,67 +253,65 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       if (power > 1e-10) logSum += Math.log(power);
     }
     arithmeticMean /= n;
-    geometricMean = n > 0 ? Math.exp(logSum / n) : 0;
+    const geometricMean = n > 0 ? Math.exp(logSum / n) : 0;
     
     if (arithmeticMean < 1e-10) return 0;
     return geometricMean / arithmeticMean;
   }
 
   calculateFrequencyBands(fftData) {
-    const numBins = fftData.length; // 64
+    // Реальные FFT бины → частоты: bin[k] = k * sampleRate / FFT_SIZE
+    // sampleRate=44100, FFT_SIZE=1024 → 1 бин ≈ 43.07 Hz
     const nyquist = this.sampleRate / 2; // 22050 Hz
-    const binWidth = nyquist / numBins; // ~344.5 Hz per bin
-  
-    // Точный расчет индексов бинов по частотам Гц:
-  // Bass: 0 - 220 Hz  -> бин 0
-  // Mid: 220 - 4400 Hz -> бины 1..12
-  // Treble: 4400 - 22000 Hz -> бины 13..63
-    const bassEnd = Math.max(1, Math.floor(220 / binWidth));
-    const midEnd = Math.min(numBins - 1, Math.floor(4400 / binWidth));
-  
+
+    const bassEnd = this._hzToBin(220);       // 0-220 Hz → бины 0..5
+    const midEnd = this._hzToBin(4400);       // 220-4400 Hz → бины 6..102
+    const trebleStart = midEnd;               // 4400-22050 Hz → бины 103..511
+
     let bassSum = 0, bassCount = 0;
     let midSum = 0, midCount = 0;
     let trebleSum = 0, trebleCount = 0;
-  
-    for (let i = 0; i < numBins; i++) {
-    const energy = fftData[i] * fftData[i];
-    if (i < bassEnd) {
-      bassSum += energy;
-      bassCount++;
-    } else if (i < midEnd) {
-      midSum += energy;
-      midCount++;
-    } else {
-      trebleSum += energy;
-      trebleCount++;
+
+    for (let i = 0, n = fftData.length; i < n; i++) {
+      const energy = fftData[i] * fftData[i];
+      if (i < bassEnd) {
+        bassSum += energy;
+        bassCount++;
+      } else if (i < trebleStart) {
+        midSum += energy;
+        midCount++;
+      } else {
+        trebleSum += energy;
+        trebleCount++;
+      }
     }
-    }
-  
-    // Усредняем энергию на один бин, чтобы 48 бинов ВЧ не перевешивали 12 бинов СЧ
+
+    // Усредняем энергию на один бин, чтобы treble (409 бинов) не перевешивал bass (6 бинов)
     const bassAvg = bassCount > 0 ? bassSum / bassCount : 0;
     const midAvg = midCount > 0 ? midSum / midCount : 0;
     const trebleAvg = trebleCount > 0 ? trebleSum / trebleCount : 0;
-  
+
     const totalAvg = bassAvg + midAvg + trebleAvg;
-  
+
     const normalize = (val) => totalAvg > 0 ? (val / totalAvg) * 100 : 0;
-  
+
     return {
-    bass: normalize(bassAvg),
-    mid: normalize(midAvg),
-    treble: normalize(trebleAvg)
+      bass: normalize(bassAvg),
+      mid: normalize(midAvg),
+      treble: normalize(trebleAvg)
     };
   }
 
   detectHighFrequencyAnomaly(fftData) {
+    const nyquist = this.sampleRate / 2;
+    // Верхние 8 кГц: реальный Hz-based порог вместо "top 25% бинов"
+    const hfStart = this._hzToBin(8000);
+    
     const totalEnergy = fftData.reduce((sum, val) => sum + val * val, 0);
     if (totalEnergy < 1e-10) return 0;
     
-    // Верхняя четверть спектра (для 64 бинов это бины 48-63)
     let highFreqEnergy = 0;
-    const startBin = Math.floor(fftData.length * 0.75);
-    
-    for (let i = startBin; i < fftData.length; i++) {
+    for (let i = hfStart; i < fftData.length; i++) {
       highFreqEnergy += fftData[i] * fftData[i];
     }
     
@@ -269,7 +381,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   processChannelFrame(ch) {
     const buffer = this.inputBuffers[ch];
     const { rms, peak } = this.calculateRMS(buffer);
-    const fft = this.calculateFFT(buffer, 64);
+    const fft = this.calculateFFT(buffer);
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
     const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
@@ -409,7 +521,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
     
     // Use new Float32Array() instead of Array.from() — single memcpy, no boxing
-    const spectrumCopy = new Float32Array(this.combinedFFT);
+    // Downsample 512 true FFT bins → 64 bins for popup visualization
+    const spectrumCopy = this._downsampleSpectrum(this.combinedFFT);
     
     const payload = {
       type: 'METRICS',
