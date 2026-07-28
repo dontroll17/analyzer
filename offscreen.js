@@ -48,9 +48,12 @@ async function startCapture() {
     const audioTracks = mediaStream.getAudioTracks();
     
     if (audioTracks.length === 0) {
-      console.error('[Offscreen] NO AUDIO TRACKS! Check "Share tab audio"');
-    } else {
-      console.log('[Offscreen] Audio track:', audioTracks[0].readyState);
+      chrome.runtime.sendMessage({
+        type: '_OFFSCREEN_ERROR',
+        error: 'No audio tracks — make sure to check "Share tab audio"'
+      });
+      cleanup();
+      return { ok: false, error: 'no_audio_tracks' };
     }
     
     audioContext = new AudioContext({ sampleRate: 44100 });
@@ -86,7 +89,21 @@ async function startCapture() {
     
     return { ok: true };
   } catch (error) {
-    console.error('[Offscreen] Error:', error);
+    // User cancelled the share dialog
+    if (error.name === 'NotAllowedError') {
+      chrome.runtime.sendMessage({
+        type: '_OFFSCREEN_ERROR',
+        error: 'User denied tab capture'
+      });
+      return { ok: false, error: 'capture_denied' };
+    }
+    
+    // Other errors (permission, not available, etc.)
+    chrome.runtime.sendMessage({
+      type: '_OFFSCREEN_ERROR',
+      error: error.message || 'Unknown capture error'
+    });
+    
     cleanup();
     return { ok: false, error: error.message };
   }

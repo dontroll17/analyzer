@@ -456,4 +456,4 @@ window.addEventListener('beforeunload', () => {
   if (styleEl) styleEl.remove();
 });
 
-console.log('[SSA] Content script loaded');
+

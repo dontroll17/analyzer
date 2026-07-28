@@ -206,42 +206,58 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     return highFreqEnergy / totalEnergy;
   }
 
+  /**
+   * Glitch detection state machine
+   * States: STABLE → DRIFT → GLITCH (transitions based on highFreqRatio + rms)
+   * 
+   * Transition logic:
+   * 1. rms < minTotalEnergy → STABLE (ignore silence/breaths/quiet noise)
+   * 2. highFreqRatio >= highFreqThreshold → count consecutive frames
+   *    → if consecutive >= requiredConsecutiveFrames AND debounce timeout → GLITCH
+   * 3. highFreqRatio >= driftThreshold (but < highFreqThreshold) → DRIFT
+   * 4. Otherwise → STABLE (reset consecutive counter)
+   * 
+   * @param {number} rms - Root mean square energy (0–1)
+   * @param {number} highFreqRatio - Ratio of high-frequency energy to total energy (0–1)
+   * @returns {{ isGlitch: boolean, state: string }} Current state info
+   */
   checkGlitchState(rms, highFreqRatio) {
     const config = this.glitchConfig;
     const now = Date.now();
 
-    // 1. Игнорируем тишину, вдохи и мягкий фоновый шум
+    // 1. Silence threshold: ignore quiet signals (breaths, background noise)
     if (rms < config.minTotalEnergy) {
-    this.consecutiveGlitchFrames = 0;
-    this.glitchState = 'STABLE';
-    return { isGlitch: false, state: 'STABLE' };
+      this.consecutiveGlitchFrames = 0;
+      this.glitchState = 'STABLE';
+      return { isGlitch: false, state: 'STABLE' };
     }
 
-    // 2. Проверка на глитч
+    // 2. GLITCH detection: high-frequency anomaly for N consecutive frames
     if (highFreqRatio >= config.highFreqThreshold) {
-    this.consecutiveGlitchFrames++;
-    
-    // Фиксируем глитч ТОЛЬКО если аномалия длится несколько кадров подряд
-    if (this.consecutiveGlitchFrames >= config.requiredConsecutiveFrames) {
-      if (now - this.lastGlitchTime > config.debounceTimeout) {
-        this.glitchCount++;
-        this.lastGlitchTime = now;
-        this.glitchState = 'GLITCH';
-        return { isGlitch: true, state: 'GLITCH' };
+      this.consecutiveGlitchFrames++;
+      
+      // Only count glitch if anomaly lasts for requiredConsecutiveFrames
+      if (this.consecutiveGlitchFrames >= config.requiredConsecutiveFrames) {
+        if (now - this.lastGlitchTime > config.debounceTimeout) {
+          this.glitchCount++;
+          this.lastGlitchTime = now;
+          this.glitchState = 'GLITCH';
+          return { isGlitch: true, state: 'GLITCH' };
+        }
       }
-    }
-    return { isGlitch: false, state: this.glitchState };
+      return { isGlitch: false, state: this.glitchState };
     }
 
-    // Сбрасываем счетчик последовательных кадров, если всплеск прекратился
+    // Reset consecutive frame counter when anomaly ends
     this.consecutiveGlitchFrames = 0;
 
-    // 3. Проверка на DRIFT (бывш. WARNING)
+    // 3. DRIFT detection: elevated high-frequency energy (below glitch threshold)
     if (highFreqRatio >= config.driftThreshold) {
-    this.glitchState = 'DRIFT';
-    return { isGlitch: false, state: 'DRIFT' };
+      this.glitchState = 'DRIFT';
+      return { isGlitch: false, state: 'DRIFT' };
     }
 
+    // 4. Back to STABLE
     this.glitchState = 'STABLE';
     return { isGlitch: false, state: 'STABLE' };
   }

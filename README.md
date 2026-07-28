@@ -22,6 +22,12 @@
 | **Stereo разделение** | Отдельные L/R буферы, метрики и осциллограф для каждого канала | ✅ Реализовано |
 | **Тёмная/светлая тема** | CSS custom properties, persist в storage, автодетект системной темы | ✅ Реализовано |
 | **Waveform throttle** | Передача waveform с частотой ~10 Hz для снижения нагрузки | ✅ Реализовано |
+| **Осциллограф: Freeze** | Блокировка обновления осциллографа (toggle) | ✅ Реализовано |
+| **Осциллограф: Zoom** | Масштабирование 256 сэмплов (toggle) | ✅ Реализовано |
+| **Осциллограф: Log Scale** | Логарифмическая шкала Y-axis (toggle) | ✅ Реализовано |
+| **Осциллограф: Clear** | Очистка буферов + сброс freeze | ✅ Реализовано |
+| **Overlay widget** | Draggable Canvas поверх страницы (content.js), position persistence | ✅ Реализовано |
+| **Performance Monitor** | FPS, Draw time, Queue length (toggle) | ✅ Реализовано |
 
 ---
 
@@ -59,27 +65,29 @@
 - **Peak RMS** — пиковое значение RMS
 - **RMS Level** — классификация уровня + процент
 - **Frequency Bands** — распределение энергии по диапазонам (Bass / Mid / Treble) со сглаживанием
-- **Channel Indicator** — MONO / STERO статус входа
+- **Channel Indicator** — MONO / STEREO статус входа (зелёный = stereo, серый = mono)
 - **Glitch Sensitivity** — слайдер настройки порога детектора (60–90%, persist в storage)
 - **Glitch State** — индикатор состояния: STABLE (зелёный) / DRIFT (оранжевый) / GLITCH (красный) + счётчик
 - **Entropy & Flatness** — спектральная энтропия и плоскостность с классификацией
 - **Осциллограф** — визуализация волны в реальном времени (2 канала L/R, Canvas)
+  - **Freeze** — блокировка обновления
+  - **Zoom** — масштабирование 256 сэмплов
+  - **Log Scale** — логарифмическая шкала
+  - **Clear** — очистка буферов + сброс freeze
 - **Glitch Timeline** — график RMS и состояния глитч-детектора во времени
 - **Export CSV** — сохранение данных осциллограммы в CSV
 - **Export Log** — сохранение лога глитчей в JSON (до 500 записей)
 - **Theme Toggle** — переключение тёмной/светлой темы
+- **Performance Monitor** — FPS, Draw time, Queue length
 
 ---
 
 ## Проверка работы
 
-1. Откройте **DevTools** (F12 → Console) на странице с аудио
-2. Запустите захват из popup
-3. Ожидаемые логи:
-
-```
-[AudioWorklet] Sensitivity updated: 0.85
-```
+1. Откройте страницу с аудиопотоком (YouTube, Spotify и т.д.)
+2. Активируйте вкладку с воспроизведением звука
+3. Нажмите на значок расширения → **Start Capture**
+4. В диалоге захвата экрана отметьте **"Share tab audio"**
 
 ### Что проверить
 
@@ -87,9 +95,11 @@
 |---------|----------|
 | **RMS Value** | Меняется в зависимости от громкости аудио (0.0 — 1.0) |
 | **Frequency Bands** | Сумма Bass + Mid + Treble ≈ 100% |
-| **Осциллограф** | Отображает форму волны в реальном времени (2 канала) |
+| **Осциллограф** | Отображает форму волны в реальном времени (2 канала L/R) |
 | **Entropy / Flatness** | Voice: entropy < 1.0, flatness низкий → STABLE |
 | **Channel Indicator** | STEREO для многоканального ввода, MONO для одноканального |
+| **Overlay widget** | Появляется поверх страницы при активном захвате |
+| **Glitch Timeline** | Отображает RMS и состояние (STABLE/DRIFT/GLITCH) во времени |
 
 ---
 
@@ -228,10 +238,20 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
-- ❌ Нет overlay-виджета поверх страницы (контент-скрипт)
+- ✅ Overlay widget поверх страницы (draggable, collapsible, position persistent)
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
 - ⚠️ Popup закрывается при клике вне его области (ограничение Chrome)
-- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup
+- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup (mitigated via setTimeout fallback)
+- ⚠️ Service Worker termination: capture может прерваться после 30s–5min idle (mitigated via keepalive alarm)
+
+### Troubleshooting: Overlay widget
+
+| Проблема | Решение |
+|----------|----------|
+| Overlay не появляется | Убедитесь, что активная вкладка имеет воспроизводимый контент; проверьте консоль DevTools |
+| Overlay не перетаскивается | Убедитесь, что не кликаете на кнопки collapse/close (только за body) |
+| Overlay скрывается при scroll | Overlay использует `position: fixed` — не должен скрываться; если проблема — проверьте z-index конфликты |
+| Overlay дублируется | Закройте все вкладки с расширением; откройте одну — overlay создаётся один раз |
 
 ---
 
@@ -247,13 +267,47 @@
 
 ---
 
+---
+
+## Changelog
+
+### v1.0.0 (2026-07-28)
+
+**Новые фичи:**
+- ✅ Полноценная стерео-обработка: раздельные L/R буферы, метрики, осциллограф
+- ✅ Stereo-разделение каналов в AudioWorklet (dual buffer, per-channel FFT/RMS)
+- ✅ Overlay widget: draggable Canvas поверх страницы с position persistence
+- ✅ Осциллограф: Freeze, Zoom, Log Scale, Clear
+- ✅ Performance Monitor: FPS, Draw time, Queue length
+- ✅ Тёмная/светлая тема с auto-detect системной темы
+- ✅ Waveform throttle (~10 Hz) для снижения нагрузки
+- ✅ Spectral entropy + spectral flatness для классификации сигнала
+- ✅ Glitch sensitivity slider (60–90%) с real-time обновлением
+- ✅ Error handling: graceful degradation при отмене захвата, SW termination, connection loss
+- ✅ Keepalive alarm для предотвращения sleep Service Worker
+
+**Улучшения:**
+- ✅ Optimized timeline rendering (batched color segments)
+- ✅ Buffer pooling (combinedFFT pre-allocated)
+- ✅ Float32Array вместо Array.from (zero GC pressure)
+- ✅ rAF throttle для Canvas (30fps cap)
+- ✅ Listener leak fix (named handler + removeListener)
+- ✅ beforeunload race condition mitigation (setTimeout fallback)
+- ✅ MONO/STEREO flickering fix (channel count detection)
+
+**Удалено:**
+- ✅ Debug console.log (production-ready)
+
+---
+
 ## Roadmap
 
 ### Sprint 1 (Настоящий план)
 - [x] Этап 0: README + Tech debt cleanup (deduplication applyMetrics, listener leak fix, beforeunload race, var→const/let)
 - [x] Этап 1: Overlay widget (content script, draggable Canvas, position persistence)
 - [x] Этап 2: Performance (rAF throttle, Array.from → Float32Array, buffer pooling)
-- [ ] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale)
+- [x] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale, Clear)
+- [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
 
 ### Sprint 2 (Будущее)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)

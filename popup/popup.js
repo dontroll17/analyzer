@@ -1,5 +1,4 @@
 import { RMS } from '../dsp-engine/rms.js';
-console.log('[Popup] popup.js loaded, RMS:', typeof RMS);
 
 // ============================================
 // Theme Colors
@@ -92,7 +91,10 @@ let glitchHistory = [];
 let lastTimelineRecord = 0;
 let CAPTURE_START_TIME = 0;
 
-// Oscilloscope history buffers
+// Oscilloscope history buffers (ring buffer: Float32Array, HISTORY_SIZE=1024)
+// Buffers are overwritten each frame by updateOscilloscopeFromWaveform()
+// When waveform is present: set() replaces all samples
+// When waveform is not (hold frame): buffers remain unchanged
 const HISTORY_SIZE = 1024;
 let leftChannelHistory = new Float32Array(HISTORY_SIZE);
 let rightChannelHistory = new Float32Array(HISTORY_SIZE);
@@ -570,38 +572,47 @@ function drawTimeline() {
 
   if (glitchHistory.length < 2) return;
 
-  // Draw RMS line with color coding
-  timelineCtx.lineWidth = 1.5;
-  timelineCtx.beginPath();
-
+  // Group consecutive points by state for batched color drawing
+  var segments = [];
+  var currentSegment = [];
+  var currentState = null;
+  
   for (var i = 0; i < glitchHistory.length; i++) {
     var point = glitchHistory[i];
-    var x = (point.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
-    var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
-
-    var color;
-    switch (point.state) {
-      case 'GLITCH': color = tc('glitch').GLITCH; break;
-      case 'DRIFT': color = tc('glitch').DRIFT; break;
-      default: color = tc('glitch').STABLE; break;
-    }
-
-    if (i === 0) {
-      timelineCtx.strokeStyle = color;
-      timelineCtx.moveTo(x, y);
+    if (point.state !== currentState) {
+      if (currentSegment.length > 0) {
+        segments.push({ state: currentState, points: currentSegment });
+      }
+      currentState = point.state;
+      currentSegment = [point];
     } else {
-      var prevPoint = glitchHistory[i - 1];
-      var prevX = (prevPoint.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
-      var prevY = canvasHeight - padding - (prevPoint.rms * (canvasHeight - padding * 2));
-      timelineCtx.moveTo(prevX, prevY);
-      timelineCtx.lineTo(x, y);
-      timelineCtx.stroke();
-      timelineCtx.strokeStyle = color;
-      timelineCtx.beginPath();
-      timelineCtx.moveTo(x, y);
+      currentSegment.push(point);
     }
   }
-  timelineCtx.stroke();
+  if (currentSegment.length > 0) {
+    segments.push({ state: currentState, points: currentSegment });
+  }
+  
+  // Draw each segment with a single color (fewer stroke() calls)
+  for (var s = 0; s < segments.length; s++) {
+    var seg = segments[s];
+    timelineCtx.strokeStyle = tc('glitch')[seg.state];
+    timelineCtx.lineWidth = 1.5;
+    timelineCtx.beginPath();
+    
+    for (var i = 0; i < seg.points.length; i++) {
+      var point = seg.points[i];
+      var x = (point.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
+      var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
+      
+      if (i === 0) {
+        timelineCtx.moveTo(x, y);
+      } else {
+        timelineCtx.lineTo(x, y);
+      }
+    }
+    timelineCtx.stroke();
+  }
 
   // Draw 0.1 reference line
   timelineCtx.strokeStyle = colors.timelineRef;
@@ -619,6 +630,30 @@ function drawTimeline() {
 // Shared metrics rendering (extracted from initAudioProcessing + updateMetricsFromOffscreen)
 // ============================================
 
+/**
+ * Shared metrics renderer — dual path:
+ * 1. Direct: popupWorkletNode.port.onmessage → applyMetrics (popup-initiated capture)
+ * 2. Offscreen: background relay → bgPort.onMessage → applyMetrics (offscreen capture)
+ *
+ * @param {Object} data - METRICS payload from AudioWorklet
+ * @param {number} data.rms - Root mean square energy (0–1)
+ * @param {number} data.peakRMS - Peak amplitude (0–1)
+ * @param {number} data.bass - Bass band percentage (0–100)
+ * @param {number} data.mid - Mid band percentage (0–100)
+ * @param {number} data.treble - Treble band percentage (0–100)
+ * @param {number} [data.bassRight] - Right channel bass (undefined for mono)
+ * @param {number} [data.midRight] - Right channel mid
+ * @param {number} [data.trebleRight] - Right channel treble
+ * @param {number} [data.rmsRight] - Right channel RMS
+ * @param {Array} data.waveform - Left channel waveform (Float32Array, 1024 samples)
+ * @param {Array} [data.waveformRight] - Right channel waveform (undefined for mono)
+ * @param {boolean} [data.waveformHold] - True when waveform is throttled (skip draw)
+ * @param {string} data.glitchState - STABLE / DRIFT / GLITCH
+ * @param {number} data.glitchCount - Cumulative glitch counter
+ * @param {number} data.entropy - Shannon entropy across 4 spectral bands
+ * @param {number} data.flatness - Spectral flatness (geometric/arithmetic mean ratio)
+ * @param {string} data.entropyState - Entropy classification (STABLE / DRIFT / GLITCH)
+ */
 function applyMetrics(data) {
   // Update current metrics state
   currentMetrics = {
@@ -862,6 +897,16 @@ function connectToBackground() {
     if (data && data.type === '_OFFSCREEN_ENDED') {
       stopAudioProcessing();
       updateUI(false);
+      captureActive = false;
+      startBtn.textContent = 'Start Capture';
+      startBtn.disabled = false;
+    }
+    // Handle offscreen capture errors (user cancelled, permission denied, etc.)
+    if (data && data.type === '_OFFSCREEN_ERROR') {
+      if (rmsLevel) {
+        rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
+        rmsLevel.style.color = tc('rms').SILENCE;
+      }
       captureActive = false;
       startBtn.textContent = 'Start Capture';
       startBtn.disabled = false;

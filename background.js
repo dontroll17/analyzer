@@ -6,6 +6,15 @@ let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 
+// Keepalive alarm to prevent SW sleep during capture (SW max lifetime ~30s-5min)
+chrome.alarms.create('ssa_keepalive', { periodInMinutes: 4 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
+    // Ping offscreen to keep it alive
+    chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }).catch(() => {});
+  }
+});
+
 async function createOffscreenDocument() {
   if (chrome.offscreen && !offscreenReady) {
     try {
@@ -40,11 +49,7 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onMessage.addListener((message) => {
       if (message && message.type === 'REQUEST_METRICS') {
         if (isCapturing) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, (resp) => {
-            console.log('[BG] Offscreen response to REQ_METRICS:', resp);
-          });
-        } else {
-          console.warn('[BG] Capturing not active, cannot replay metrics');
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
         }
       }
     });
