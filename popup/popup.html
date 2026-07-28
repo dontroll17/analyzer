@@ -106,10 +106,12 @@
           <div class="label">Oscilloscope</div>
           <div class="flex-gap">
             <button id="freezeBtn" class="btn-sm" title="Freeze oscilloscope">❄️ Freeze</button>
+            <button id="clearOscBtn" class="btn-sm btn-clear-osc" title="Clear oscilloscope">🗑️ Clear</button>
             <button id="zoomBtn" class="btn-sm" title="Toggle zoom">🔍 Zoom</button>
             <button id="logScaleBtn" class="btn-sm" title="Toggle log scale">log</button>
             <button id="exportBtn" class="btn-export-csv">CSV</button>
             <button id="exportLogBtn" class="btn-export-log">Log</button>
+            <button id="togglePerfBtn" class="btn-sm">Perf</button>
           </div>
         </div>
 
@@ -120,6 +122,19 @@
           <span class="text-red">Right</span>
         </div>
         <div id="freezeLabel" class="label-xs" style="display: none; text-align: center; color: var(--accent-blue);">FROZEN</div>
+
+        <!-- Performance Monitor -->
+        <div id="perfMonitor" class="section-tertiary" style="margin-top: 10px; display: none;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <div class="label-sm">Performance Monitor</div>
+            <button id="togglePerfBtn" class="btn-sm">Hide</button>
+          </div>
+          <div class="flex-row" style="font-size: 10px; gap: 8px;">
+            <div id="perfFps" class="label-sm" style="min-width: 50px;">FPS: --</div>
+            <div id="perfDrawTime" class="label-sm" style="min-width: 70px;">Draw: --</div>
+            <div id="perfQueue" class="label-sm" style="min-width: 60px;">Queue: --</div>
+          </div>
+        </div>
       </div>
 
       <!-- Glitch Timeline Section -->

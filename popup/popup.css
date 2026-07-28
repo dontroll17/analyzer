@@ -269,6 +269,26 @@ button {
   cursor: pointer;
 }
 
+.btn-clear-osc {
+  background: var(--bg-bar);
+  color: var(--text-secondary);
+  border: 1px solid var(--reset-border);
+}
+
+.btn-clear-osc:hover {
+  background: var(--accent-red);
+  color: white;
+}
+
+.perf-metric {
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.perf-good { color: var(--accent-green); }
+.perf-warn { color: var(--accent-orange); }
+.perf-bad { color: var(--accent-red); }
+
 /* ===== Slider ===== */
 #thresholdSlider {
   flex: 1;

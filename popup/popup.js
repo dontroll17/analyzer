@@ -60,6 +60,7 @@ const channelIndicator = document.getElementById('channelIndicator');
 
 // Oscilloscope option buttons
 const freezeBtn = document.getElementById('freezeBtn');
+const clearOscBtn = document.getElementById('clearOscBtn');
 const zoomBtn = document.getElementById('zoomBtn');
 const logScaleBtn = document.getElementById('logScaleBtn');
 const freezeLabel = document.getElementById('freezeLabel');
@@ -95,8 +96,6 @@ let CAPTURE_START_TIME = 0;
 const HISTORY_SIZE = 1024;
 let leftChannelHistory = new Float32Array(HISTORY_SIZE);
 let rightChannelHistory = new Float32Array(HISTORY_SIZE);
-let leftHead = 0;
-let rightHead = 0;
 
 // Oscilloscope options state
 let oscFreeze = false;
@@ -108,23 +107,157 @@ let pendingOscDraw = null;
 let pendingTimelineDraw = false;
 let rafScheduled = false;
 
-function scheduleDraws(leftSamples, rightSamples, needsTimelineUpdate) {
-  pendingOscDraw = { left: leftSamples, right: rightSamples };
+// ============================================
+// Performance Monitoring
+// ============================================
+const PERF_KEY = 'perfMonitorActive';
+let perfActive = false;
+let perfFrameCount = 0;
+let perfLastTime = 0;
+let perfDrawTimes = [];
+let PERF_MAX_DRAWS = 30;
+
+const perfMonitor = document.getElementById('perfMonitor');
+const perfFps = document.getElementById('perfFps');
+const perfDrawTime = document.getElementById('perfDrawTime');
+const perfQueue = document.getElementById('perfQueue');
+const togglePerfBtn = document.getElementById('togglePerfBtn');
+
+function togglePerfMonitor() {
+  perfActive = !perfActive;
+  perfFrameCount = 0;
+  perfDrawTimes = [];
+  if (perfMonitor) {
+    perfMonitor.style.display = perfActive ? 'block' : 'none';
+  }
+  if (togglePerfBtn) {
+    togglePerfBtn.textContent = perfActive ? 'Hide' : 'Perf';
+  }
+  chrome.storage.local.set({ [PERF_KEY]: perfActive });
+
+  // Start rAF loop when enabling
+  if (perfActive && !perfRunning) {
+    requestAnimationFrame(perfFrameLoop);
+  }
+}
+
+function updatePerfDisplay(fps, drawMs, queueLen) {
+  if (!perfActive) return;
+
+  if (perfFps) {
+    const colorClass = fps >= 50 ? 'perf-good' : fps >= 25 ? 'perf-warn' : 'perf-bad';
+    perfFps.className = `label-sm ${colorClass}`;
+    perfFps.textContent = `FPS: ${fps}`;
+  }
+  if (perfDrawTime) {
+    const colorClass = drawMs < 5 ? 'perf-good' : drawMs < 15 ? 'perf-warn' : 'perf-bad';
+    perfDrawTime.className = `label-sm ${colorClass}`;
+    perfDrawTime.textContent = `Draw: ${drawMs.toFixed(1)}ms`;
+  }
+  if (perfQueue) {
+    const colorClass = queueLen < 5 ? 'perf-good' : queueLen < 20 ? 'perf-warn' : 'perf-bad';
+    perfQueue.className = `label-sm ${colorClass}`;
+    perfQueue.textContent = `Queue: ${queueLen}`;
+  }
+}
+
+// Performance frame loop
+let perfLastFrameTime = performance.now();
+let perfRunning = false;
+function perfFrameLoop(timestamp) {
+  if (!perfActive) {
+    perfRunning = false;
+    return;
+  }
+  if (!perfRunning) perfRunning = true;
+
+  const delta = timestamp - perfLastFrameTime;
+  perfLastFrameTime = timestamp;
+  perfFrameCount++;
+
+  // Calculate FPS every 30 frames (~0.5s)
+  if (perfFrameCount % 30 === 0) {
+    const fps = Math.round(1000 / (delta || 16.67));
+    const avgDrawMs = perfDrawTimes.length > 0
+      ? perfDrawTimes.reduce((a, b) => a + b, 0) / perfDrawTimes.length
+      : 0;
+
+    updatePerfDisplay(fps, avgDrawMs, 0);
+    perfDrawTimes = [];
+  }
+
+  requestAnimationFrame(perfFrameLoop);
+}
+
+// Performance-aware draw wrapper
+function perfAwareDraw(leftSamples, rightSamples) {
+  const start = performance.now();
+  drawOscilloscope(leftSamples, rightSamples);
+  const elapsed = performance.now() - start;
+
+  perfDrawTimes.push(elapsed);
+  if (perfDrawTimes.length > PERF_MAX_DRAWS) {
+    perfDrawTimes.shift();
+  }
+}
+
+// Load perf monitor state on startup
+chrome.storage.local.get([PERF_KEY], (result) => {
+  if (result[PERF_KEY]) {
+    perfActive = true;
+    if (perfMonitor) perfMonitor.style.display = 'block';
+    if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
+    // Start rAF loop since it was active before
+    requestAnimationFrame(perfFrameLoop);
+  }
+});
+
+if (togglePerfBtn) {
+  togglePerfBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    togglePerfMonitor();
+  });
+}
+
+// 30fps cap for canvas rendering (human eye can't tell 60fps on oscilloscope)
+const OSC_DRAW_INTERVAL = 33;
+let lastOscDrawTime = 0;
+
+function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
+  pendingOscDraw = { left: leftBuffer, right: rightBuffer };
   if (needsTimelineUpdate) pendingTimelineDraw = true;
   
   if (rafScheduled) return;
   rafScheduled = true;
   
-  requestAnimationFrame(() => {
+  requestAnimationFrame((timestamp) => {
     rafScheduled = false;
     
     if (pendingOscDraw) {
-      drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+      // Throttle to ~30fps
+      const now = performance.now();
+      if (now - lastOscDrawTime < OSC_DRAW_INTERVAL && lastOscDrawTime > 0) {
+        // Skip draw but update buffer for next frame
+        // Buffer is already Float32Array — no copy overhead
+      } else {
+        lastOscDrawTime = now;
+        if (perfActive) {
+          perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+        } else {
+          drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+        }
+      }
       pendingOscDraw = null;
     }
     
     if (pendingTimelineDraw) {
-      drawTimeline();
+      if (perfActive) {
+        const tStart = performance.now();
+        drawTimeline();
+        perfDrawTimes.push(performance.now() - tStart);
+      } else {
+        drawTimeline();
+      }
       pendingTimelineDraw = false;
     }
   });
@@ -320,20 +453,8 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   if (trebleValue) trebleValue.textContent = Math.round(treblePercent) + '%';
 }
 
-function drawOscilloscope(leftSamples, rightSamples) {
+function drawOscilloscope(leftBuffer, rightBuffer) {
   if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
-  console.log('[Popup] drawOscilloscope:', {
-    leftLen: leftSamples?.length,
-    rightLen: rightSamples?.length,
-    leftFirst5: leftSamples?.slice(0, 5),
-    rightFirst5: rightSamples?.slice(0, 5),
-    oscZoom,
-    oscLogScale
-  });
-
-  // Defensive: ensure samples are arrays (never null)
-  if (!Array.isArray(leftSamples)) leftSamples = [];
-  if (!Array.isArray(rightSamples)) rightSamples = [];
 
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
@@ -350,32 +471,24 @@ function drawOscilloscope(leftSamples, rightSamples) {
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
 
-  // Helper to normalize sample value based on log/linear scale
-  const normalizeSample = (sample) => {
-    if (oscLogScale) {
-      // Logarithmic Y: y = log10(abs(sample) + 1e-10) / log10(2)
-      const logVal = Math.log10(Math.abs(sample) + 1e-10) / Math.log10(2);
-      // Clamp to reasonable range [-1, 1] after transform
-      return Math.max(-1, Math.min(1, logVal / 20));
-    }
-    return sample;
-  };
+  // Clamp values to [-1, 1] to prevent overflow
+  const clamp = (v) => v > 1 ? 1 : v < -1 ? -1 : v;
 
-  // Helper to draw a single channel
-  const drawChannel = (samples, color) => {
-    if (!samples || samples.length === 0) return;
-    
+  // Draw a single buffer directly (no array copy)
+  const drawBuffer = (buf, color) => {
+    if (!buf || buf.length === 0) return;
     oscilloscopeCtx.strokeStyle = color;
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
     
-    // Zoom: show only visible portion (first ~256 samples)
     const startIdx = oscZoom ? 0 : 0;
-    const endIdx = oscZoom ? Math.min(samples.length, 256) : samples.length;
+    const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
     
     for (let i = startIdx; i < endIdx; i++) {
-      const x = (i / samples.length) * canvasWidth;
-      const normalized = normalizeSample(samples[i]);
+      const x = (i / (endIdx - 1 || 1)) * canvasWidth;
+      const normalized = oscLogScale
+        ? Math.max(-1, Math.min(1, Math.log10(Math.abs(buf[i]) + 1e-10) / Math.log10(2) / 30))
+        : clamp(buf[i]);
       const y = centerY - (normalized * centerY);
       if (i === startIdx) oscilloscopeCtx.moveTo(x, y);
       else oscilloscopeCtx.lineTo(x, y);
@@ -383,78 +496,35 @@ function drawOscilloscope(leftSamples, rightSamples) {
     oscilloscopeCtx.stroke();
   };
 
-  if (leftSamples.length > 0) {
-    drawChannel(leftSamples, colors.oscLeft);
-  }
-
-  if (rightSamples.length > 0) {
-    drawChannel(rightSamples, colors.oscRight);
-  }
-}
-
-function getBufferedSamples(buffer, head) {
-  const result = [];
-  for (let i = 0; i < buffer.length; i++) {
-    const index = (head + i) % buffer.length;
-    result.push(buffer[index]);
-  }
-  return result;
+  drawBuffer(leftBuffer, colors.oscLeft);
+  drawBuffer(rightBuffer, colors.oscRight);
 }
 
 function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
-  console.log('[Popup] updateOscilloscopeFromWaveform:', {
-    hasWaveform: !!waveform,
-    waveformType: typeof waveform,
-    waveformIsArray: Array.isArray(waveform),
-    waveformLen: waveform?.length,
-    hold,
-    hasRight: !!waveformRight,
-    rightLen: waveformRight?.length,
-    waveformFirst5: waveform?.slice(0, 5),
-    rms: currentMetrics?.rms
-  });
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
-  // No waveform data and no hold signal — skip
+  // No waveform data — skip
   if (!waveform || waveform.length === 0) return;
   
   if (waveformRight && waveformRight.length > 0) {
     // Stereo: separate L/R waveforms
-    const waveL = waveform;
-    const waveR = waveformRight;
-    for (let i = 0; i < waveL.length && i < HISTORY_SIZE; i++) {
-      leftChannelHistory[i] = waveL[i];
-    }
-    for (let i = 0; i < waveR.length && i < HISTORY_SIZE; i++) {
-      rightChannelHistory[i] = waveR[i];
-    }
-    for (let i = waveL.length; i < HISTORY_SIZE; i++) {
-      leftChannelHistory[i] = 0;
-    }
-    for (let i = waveR.length; i < HISTORY_SIZE; i++) {
-      rightChannelHistory[i] = 0;
-    }
+    leftChannelHistory.set(waveform);
+    rightChannelHistory.set(waveformRight);
   } else {
     // Mono: same data for both channels
-    const wave = waveform;
-    for (let i = 0; i < wave.length && i < HISTORY_SIZE; i++) {
-      leftChannelHistory[i] = wave[i];
-      rightChannelHistory[i] = wave[i];
-    }
-    for (let i = wave.length; i < HISTORY_SIZE; i++) {
-      leftChannelHistory[i] = 0;
-      rightChannelHistory[i] = 0;
-    }
+    leftChannelHistory.set(waveform);
+    rightChannelHistory.set(waveform);
   }
-  leftHead = 0;
-  rightHead = 0;
   
-  const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
-  const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
-  if (leftSamples && rightSamples && Array.isArray(leftSamples) && Array.isArray(rightSamples)) {
-    updateOscilloscopeWithThrottle(leftSamples, rightSamples);
+  // Zero out any unused samples
+  if (waveform.length < HISTORY_SIZE) {
+    leftChannelHistory.fill(0, waveform.length, HISTORY_SIZE);
+    rightChannelHistory.fill(0, waveformRight?.length || waveform.length, HISTORY_SIZE);
   }
+  
+  // Pass Float32Array directly — no copy needed
+  updateOscilloscopeWithThrottle(leftChannelHistory, rightChannelHistory);
 }
 
 function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
@@ -550,14 +620,6 @@ function drawTimeline() {
 // ============================================
 
 function applyMetrics(data) {
-  console.log('[Popup] applyMetrics:', {
-    rms: data.rms,
-    frame: data.frame,
-    hasWaveform: !!data.waveform,
-    waveformLen: data.waveform?.length,
-    hasWaveformRight: !!data.waveformRight,
-    waveformRightLen: data.waveformRight?.length
-  });
   // Update current metrics state
   currentMetrics = {
     rms: data.rms,
@@ -672,8 +734,6 @@ function stopAudioProcessing() {
   // Clear channel history buffers
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
-  leftHead = 0;
-  rightHead = 0;
 
   if (popupMediaStreamSource) {
     popupMediaStreamSource.disconnect();
@@ -737,18 +797,19 @@ function exportGlitchLog() {
 }
 
 function exportCSV() {
-  var leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
-  var rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
-
-  if (leftSamples.length === 0) {
+  let hasData = false;
+  for (let i = 0; i < HISTORY_SIZE; i++) {
+    if (leftChannelHistory[i] !== 0) { hasData = true; break; }
+  }
+  if (!hasData) {
     alert('Нет данных. Запустите захват аудио.');
     return;
   }
 
   var csv = 'timestamp_ms,left_channel,right_channel\n';
   var ts = Date.now();
-  for (var i = 0; i < leftSamples.length; i++) {
-    csv += ts + ',' + leftSamples[i].toFixed(6) + ',' + rightSamples[i].toFixed(6) + '\n';
+  for (var i = 0; i < HISTORY_SIZE; i++) {
+    csv += ts + ',' + leftChannelHistory[i].toFixed(6) + ',' + rightChannelHistory[i].toFixed(6) + '\n';
   }
 
   var blob = new Blob([csv], { type: 'text/csv' });
@@ -790,21 +851,12 @@ function connectToBackground() {
 
   console.log('[Popup] Connecting to background...');
   bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
-  console.log('[Popup] Port created:', !!bgPort);
   
   // Named handler function for proper removeListener
   bgMetricsHandler = (data) => {
-    console.log('[Popup] bgMetricsHandler called with:', data?.type, data?.waveform?.length, 'waveform');
     if (data && data.type === 'METRICS') {
-      console.log('[Popup] Got METRICS from bg:', {
-        hasWaveform: !!data.waveform,
-        waveformType: typeof data.waveform,
-        waveformIsArray: Array.isArray(data.waveform),
-        waveformLen: data.waveform?.length,
-        hold: data.waveformHold,
-        rms: data.rms,
-        frame: data.frame
-      });
+      // Discard metrics if capture is not active (prevents post-stop spam)
+      if (!captureActive) return;
       applyMetrics(data);
     }
     if (data && data.type === '_OFFSCREEN_ENDED') {
@@ -820,25 +872,16 @@ function connectToBackground() {
   bgPort.onDisconnect.addListener(() => {
     console.warn('[Popup] Port disconnected from background');
     bgPort = null;
-    // Reconnect after a short delay (popup reopened after being closed)
-    setTimeout(() => {
-      if (!bgPort) {
-        console.log('[Popup] Reconnecting to background...');
-        connectToBackground();
-      }
-    }, 500);
+    bgMetricsHandler = null;
   });
   
   // Send metrics request immediately after connect (in case capture is active)
   setTimeout(() => {
     if (bgPort) {
-      console.log('[Popup] REQUEST_METRICS to background');
       bgPort.postMessage({ type: 'REQUEST_METRICS' });
     }
   }, 100);
 }
-
-connectToBackground();
 
 startBtn.addEventListener('click', () => {
   if (captureActive) return;
@@ -846,7 +889,9 @@ startBtn.addEventListener('click', () => {
   captureActive = true;
   startBtn.textContent = 'Capturing...';
   startBtn.disabled = true;
-  
+
+  connectToBackground();
+
   chrome.runtime.sendMessage({ type: 'START_CAPTURE' }, response => {
     if (response?.ok) {
       updateUI(true);
@@ -980,6 +1025,28 @@ if (themeToggle) {
 }
 
 // ============================================
+// Oscilloscope Redraw
+// ============================================
+
+function redrawOscilloscope() {
+  // Check if there's any data
+  let hasData = false;
+  for (let i = 0; i < HISTORY_SIZE; i++) {
+    if (leftChannelHistory[i] !== 0 || rightChannelHistory[i] !== 0) {
+      hasData = true;
+      break;
+    }
+  }
+  if (hasData) {
+    if (perfActive) {
+      perfAwareDraw(leftChannelHistory, rightChannelHistory);
+    } else {
+      drawOscilloscope(leftChannelHistory, rightChannelHistory);
+    }
+  }
+}
+
+// ============================================
 // Oscilloscope Options (Freeze, Zoom, Log Scale)
 // ============================================
 
@@ -1033,7 +1100,11 @@ if (freezeBtn) {
     
     // If unfreezing, redraw immediately
     if (!oscFreeze && pendingOscDraw) {
-      drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+      if (perfActive) {
+        perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+      } else {
+        drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+      }
     }
   });
 }
@@ -1044,6 +1115,11 @@ if (zoomBtn) {
     oscZoom = !oscZoom;
     saveOscOptions();
     updateOscButtonStates();
+
+    // Redraw with new zoom setting if capture is active
+    if (!oscFreeze && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
+    }
   });
 }
 
@@ -1053,6 +1129,37 @@ if (logScaleBtn) {
     oscLogScale = !oscLogScale;
     saveOscOptions();
     updateOscButtonStates();
+
+    // Redraw with new scale setting if capture is active
+    if (!oscFreeze && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
+    }
+  });
+}
+
+if (clearOscBtn) {
+  clearOscBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Clear history buffers
+    leftChannelHistory.fill(0);
+    rightChannelHistory.fill(0);
+    // Clear freeze state
+    oscFreeze = false;
+    saveOscOptions();
+    updateOscButtonStates();
+    // Clear canvas
+    if (oscilloscopeCtx && oscilloscopeCanvas) {
+      const colors = tc('canvas');
+      oscilloscopeCtx.fillStyle = colors.bg;
+      oscilloscopeCtx.fillRect(0, 0, oscilloscopeCanvas.width, oscilloscopeCanvas.height);
+      const centerY = oscilloscopeCanvas.height / 2;
+      oscilloscopeCtx.strokeStyle = colors.grid;
+      oscilloscopeCtx.lineWidth = 1;
+      oscilloscopeCtx.beginPath();
+      oscilloscopeCtx.moveTo(0, centerY);
+      oscilloscopeCtx.lineTo(oscilloscopeCanvas.width, centerY);
+      oscilloscopeCtx.stroke();
+    }
   });
 }
 
@@ -1071,6 +1178,10 @@ if (resetSensitivityBtn) {
 }
 if (exportLogBtn) {
   exportLogBtn.addEventListener('click', (e) => e.stopPropagation());
+}
+if (clearOscBtn) {
+  clearOscBtn.addEventListener('click', (e) => e.stopPropagation());
+  clearOscBtn.addEventListener('mousedown', (e) => e.stopPropagation());
 }
 if (themeToggle) {
   themeToggle.addEventListener('click', (e) => e.stopPropagation());

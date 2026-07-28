@@ -31,18 +31,14 @@ async function createOffscreenDocument() {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'popup-metrics') {
     popupPort = port;
-    console.log('[BG] popup-metrics port connected, isCapturing:', isCapturing, 'queueLen:', metricsQueue.length);
 
     port.onDisconnect.addListener(() => {
-      console.log('[BG] popup-metrics port disconnected');
       popupPort = null;
     });
 
     // Handle messages from popup
     port.onMessage.addListener((message) => {
-      console.log('[BG] Received message from popup:', message?.type);
       if (message && message.type === 'REQUEST_METRICS') {
-        console.log('[BG] Popup REQUEST_METRICS, isCapturing:', isCapturing);
         if (isCapturing) {
           chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, (resp) => {
             console.log('[BG] Offscreen response to REQ_METRICS:', resp);
@@ -55,14 +51,13 @@ chrome.runtime.onConnect.addListener((port) => {
 
     // Drain queued metrics when popupPort reconnects (both in-memory and storage-persisted)
     if (metricsQueue.length > 0) {
-      console.log('[BG] Draining', metricsQueue.length, 'in-memory queued metrics to popup');
       const toDrain = [...metricsQueue];
       metricsQueue = [];
-      toDrain.forEach((m, i) => {
+      toDrain.forEach((m) => {
         try {
           popupPort.postMessage(m);
         } catch (e) {
-          console.warn('[BG] Failed to drain queued metric:', e.message);
+          // popup disconnected
         }
       });
     }
@@ -71,19 +66,15 @@ chrome.runtime.onConnect.addListener((port) => {
     chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
       const storageQueue = result[PERSISTENT_METRICS_KEY] || [];
       if (storageQueue.length > 0) {
-        console.log('[BG] Draining', storageQueue.length, 'storage-persisted metrics to popup');
-        let sent = 0;
         storageQueue.forEach((m) => {
           try {
             popupPort.postMessage(m);
-            sent++;
           } catch (e) {
-            console.warn('[BG] Failed to drain storage metric:', e.message);
+            // popup disconnected
           }
         });
         // Clear storage after draining
         chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
-        console.log('[BG] Sent', sent, 'storage metrics to popup, cleared storage');
       }
     });
   }
@@ -136,7 +127,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'REQUEST_STATUS') {
-    console.log('[BG] REQUEST_STATUS from popup, isCapturing:', isCapturing);
     sendResponse({ isCapturing, hasMetrics: !!metricsQueue?.length });
     return false;
   }
@@ -179,24 +169,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // === From Offscreen ===
   if (message.type === '_OFFSCREEN_METRICS') {
-    console.log('[BG] Got METRICS from offscreen:', {
-      hasWaveform: !!message.data.waveform,
-      waveformLen: message.data.waveform?.length,
-      hold: message.data.waveformHold,
-      rms: message.data.rms,
-      frame: message.data.frame
-    });
+    const d = message.data;
+    
+    // Only queue/metrics forward if capture is active
+    if (!isCapturing) {
+      sendResponse({ ok: true });
+      return false;
+    }
     
     // Persist to chrome.storage.local for reliability across SW wake/sleep
     chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
       const queue = result[PERSISTENT_METRICS_KEY] || [];
-      queue.push(message.data);
-      if (queue.length > 100) queue.shift(); // Keep last 100
+      queue.push(d);
+      if (queue.length > 100) queue.shift();
       chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
     });
     
     // Also add to in-memory queue
-    metricsQueue.push(message.data);
+    metricsQueue.push(d);
     if (metricsQueue.length > 100) {
       metricsQueue.shift();
     }
@@ -204,12 +194,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Forward to popup if connected
     if (popupPort) {
       try {
-        popupPort.postMessage(message.data);
+        popupPort.postMessage({ type: 'METRICS', ...d });
       } catch (e) {
-        console.warn('[BG] Failed to forward metrics to popup:', e.message);
+        // popup message failed, try to reconnect
+        popupPort = null;
       }
-    } else {
-      console.log('[BG] popupPort is null, metrics queued (in-memory:', metricsQueue.length, ', storage-persisted)');
     }
     
     // Forward to overlay if connected
