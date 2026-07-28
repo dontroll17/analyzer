@@ -466,9 +466,6 @@ async function initAudioProcessing(stream) {
     popupMediaStreamSource = popupAudioContext.createMediaStreamSource(stream);
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
     
-    console.log('[Popup] Adding AudioWorklet module...');
-    console.log('[Popup] Worklet URL:', workletPath);
-    
     await popupAudioContext.audioWorklet.addModule(workletPath);
 
     popupWorkletNode = new AudioWorkletNode(popupAudioContext, 'audio-analyzer', {
@@ -478,8 +475,6 @@ async function initAudioProcessing(stream) {
       channelCountMode: 'max',
       channelInterpretation: 'discrete'
     });
-
-    console.log('[Popup] AudioWorkletNode created successfully');
 
     // 1. Источник направляем в воркет для спектрального анализа
     popupMediaStreamSource.connect(popupWorkletNode);
@@ -495,22 +490,23 @@ async function initAudioProcessing(stream) {
         updateRMSDisplay(data.rms, data.peakRMS);
         
         // Stereo: combine L+R for overall bands, or use mono data
-        var isStereoMode = data.bassRight !== undefined;
-        var combinedBass = isStereoMode
+        // bassRight always present for stereo inputs (unlike waveformRight which is throttled)
+        const isStereo = data.bassRight !== undefined;
+        var combinedBass = isStereo
           ? (data.bass + data.bassRight) / 2
           : data.bass;
-        var combinedMid = isStereoMode
+        var combinedMid = isStereo
           ? (data.mid + data.midRight) / 2
           : data.mid;
-        var combinedTreble = isStereoMode
+        var combinedTreble = isStereo
           ? (data.treble + data.trebleRight) / 2
           : data.treble;
         
         // Update channel indicator
         if (channelIndicator) {
           const chColors = tc('channel');
-          channelIndicator.textContent = isStereoMode ? 'STEREO' : 'MONO';
-          channelIndicator.style.color = isStereoMode ? chColors.stereo : chColors.mono;
+          channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
+          channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
         }
         
         const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
@@ -557,6 +553,12 @@ function stopAudioProcessing() {
   glitchLog = [];
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
+  
+  // Clear channel history buffers
+  leftChannelHistory.fill(0);
+  rightChannelHistory.fill(0);
+  leftHead = 0;
+  rightHead = 0;
 
   if (popupMediaStreamSource) {
     popupMediaStreamSource.disconnect();
@@ -592,7 +594,7 @@ function addGlitchLogEntry(glitchCount) {
   if (glitchLog.length > GLITCH_LOG_MAX) {
     glitchLog.shift();
   }
-  console.log('[Glitch Log] Entry added. Total entries:', glitchLog.length);
+  // Entry logged silently
 }
 
 function exportGlitchLog() {
@@ -616,7 +618,7 @@ function exportGlitchLog() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  console.log('[Glitch Log] Exported', glitchLog.length, 'entries');
+  // Exported
 }
 
 function exportCSV() {
@@ -643,7 +645,7 @@ function exportCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  console.log('[CSV Export] Exported', leftSamples.length, 'samples');
+  // Exported
 }
 
 function sendSensitivityToWorklet(percentage) {
@@ -653,7 +655,6 @@ function sendSensitivityToWorklet(percentage) {
     type: 'SET_GITCH_CONFIG',
     highFreqThreshold: threshold
   });
-  console.log('[Sensitivity] Updated highFreqThreshold:', threshold);
 }
 
 let captureActive = false;
@@ -662,13 +663,11 @@ let bgPort = null;
 function connectToBackground() {
   if (bgPort) return;
   bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
-  console.log('[Popup] Connected to background');
   bgPort.onMessage.addListener((data) => {
     if (data && data.type === 'METRICS') {
       updateMetricsFromOffscreen(data);
     }
     if (data && data.type === '_OFFSCREEN_ENDED') {
-      console.log('[Popup] Offscreen ended');
       stopAudioProcessing();
       updateUI(false);
       captureActive = false;
@@ -677,7 +676,6 @@ function connectToBackground() {
     }
   });
   bgPort.onDisconnect.addListener(() => {
-    console.log('[Popup] Background connection lost');
     bgPort = null;
   });
 }
@@ -695,23 +693,24 @@ function updateMetricsFromOffscreen(data) {
   };
   updateRMSDisplay(data.rms, data.peakRMS);
   
-  // Stereo: combine L+R for overall bands
-  var isStereoMode = data.bassRight !== undefined;
-  var combinedBass = isStereoMode
+  // Stereo: combine L+R for overall bands, or use mono data
+  // bassRight always present for stereo inputs (unlike waveformRight which is throttled)
+  const isStereo = data.bassRight !== undefined;
+  var combinedBass = isStereo
     ? (data.bass + data.bassRight) / 2
     : data.bass;
-  var combinedMid = isStereoMode
+  var combinedMid = isStereo
     ? (data.mid + data.midRight) / 2
     : data.mid;
-  var combinedTreble = isStereoMode
+  var combinedTreble = isStereo
     ? (data.treble + data.trebleRight) / 2
     : data.treble;
   
   // Update channel indicator
   if (channelIndicator) {
     const chColors = tc('channel');
-    channelIndicator.textContent = isStereoMode ? 'STEREO' : 'MONO';
-    channelIndicator.style.color = isStereoMode ? chColors.stereo : chColors.mono;
+    channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
+    channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
   }
   
   const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
@@ -738,13 +737,11 @@ function updateMetricsFromOffscreen(data) {
 startBtn.addEventListener('click', () => {
   if (captureActive) return;
   
-  console.log('[Popup] Requesting capture via background...');
   captureActive = true;
   startBtn.textContent = 'Capturing...';
   startBtn.disabled = true;
   
   chrome.runtime.sendMessage({ type: 'START_CAPTURE' }, response => {
-    console.log('[Popup] Capture response:', response);
     if (response?.ok) {
       updateUI(true);
     } else {
@@ -758,9 +755,7 @@ startBtn.addEventListener('click', () => {
 });
 
 stopBtn.addEventListener('click', () => {
-  console.log('[Popup] Stopping capture...');
   chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, response => {
-    console.log('[Popup] Stop response:', response);
     stopAudioProcessing();
     updateUI(false);
     captureActive = false;
@@ -796,7 +791,6 @@ chrome.storage.local.get([SENSITIVITY_KEY], (result) => {
   if (typeof saved === 'number' && saved >= 60 && saved <= 90) {
     if (thresholdSlider) thresholdSlider.value = saved;
     if (thresholdValue) thresholdValue.textContent = saved + '%';
-    console.log('[Sensitivity] Loaded from storage:', saved);
   } else if (thresholdSlider) {
     thresholdSlider.value = SENSITIVITY_DEFAULT;
     if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
@@ -813,9 +807,7 @@ if (thresholdSlider) {
     // Отправляем настройку в AudioWorklet в реальном времени
     sendSensitivityToWorklet(parseInt(value));
     // Сохраняем настройку
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: parseInt(value) }, () => {
-      console.log('[Sensitivity] Saved:', value);
-    });
+    chrome.storage.local.set({ [SENSITIVITY_KEY]: parseInt(value) });
   });
 }
 
@@ -825,9 +817,7 @@ if (resetSensitivityBtn) {
     if (thresholdSlider) thresholdSlider.value = SENSITIVITY_DEFAULT;
     if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
     sendSensitivityToWorklet(SENSITIVITY_DEFAULT);
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT }, () => {
-      console.log('[Sensitivity] Reset and saved:', SENSITIVITY_DEFAULT);
-    });
+    chrome.storage.local.set({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT });
   });
 }
 
@@ -859,7 +849,6 @@ function applyTheme(theme) {
   if (themeToggle) {
     themeToggle.textContent = theme === 'dark' ? '\u263C' : '\u263E';
   }
-  console.log('[Theme] Applied:', theme);
 }
 
 // Load saved theme on startup

@@ -4,8 +4,6 @@ let audioContext = null;
 let cleanupScheduled = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('[Offscreen]', message.type);
-  
   if (message.type === '_OFFSCREEN_START') {
     startCapture().then(sendResponse);
     return true;
@@ -23,13 +21,10 @@ async function startCapture() {
   try {
     if (mediaStream) return { ok: true, alreadyActive: true };
     
-    console.log('[Offscreen] Calling getDisplayMedia...');
     mediaStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
       audio: true
     });
-    
-    console.log('[Offscreen] Stream acquired, tracks:', mediaStream.getTracks().length);
     
     // Setup audio processing
     audioContext = new AudioContext({ sampleRate: 44100 });
@@ -59,12 +54,10 @@ async function startCapture() {
     // Monitor all tracks
     mediaStream.getTracks().forEach(track => {
       track.addEventListener('ended', () => {
-        console.log('[Offscreen] Track ended:', track.kind);
         scheduleCleanup();
       });
     });
     
-    console.log('[Offscreen] Ready!');
     return { ok: true };
   } catch (error) {
     console.error('[Offscreen] Error:', error);
@@ -75,7 +68,6 @@ async function startCapture() {
 
 async function stopCapture() {
   cleanup();
-  console.log('[Offscreen] Stopped');
   return { ok: true };
 }
 
@@ -103,5 +95,3 @@ function cleanup() {
   }
   chrome.runtime.sendMessage({ type: '_OFFSCREEN_ENDED' }, () => {});
 }
-
-console.log('[Offscreen] Loaded');

@@ -3,8 +3,19 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     super();
     this.fftSize = 1024;
     this.bufferSize = this.fftSize;
-    this.inputBuffer = new Float32Array(this.bufferSize);
-    this.bufferCount = 0;
+    
+    // Двойные буферы для L/R каналов (stereo-aware)
+    this.inputBuffers = [new Float32Array(this.bufferSize), new Float32Array(this.bufferSize)];
+    this.bufferCounts = [0, 0];
+    this.waveformLeft = new Float32Array(this.bufferSize);
+    this.waveformRight = new Float32Array(this.bufferSize);
+    
+    // State per channel
+    this.leftReady = false;
+    this.rightReady = false;
+    this.leftFrameData = null;
+    this.rightFrameData = null;
+    
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
     this.WAVEFORM_THROTTLE = 4; // send waveform every 4 frames ≈ 10 Hz at 43 fps
@@ -230,11 +241,43 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     return { isGlitch: false, state: 'STABLE' };
   }
 
+  /**
+   * Обработка кадра для одного канала (L или R)
+   * Вызывается из process() когда буфер канала заполнен
+   */
+  processChannelFrame(ch) {
+    const buffer = this.inputBuffers[ch];
+    const { rms, peak } = this.calculateRMS(buffer);
+    const fft = this.calculateFFT(buffer, 64);
+    const bands = this.calculateFrequencyBands(fft);
+    const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
+    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
+    
+    // Сохраняем данные для объединения позже
+    const frameData = { rms, peak, fft, bands, highFreqAnomaly, glitchInfo };
+    
+    if (ch === 0) {
+      this.leftFrameData = frameData;
+      // Копируем waveform
+      for (let i = 0; i < buffer.length; i++) {
+        this.waveformLeft[i] = buffer[i];
+      }
+      this.leftReady = true;
+    } else {
+      this.rightFrameData = frameData;
+      // Копируем waveform
+      for (let i = 0; i < buffer.length; i++) {
+        this.waveformRight[i] = buffer[i];
+      }
+      this.rightReady = true;
+    }
+  }
+
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     const output = outputs[0];
     
-    // 1. Пробрасываем звук на динамики, чтобы он не пропадал
+    // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
       for (let channel = 0; channel < input.length; channel++) {
         if (output[channel]) {
@@ -243,19 +286,32 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       }
     }
 
-    // 2. Буферизуем и анализируем сэмплы
-    if (input && input.length > 0 && input[0].length > 0) {
-      const channelData = input[0];
-      const numSamples = channelData.length;
-      
-      for (let i = 0; i < numSamples; i++) {
-        this.inputBuffer[this.bufferCount] = channelData[i];
-        this.bufferCount++;
+    // 2. Буферизация по каналам
+    // inputs[0] — массив блоков: inputs[0][0] = левый, inputs[0][1] = правый
+    if (input && input.length > 0) {
+      for (let ch = 0; ch < input.length; ch++) {
+        const channelData = input[ch];
+        const numSamples = channelData.length;
         
-        if (this.bufferCount >= this.bufferSize) {
-          this.processFrame();
-          this.bufferCount = 0;
+        for (let i = 0; i < numSamples; i++) {
+          this.inputBuffers[ch][this.bufferCounts[ch]] = channelData[i];
+          this.bufferCounts[ch]++;
+          
+          if (this.bufferCounts[ch] >= this.bufferSize) {
+            this.processChannelFrame(ch);
+            this.bufferCounts[ch] = 0;
+          }
         }
+      }
+      
+      // Отправляем фрейм как только левый канал готов (он всегда есть)
+      // Правый канал — опционален (mono input даст rightReady = false)
+      if (this.leftReady) {
+        this.processFrame();
+        this.leftReady = false;
+        this.rightReady = false;
+        this.leftFrameData = null;
+        this.rightFrameData = null;
       }
     }
     
@@ -266,15 +322,47 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.frameCount++;
     this.waveformFrameCounter++;
     
-    const { rms, peak } = this.calculateRMS(this.inputBuffer);
-    const fft = this.calculateFFT(this.inputBuffer, 64);
-    const bands = this.calculateFrequencyBands(fft);
-    const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
-    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
+    const leftData = this.leftFrameData;
+    const rightData = this.rightFrameData;
     
-    // 4-band entropy + spectral flatness for robust detection
-    const bandEnt = this.calculateBandEntropy(fft);
-    const flatness = this.detectSpectralFlatness(fft);
+    // Combined RMS: используем максимальный peak для stereo
+    const combinedRMS = leftData ? leftData.rms : (rightData ? rightData.rms : 0);
+    const leftPeak = leftData ? leftData.peak : 0;
+    const rightPeak = rightData ? rightData.peak : 0;
+    const peakRMS = Math.max(leftPeak, rightPeak);
+    
+    // Combined FFT для entropy/flatness (сумма энергий обоих каналов)
+    let combinedFFT;
+    if (leftData && rightData) {
+      combinedFFT = new Float32Array(leftData.fft.length);
+      for (let i = 0; i < leftData.fft.length; i++) {
+        combinedFFT[i] = leftData.fft[i] + rightData.fft[i];
+      }
+    } else {
+      combinedFFT = leftData ? leftData.fft : rightData.fft;
+    }
+    
+    // Frequency bands для combo
+    let combinedBands;
+    if (leftData && rightData) {
+      combinedBands = {
+        bass: (leftData.bands.bass + rightData.bands.bass) / 2,
+        mid: (leftData.bands.mid + rightData.bands.mid) / 2,
+        treble: (leftData.bands.treble + rightData.bands.treble) / 2
+      };
+    } else {
+      combinedBands = leftData ? leftData.bands : rightData.bands;
+    }
+    
+    // Glitch detection: максимальный highFreqAnomaly из каналов
+    const leftHFA = leftData ? leftData.highFreqAnomaly : 0;
+    const rightHFA = rightData ? rightData.highFreqAnomaly : 0;
+    const combinedHighFreqAnomaly = Math.max(leftHFA, rightHFA);
+    const glitchInfo = this.checkGlitchState(combinedRMS, combinedHighFreqAnomaly);
+    
+    // Entropy/flatness на combined FFT
+    const bandEnt = this.calculateBandEntropy(combinedFFT);
+    const flatness = this.detectSpectralFlatness(combinedFFT);
     const entropy = bandEnt.entropy;
     
     // Voice: concentrated in Voice+Speech bands, NOT flat → STABLE/DRIFT
@@ -289,17 +377,22 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     
     // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
     const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
+    
     const payload = {
       type: 'METRICS',
       timestamp: Date.now(),
       frame: this.frameCount,
-      rms: rms,
-      peakRMS: peak,
-      spectrum: Array.from(fft),
-      bass: bands.bass,
-      mid: bands.mid,
-      treble: bands.treble,
-      highFreqAnomaly: highFreqAnomaly,
+      rms: combinedRMS,
+      peakRMS: peakRMS,
+      spectrum: Array.from(combinedFFT),
+      bass: combinedBands.bass,
+      mid: combinedBands.mid,
+      treble: combinedBands.treble,
+      rmsRight: rightData ? rightData.rms : undefined,
+      bassRight: rightData ? rightData.bands.bass : undefined,
+      midRight: rightData ? rightData.bands.mid : undefined,
+      trebleRight: rightData ? rightData.bands.treble : undefined,
+      highFreqAnomaly: combinedHighFreqAnomaly,
       entropy: entropy,
       flatness: flatness,
       entropyState: entropyState,
@@ -309,7 +402,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     };
     
     if (includeWaveform) {
-      payload.waveform = Array.from(this.inputBuffer);
+      payload.waveform = Array.from(this.waveformLeft);
+      if (rightData) {
+        payload.waveformRight = Array.from(this.waveformRight);
+      }
     } else {
       payload.waveformHold = true;
     }
