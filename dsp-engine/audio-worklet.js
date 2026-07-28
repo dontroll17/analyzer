@@ -10,6 +10,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.waveformLeft = new Float32Array(this.bufferSize);
     this.waveformRight = new Float32Array(this.bufferSize);
     
+    // Pre-allocate combinedFFT buffer (buffer pooling — zero GC per frame)
+    this.combinedFFT = new Float32Array(64);
+    
     // State per channel
     this.leftReady = false;
     this.rightReady = false;
@@ -18,7 +21,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
-    this.WAVEFORM_THROTTLE = 4; // send waveform every 4 frames ≈ 10 Hz at 43 fps
+    this.WAVEFORM_THROTTLE = 1; // send waveform every frame for debugging
     
     // Используем штатную глобальную переменную sampleRate воркета
     this.sampleRate = typeof sampleRate !== 'undefined' ? sampleRate : 44100;
@@ -277,6 +280,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const input = inputs[0];
     const output = outputs[0];
     
+    // Debug: log first few frames
+    if (this.frameCount < 3) {
+      console.log('[Worklet] Frame', this.frameCount, '- input:', input ? input.length + ' channels' : 'null', '- input[0]:', input ? input[0] ? 'exists' : 'null' : 'N/A');
+    }
+    
     // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
       for (let channel = 0; channel < input.length; channel++) {
@@ -332,14 +340,17 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const peakRMS = Math.max(leftPeak, rightPeak);
     
     // Combined FFT для entropy/flatness (сумма энергий обоих каналов)
-    let combinedFFT;
+    // Use pre-allocated buffer (buffer pooling — zero GC pressure)
     if (leftData && rightData) {
-      combinedFFT = new Float32Array(leftData.fft.length);
       for (let i = 0; i < leftData.fft.length; i++) {
-        combinedFFT[i] = leftData.fft[i] + rightData.fft[i];
+        this.combinedFFT[i] = leftData.fft[i] + rightData.fft[i];
       }
     } else {
-      combinedFFT = leftData ? leftData.fft : rightData.fft;
+      // Copy from left or right FFT into combinedFFT
+      const src = leftData ? leftData.fft : rightData.fft;
+      for (let i = 0; i < src.length; i++) {
+        this.combinedFFT[i] = src[i];
+      }
     }
     
     // Frequency bands для combo
@@ -361,8 +372,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const glitchInfo = this.checkGlitchState(combinedRMS, combinedHighFreqAnomaly);
     
     // Entropy/flatness на combined FFT
-    const bandEnt = this.calculateBandEntropy(combinedFFT);
-    const flatness = this.detectSpectralFlatness(combinedFFT);
+    const bandEnt = this.calculateBandEntropy(this.combinedFFT);
+    const flatness = this.detectSpectralFlatness(this.combinedFFT);
     const entropy = bandEnt.entropy;
     
     // Voice: concentrated in Voice+Speech bands, NOT flat → STABLE/DRIFT
@@ -378,13 +389,16 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
     const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
     
+    // Use new Float32Array() instead of Array.from() — single memcpy, no boxing
+    const spectrumCopy = new Float32Array(this.combinedFFT);
+    
     const payload = {
       type: 'METRICS',
       timestamp: Date.now(),
       frame: this.frameCount,
       rms: combinedRMS,
       peakRMS: peakRMS,
-      spectrum: Array.from(combinedFFT),
+      spectrum: spectrumCopy,
       bass: combinedBands.bass,
       mid: combinedBands.mid,
       treble: combinedBands.treble,
@@ -402,9 +416,20 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     };
     
     if (includeWaveform) {
-      payload.waveform = Array.from(this.waveformLeft);
+      // Debug: log first few frames to verify waveform data
+      if (this.frameCount < 5) {
+        let sum = 0;
+        for (let i = 0; i < this.waveformLeft.length; i++) {
+          sum += Math.abs(this.waveformLeft[i]);
+        }
+        console.log(`[Worklet] Frame ${this.frameCount}: waveformLeft sum of abs = ${sum.toFixed(4)}, nonZero = ${this.waveformLeft.filter(v => Math.abs(v) > 0.001).length}/${this.waveformLeft.length}`);
+      }
+      
+      // Create a copy BEFORE serialization — serialization converts Float32Array to plain object {0: val, 1: val}
+      // Object.values() correctly extracts values in order: [val0, val1, ...]
+      payload.waveform = Object.values(this.waveformLeft);
       if (rightData) {
-        payload.waveformRight = Array.from(this.waveformRight);
+        payload.waveformRight = Object.values(this.waveformRight);
       }
     } else {
       payload.waveformHold = true;

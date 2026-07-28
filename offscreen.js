@@ -2,6 +2,7 @@
 let mediaStream = null;
 let audioContext = null;
 let cleanupScheduled = false;
+let lastMetrics = null; // Store last metrics for replay on popup reconnect
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_START') {
@@ -14,6 +15,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   
+  if (message.type === '_OFFSCREEN_REQ_METRICS') {
+    // Immediately resend the last captured metrics
+    console.log('[Offscreen] REQ_METRICS: replaying last metrics');
+    if (lastMetrics) {
+      chrome.runtime.sendMessage(
+        { type: '_OFFSCREEN_METRICS', data: lastMetrics },
+        () => {} // ignore response
+      );
+      sendResponse({ ok: true, replayed: true });
+    } else {
+      sendResponse({ ok: false, error: 'No metrics available yet' });
+    }
+    return false;
+  }
+  
   return false;
 });
 
@@ -23,8 +39,22 @@ async function startCapture() {
     
     mediaStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: true
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: 44100
+      }
     });
+    
+    const audioTracks = mediaStream.getAudioTracks();
+    console.log('[Offscreen] Capture started. Video tracks:', mediaStream.getVideoTracks().length, 'Audio tracks:', audioTracks.length);
+    
+    if (audioTracks.length === 0) {
+      console.error('[Offscreen] NO AUDIO TRACKS CAPTURED! In the Chrome dialog, make sure to check "Share tab audio"');
+    } else {
+      console.log('[Offscreen] Audio track state:', audioTracks[0].enabled, audioTracks[0].muted, audioTracks[0].readyState);
+    }
     
     // Setup audio processing
     audioContext = new AudioContext({ sampleRate: 44100 });
@@ -44,9 +74,18 @@ async function startCapture() {
     
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
+        console.log('[Offscreen] Worklet METRICS:', {
+          hasWaveform: !!event.data.waveform,
+          waveformLen: event.data.waveform?.length,
+          hold: event.data.waveformHold,
+          rms: event.data.rms,
+          frame: event.data.frame
+        });
+        // Store last metrics for replay on popup reconnect
+        lastMetrics = event.data;
         chrome.runtime.sendMessage(
           { type: '_OFFSCREEN_METRICS', data: event.data },
-          () => {} // ignore sendResponse error
+          () => {} // ignore response
         );
       }
     };

@@ -105,6 +105,9 @@
         <div class="flex-between" style="margin-bottom: 8px;">
           <div class="label">Oscilloscope</div>
           <div class="flex-gap">
+            <button id="freezeBtn" class="btn-sm" title="Freeze oscilloscope">❄️ Freeze</button>
+            <button id="zoomBtn" class="btn-sm" title="Toggle zoom">🔍 Zoom</button>
+            <button id="logScaleBtn" class="btn-sm" title="Toggle log scale">log</button>
             <button id="exportBtn" class="btn-export-csv">CSV</button>
             <button id="exportLogBtn" class="btn-export-log">Log</button>
           </div>
@@ -116,6 +119,7 @@
           <span class="text-blue">Left</span>
           <span class="text-red">Right</span>
         </div>
+        <div id="freezeLabel" class="label-xs" style="display: none; text-align: center; color: var(--accent-blue);">FROZEN</div>
       </div>
 
       <!-- Glitch Timeline Section -->

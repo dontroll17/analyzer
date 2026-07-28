@@ -1,4 +1,5 @@
 import { RMS } from '../dsp-engine/rms.js';
+console.log('[Popup] popup.js loaded, RMS:', typeof RMS);
 
 // ============================================
 // Theme Colors
@@ -57,6 +58,12 @@ const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
 const timelineSection = document.getElementById('timelineSection');
 const channelIndicator = document.getElementById('channelIndicator');
 
+// Oscilloscope option buttons
+const freezeBtn = document.getElementById('freezeBtn');
+const zoomBtn = document.getElementById('zoomBtn');
+const logScaleBtn = document.getElementById('logScaleBtn');
+const freezeLabel = document.getElementById('freezeLabel');
+
 // Entropy section elements
 const entropySection = document.getElementById('entropySection');
 const entropyValue = document.getElementById('entropyValue');
@@ -79,10 +86,10 @@ let currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
 let lastGlitchState = 'STABLE';
 
 // Glitch timeline history
-var TIMELINE_MAX = 300;
-var glitchHistory = [];
-var lastTimelineRecord = 0;
-var CAPTURE_START_TIME = 0;
+const TIMELINE_MAX = 300;
+let glitchHistory = [];
+let lastTimelineRecord = 0;
+let CAPTURE_START_TIME = 0;
 
 // Oscilloscope history buffers
 const HISTORY_SIZE = 1024;
@@ -90,6 +97,48 @@ let leftChannelHistory = new Float32Array(HISTORY_SIZE);
 let rightChannelHistory = new Float32Array(HISTORY_SIZE);
 let leftHead = 0;
 let rightHead = 0;
+
+// Oscilloscope options state
+let oscFreeze = false;
+let oscZoom = false; // false = full buffer (1024), true = visible samples only
+let oscLogScale = false; // false = linear, true = logarithmic Y-axis
+
+// rAF throttle for Canvas rendering
+let pendingOscDraw = null;
+let pendingTimelineDraw = false;
+let rafScheduled = false;
+
+function scheduleDraws(leftSamples, rightSamples, needsTimelineUpdate) {
+  pendingOscDraw = { left: leftSamples, right: rightSamples };
+  if (needsTimelineUpdate) pendingTimelineDraw = true;
+  
+  if (rafScheduled) return;
+  rafScheduled = true;
+  
+  requestAnimationFrame(() => {
+    rafScheduled = false;
+    
+    if (pendingOscDraw) {
+      drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+      pendingOscDraw = null;
+    }
+    
+    if (pendingTimelineDraw) {
+      drawTimeline();
+      pendingTimelineDraw = false;
+    }
+  });
+}
+
+// Wrapper for oscilloscope update that uses rAF
+function updateOscilloscopeWithThrottle(leftSamples, rightSamples) {
+  scheduleDraws(leftSamples, rightSamples, false);
+}
+
+// Wrapper for timeline update that uses rAF
+function updateTimelineWithThrottle() {
+  scheduleDraws(null, null, true);
+}
 
 // Context & Streams state
 let popupAudioContext = null;
@@ -202,6 +251,12 @@ function updateUI(connected) {
     if (thresholdSlider) thresholdSlider.value = 85;
     if (thresholdValue) thresholdValue.textContent = '85%';
 
+    // Reset oscilloscope options on stop
+    oscFreeze = false;
+    oscZoom = false;
+    saveOscOptions();
+    updateOscButtonStates();
+
     if (entropyValue) entropyValue.textContent = '0.00';
     if (flatnessValue) flatnessValue.textContent = '0.00';
     if (entropyState) {
@@ -265,8 +320,20 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   if (trebleValue) trebleValue.textContent = Math.round(treblePercent) + '%';
 }
 
-function updateOscilloscope(leftSamples, rightSamples) {
+function drawOscilloscope(leftSamples, rightSamples) {
   if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+  console.log('[Popup] drawOscilloscope:', {
+    leftLen: leftSamples?.length,
+    rightLen: rightSamples?.length,
+    leftFirst5: leftSamples?.slice(0, 5),
+    rightFirst5: rightSamples?.slice(0, 5),
+    oscZoom,
+    oscLogScale
+  });
+
+  // Defensive: ensure samples are arrays (never null)
+  if (!Array.isArray(leftSamples)) leftSamples = [];
+  if (!Array.isArray(rightSamples)) rightSamples = [];
 
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
@@ -283,32 +350,45 @@ function updateOscilloscope(leftSamples, rightSamples) {
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
 
-  if (leftSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = colors.oscLeft;
+  // Helper to normalize sample value based on log/linear scale
+  const normalizeSample = (sample) => {
+    if (oscLogScale) {
+      // Logarithmic Y: y = log10(abs(sample) + 1e-10) / log10(2)
+      const logVal = Math.log10(Math.abs(sample) + 1e-10) / Math.log10(2);
+      // Clamp to reasonable range [-1, 1] after transform
+      return Math.max(-1, Math.min(1, logVal / 20));
+    }
+    return sample;
+  };
+
+  // Helper to draw a single channel
+  const drawChannel = (samples, color) => {
+    if (!samples || samples.length === 0) return;
+    
+    oscilloscopeCtx.strokeStyle = color;
     oscilloscopeCtx.lineWidth = 1.5;
     oscilloscopeCtx.beginPath();
-
-    for (let i = 0; i < leftSamples.length; i++) {
-      const x = (i / leftSamples.length) * canvasWidth;
-      const y = centerY - (leftSamples[i] * centerY);
-      if (i === 0) oscilloscopeCtx.moveTo(x, y);
+    
+    // Zoom: show only visible portion (first ~256 samples)
+    const startIdx = oscZoom ? 0 : 0;
+    const endIdx = oscZoom ? Math.min(samples.length, 256) : samples.length;
+    
+    for (let i = startIdx; i < endIdx; i++) {
+      const x = (i / samples.length) * canvasWidth;
+      const normalized = normalizeSample(samples[i]);
+      const y = centerY - (normalized * centerY);
+      if (i === startIdx) oscilloscopeCtx.moveTo(x, y);
       else oscilloscopeCtx.lineTo(x, y);
     }
     oscilloscopeCtx.stroke();
+  };
+
+  if (leftSamples.length > 0) {
+    drawChannel(leftSamples, colors.oscLeft);
   }
 
   if (rightSamples.length > 0) {
-    oscilloscopeCtx.strokeStyle = colors.oscRight;
-    oscilloscopeCtx.lineWidth = 1.5;
-    oscilloscopeCtx.beginPath();
-
-    for (let i = 0; i < rightSamples.length; i++) {
-      const x = (i / rightSamples.length) * canvasWidth;
-      const y = centerY - (rightSamples[i] * centerY);
-      if (i === 0) oscilloscopeCtx.moveTo(x, y);
-      else oscilloscopeCtx.lineTo(x, y);
-    }
-    oscilloscopeCtx.stroke();
+    drawChannel(rightSamples, colors.oscRight);
   }
 }
 
@@ -322,16 +402,27 @@ function getBufferedSamples(buffer, head) {
 }
 
 function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
+  console.log('[Popup] updateOscilloscopeFromWaveform:', {
+    hasWaveform: !!waveform,
+    waveformType: typeof waveform,
+    waveformIsArray: Array.isArray(waveform),
+    waveformLen: waveform?.length,
+    hold,
+    hasRight: !!waveformRight,
+    rightLen: waveformRight?.length,
+    waveformFirst5: waveform?.slice(0, 5),
+    rms: currentMetrics?.rms
+  });
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
-  // No waveform data and no hold signal — skip (canvas keeps previous frame)
+  // No waveform data and no hold signal — skip
   if (!waveform || waveform.length === 0) return;
   
   if (waveformRight && waveformRight.length > 0) {
     // Stereo: separate L/R waveforms
-    var waveL = waveform;
-    var waveR = waveformRight;
+    const waveL = waveform;
+    const waveR = waveformRight;
     for (let i = 0; i < waveL.length && i < HISTORY_SIZE; i++) {
       leftChannelHistory[i] = waveL[i];
     }
@@ -346,7 +437,7 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
     }
   } else {
     // Mono: same data for both channels
-    var wave = waveform;
+    const wave = waveform;
     for (let i = 0; i < wave.length && i < HISTORY_SIZE; i++) {
       leftChannelHistory[i] = wave[i];
       rightChannelHistory[i] = wave[i];
@@ -359,9 +450,11 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
   leftHead = 0;
   rightHead = 0;
   
-  var leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
-  var rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
-  updateOscilloscope(leftSamples, rightSamples);
+  const leftSamples = getBufferedSamples(leftChannelHistory, leftHead);
+  const rightSamples = getBufferedSamples(rightChannelHistory, rightHead);
+  if (leftSamples && rightSamples && Array.isArray(leftSamples) && Array.isArray(rightSamples)) {
+    updateOscilloscopeWithThrottle(leftSamples, rightSamples);
+  }
 }
 
 function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
@@ -452,6 +545,78 @@ function drawTimeline() {
   timelineCtx.setLineDash([]);
 }
 
+// ============================================
+// Shared metrics rendering (extracted from initAudioProcessing + updateMetricsFromOffscreen)
+// ============================================
+
+function applyMetrics(data) {
+  console.log('[Popup] applyMetrics:', {
+    rms: data.rms,
+    frame: data.frame,
+    hasWaveform: !!data.waveform,
+    waveformLen: data.waveform?.length,
+    hasWaveformRight: !!data.waveformRight,
+    waveformRightLen: data.waveformRight?.length
+  });
+  // Update current metrics state
+  currentMetrics = {
+    rms: data.rms,
+    bass: data.bass,
+    mid: data.mid,
+    treble: data.treble,
+    highFreqAnomaly: data.highFreqAnomaly,
+    rmsRight: data.rmsRight
+  };
+
+  // Update RMS display
+  updateRMSDisplay(data.rms, data.peakRMS);
+
+  // Stereo: combine L+R for overall bands, or use mono data
+  const isStereo = data.bassRight !== undefined;
+  const combinedBass = isStereo
+    ? (data.bass + data.bassRight) / 2
+    : data.bass;
+  const combinedMid = isStereo
+    ? (data.mid + data.midRight) / 2
+    : data.mid;
+  const combinedTreble = isStereo
+    ? (data.treble + data.trebleRight) / 2
+    : data.treble;
+
+  // Update channel indicator
+  if (channelIndicator) {
+    const chColors = tc('channel');
+    channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
+    channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
+  }
+
+  const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
+  updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+  
+  // Only update oscilloscope if not frozen
+  if (!oscFreeze) {
+    updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
+  }
+
+  // Glitch detection display
+  updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+
+  // Timeline recording (throttle ~5 Hz)
+  if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+  if (data.timestamp - lastTimelineRecord > 200) {
+    glitchHistory.push({
+      time: data.timestamp - CAPTURE_START_TIME,
+      rms: data.rms,
+      state: data.glitchState
+    });
+    lastTimelineRecord = data.timestamp;
+    if (glitchHistory.length > TIMELINE_MAX) {
+      glitchHistory.shift();
+    }
+    updateTimelineWithThrottle();
+  }
+}
+
 // Инициализация Audio Processing и сквозного проброса звука
 async function initAudioProcessing(stream) {
   popupCaptureStream = stream;
@@ -483,61 +648,11 @@ async function initAudioProcessing(stream) {
     // чтобы не было глушения оригинального звука
     popupWorkletNode.connect(popupAudioContext.destination);
 
+    // Use shared applyMetrics for metrics rendering
     popupWorkletNode.port.onmessage = (event) => {
       const data = event.data;
       if (data.type === 'METRICS') {
-        // Обновляем RMS и эквалайзер
-        updateRMSDisplay(data.rms, data.peakRMS);
-        
-        // Stereo: combine L+R for overall bands, or use mono data
-        // bassRight always present for stereo inputs (unlike waveformRight which is throttled)
-        const isStereo = data.bassRight !== undefined;
-        var combinedBass = isStereo
-          ? (data.bass + data.bassRight) / 2
-          : data.bass;
-        var combinedMid = isStereo
-          ? (data.mid + data.midRight) / 2
-          : data.mid;
-        var combinedTreble = isStereo
-          ? (data.treble + data.trebleRight) / 2
-          : data.treble;
-        
-        // Update channel indicator
-        if (channelIndicator) {
-          const chColors = tc('channel');
-          channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
-          channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
-        }
-        
-        const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
-        updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
-        updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
-
-        // 🎯 ОБРАБОТКА ДЕТЕКТОРА ГЛИЧЕЙ
-        currentMetrics = {
-          rms: data.rms,
-          bass: data.bass,
-          mid: data.mid,
-          treble: data.treble,
-          highFreqAnomaly: data.highFreqAnomaly,
-          rmsRight: data.rmsRight
-        };
-        updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
-
-        // Запись в timeline (throttle ~5 Hz)
-        if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
-        if (data.timestamp - lastTimelineRecord > 200) {
-          glitchHistory.push({
-            time: data.timestamp - CAPTURE_START_TIME,
-            rms: data.rms,
-            state: data.glitchState
-          });
-          lastTimelineRecord = data.timestamp;
-          if (glitchHistory.length > TIMELINE_MAX) {
-            glitchHistory.shift();
-          }
-        }
-        drawTimeline();
+        applyMetrics(data);
       }
     };
 
@@ -659,13 +774,38 @@ function sendSensitivityToWorklet(percentage) {
 
 let captureActive = false;
 let bgPort = null;
+let bgMetricsHandler = null; // Named handler reference for removeListener
 
 function connectToBackground() {
-  if (bgPort) return;
+  // Force disconnect previous port if exists
+  if (bgPort) {
+    // Remove old listener to prevent accumulation
+    if (bgMetricsHandler) {
+      try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    }
+    bgPort.disconnect();
+    bgPort = null;
+    bgMetricsHandler = null;
+  }
+
+  console.log('[Popup] Connecting to background...');
   bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
-  bgPort.onMessage.addListener((data) => {
+  console.log('[Popup] Port created:', !!bgPort);
+  
+  // Named handler function for proper removeListener
+  bgMetricsHandler = (data) => {
+    console.log('[Popup] bgMetricsHandler called with:', data?.type, data?.waveform?.length, 'waveform');
     if (data && data.type === 'METRICS') {
-      updateMetricsFromOffscreen(data);
+      console.log('[Popup] Got METRICS from bg:', {
+        hasWaveform: !!data.waveform,
+        waveformType: typeof data.waveform,
+        waveformIsArray: Array.isArray(data.waveform),
+        waveformLen: data.waveform?.length,
+        hold: data.waveformHold,
+        rms: data.rms,
+        frame: data.frame
+      });
+      applyMetrics(data);
     }
     if (data && data.type === '_OFFSCREEN_ENDED') {
       stopAudioProcessing();
@@ -674,65 +814,31 @@ function connectToBackground() {
       startBtn.textContent = 'Start Capture';
       startBtn.disabled = false;
     }
-  });
+  };
+  
+  bgPort.onMessage.addListener(bgMetricsHandler);
   bgPort.onDisconnect.addListener(() => {
+    console.warn('[Popup] Port disconnected from background');
     bgPort = null;
+    // Reconnect after a short delay (popup reopened after being closed)
+    setTimeout(() => {
+      if (!bgPort) {
+        console.log('[Popup] Reconnecting to background...');
+        connectToBackground();
+      }
+    }, 500);
   });
+  
+  // Send metrics request immediately after connect (in case capture is active)
+  setTimeout(() => {
+    if (bgPort) {
+      console.log('[Popup] REQUEST_METRICS to background');
+      bgPort.postMessage({ type: 'REQUEST_METRICS' });
+    }
+  }, 100);
 }
 
 connectToBackground();
-
-function updateMetricsFromOffscreen(data) {
-  currentMetrics = {
-    rms: data.rms,
-    bass: data.bass,
-    mid: data.mid,
-    treble: data.treble,
-    highFreqAnomaly: data.highFreqAnomaly,
-    rmsRight: data.rmsRight
-  };
-  updateRMSDisplay(data.rms, data.peakRMS);
-  
-  // Stereo: combine L+R for overall bands, or use mono data
-  // bassRight always present for stereo inputs (unlike waveformRight which is throttled)
-  const isStereo = data.bassRight !== undefined;
-  var combinedBass = isStereo
-    ? (data.bass + data.bassRight) / 2
-    : data.bass;
-  var combinedMid = isStereo
-    ? (data.mid + data.midRight) / 2
-    : data.mid;
-  var combinedTreble = isStereo
-    ? (data.treble + data.trebleRight) / 2
-    : data.treble;
-  
-  // Update channel indicator
-  if (channelIndicator) {
-    const chColors = tc('channel');
-    channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
-    channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
-  }
-  
-  const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
-  updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
-  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
-  updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
-
-  // Запись в timeline (throttle ~5 Hz)
-  if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
-  if (data.timestamp - lastTimelineRecord > 200) {
-    glitchHistory.push({
-      time: data.timestamp - CAPTURE_START_TIME,
-      rms: data.rms,
-      state: data.glitchState
-    });
-    lastTimelineRecord = data.timestamp;
-    if (glitchHistory.length > TIMELINE_MAX) {
-      glitchHistory.shift();
-    }
-  }
-  drawTimeline();
-}
 
 startBtn.addEventListener('click', () => {
   if (captureActive) return;
@@ -874,6 +980,83 @@ if (themeToggle) {
 }
 
 // ============================================
+// Oscilloscope Options (Freeze, Zoom, Log Scale)
+// ============================================
+
+const OSC_OPTIONS_KEY = 'oscOptions';
+
+// Load saved oscilloscope options
+chrome.storage.local.get([OSC_OPTIONS_KEY], (result) => {
+  if (result[OSC_OPTIONS_KEY] && typeof result[OSC_OPTIONS_KEY] === 'object') {
+    const opts = result[OSC_OPTIONS_KEY];
+    if (opts.freeze) oscFreeze = true;
+    if (opts.zoom) oscZoom = true;
+    if (opts.logScale) oscLogScale = true;
+    updateOscButtonStates();
+  }
+});
+
+function saveOscOptions() {
+  chrome.storage.local.set({
+    [OSC_OPTIONS_KEY]: {
+      freeze: oscFreeze,
+      zoom: oscZoom,
+      logScale: oscLogScale
+    }
+  });
+}
+
+function updateOscButtonStates() {
+  if (freezeBtn) {
+    freezeBtn.style.borderColor = oscFreeze ? 'var(--accent-blue)' : '';
+    freezeBtn.style.background = oscFreeze ? 'var(--accent-blue-dark)' : '';
+  }
+  if (zoomBtn) {
+    zoomBtn.style.borderColor = oscZoom ? 'var(--accent-blue)' : '';
+    zoomBtn.style.background = oscZoom ? 'var(--accent-blue-dark)' : '';
+  }
+  if (logScaleBtn) {
+    logScaleBtn.style.borderColor = oscLogScale ? 'var(--accent-blue)' : '';
+    logScaleBtn.style.background = oscLogScale ? 'var(--accent-blue-dark)' : '';
+  }
+  if (freezeLabel) {
+    freezeLabel.style.display = oscFreeze ? 'block' : 'none';
+  }
+}
+
+if (freezeBtn) {
+  freezeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    oscFreeze = !oscFreeze;
+    saveOscOptions();
+    updateOscButtonStates();
+    
+    // If unfreezing, redraw immediately
+    if (!oscFreeze && pendingOscDraw) {
+      drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+    }
+  });
+}
+
+if (zoomBtn) {
+  zoomBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    oscZoom = !oscZoom;
+    saveOscOptions();
+    updateOscButtonStates();
+  });
+}
+
+if (logScaleBtn) {
+  logScaleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    oscLogScale = !oscLogScale;
+    saveOscOptions();
+    updateOscButtonStates();
+  });
+}
+
+// ============================================
 // Prevent popup closing on internal control clicks
 // ============================================
 
@@ -895,13 +1078,34 @@ if (themeToggle) {
 }
 
 // Cleanup when popup closes
-window.addEventListener('beforeunload', () => {
+window.addEventListener('beforeunload', async () => {
+  let stopPending = false;
+  
   if (captureActive) {
-    chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' });
+    // Try to send STOP_CAPTURE with fallback via setTimeout
+    try {
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
+          stopPending = true;
+          resolve(response);
+        });
+      });
+    } catch (_) {
+      // Fallback: if sendMessage fails, retry with setTimeout
+      setTimeout(() => {
+        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, () => {});
+      }, 50);
+    }
   }
+  
   if (bgPort) {
+    // Remove listener before disconnecting
+    if (bgMetricsHandler) {
+      try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    }
     bgPort.disconnect();
     bgPort = null;
+    bgMetricsHandler = null;
   }
 });
  
