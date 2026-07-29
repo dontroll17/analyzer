@@ -39,7 +39,13 @@ function getTheme() {
 }
 
 function tc(key) {
-  return THEME_COLORS[getTheme()][key];
+  const theme = getTheme();
+  const colors = THEME_COLORS[theme];
+  if (!colors) {
+    console.warn('[Popup] Unknown theme:', theme, 'falling back to neon');
+    return THEME_COLORS.neon[key];
+  }
+  return colors[key];
 }
 
 // ============================================
@@ -561,7 +567,7 @@ function updateUI(connected) {
 
 function getLevelColor(level) {
   const colors = tc('rms');
-  return colors[level] || colors.default;
+  return colors?.[level] || colors?.default || '#ccc';
 }
 
 function updateRMSDisplay(rmsValueNum, peakRms) {
