@@ -1,6 +1,11 @@
 import { RMS } from '../dsp-engine/rms.js';
 import { loadSettings, saveSetting } from './config.js';
 
+// Logger from logger.js (loaded via regular script tag) or fallback
+const _lf = { forModule: (mod) => ({ debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn(`[${mod}] ${m}`, ...a), error: (m, ...a) => console.error(`[${mod}] ${m}`, ...a) }) };
+const log = (window.__logger) ? window.__logger.forModule('popup') : _lf.forModule('popup');
+log.info('Popup init OK, logger:', typeof log, 'window.__logger:', !!window.__logger);
+
 // ============================================
 // Background port & capture state
 // ============================================
@@ -42,7 +47,7 @@ function tc(key) {
   const theme = getTheme();
   const colors = THEME_COLORS[theme];
   if (!colors) {
-    console.warn('[Popup] Unknown theme:', theme, 'falling back to neon');
+    log.warn('Unknown theme:', theme, 'falling back to neon');
     return THEME_COLORS.neon[key];
   }
   return colors[key];
@@ -421,7 +426,7 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
       }
     } catch (e) {
       // One failed draw must not hang the popup
-      console.warn('[Popup] Canvas draw error:', e.message);
+      log.warn('Canvas draw error:', e.message);
       rafScheduled = false;
     }
   });
@@ -1010,7 +1015,16 @@ function drawHeatmap() {
  */
 function applyMetrics(data) {
   // Quick bail for invalid data
-  if (!data || typeof data.rms === 'undefined') return;
+  if (!data || typeof data.rms === 'undefined') {
+    log.warn('applyMetrics rejected: data=', !!data, 'rms=', typeof data.rms);
+    return;
+  }
+  if (applyMetrics._count === undefined) applyMetrics._count = 0;
+  applyMetrics._count++;
+  // Log every 500 metrics only
+  if (applyMetrics._count === 500) {
+    log.info('applyMetrics: processed', applyMetrics._count, 'total');
+  }
   
   try {
     // Update current metrics state
@@ -1078,7 +1092,7 @@ function applyMetrics(data) {
     updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
   } catch (e) {
     // One bad metrics frame must not hang the popup
-    console.warn('[Popup] applyMetrics error:', e.message);
+    log.warn('applyMetrics error:', e.message);
   }
 }
 
@@ -1136,7 +1150,7 @@ async function initAudioProcessing(stream) {
 
     updateUI(true);
   } catch (error) {
-    console.error('[Popup] Error initializing audio:', error);
+    log.error('Error initializing audio:', error);
     alert('Audio init error: ' + error.message);
     stopAudioProcessing();
   }
@@ -1390,10 +1404,13 @@ function ensureBackgroundPort() {
     
     // Drop metrics queue to prevent popup hang from backlog
     // When reconnecting, drop anything older than 500ms
-    const METRICS_THROTTLE_MS = 66; // ~15fps throttle
+    const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
     let lastMetricsApplyTime = 0;
     let metricsQueueDepth = 0;
     const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
+    let metricsRecvCount = 0;
+    let metricsDroppedThrottle = 0;
+    let metricsDroppedQueue = 0;
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
@@ -1403,11 +1420,22 @@ function ensureBackgroundPort() {
       if (!data) return;
       
       if (data.type === 'METRICS') {
+        metricsRecvCount++;
+        if (metricsRecvCount <= 5 || metricsRecvCount % 500 === 0) {
+          log.info('bgMetricsHandler #', metricsRecvCount, 'rms:', data.rms?.toFixed(4));
+        }
+        
         // Discard metrics if capture is not active (prevents post-stop spam)
-        if (!captureActive) return;
+        if (!captureActive) {
+          return;
+        }
         
         // Drop queue if too deep (backlog from suspended popup)
         if (metricsQueueDepth > MAX_QUEUE_DEPTH) {
+          metricsDroppedQueue++;
+          if (metricsDroppedQueue % 50 === 0) {
+            log.warn(`Queue depth too high, dropped ${metricsDroppedQueue} metrics`);
+          }
           metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
           return;
         }
@@ -1415,8 +1443,17 @@ function ensureBackgroundPort() {
         
         // Throttle: skip if called faster than 15fps
         const now = Date.now();
-        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) return;
+        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) {
+          metricsDroppedThrottle++;
+          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+          return;
+        }
         lastMetricsApplyTime = now;
+        
+        // Log every 1000 metrics to track flow
+        if (metricsRecvCount % 1000 === 0) {
+          log.info(`Recv=${metricsRecvCount} thr=${metricsDroppedThrottle} q=${metricsDroppedQueue}`);
+        }
         
         applyMetrics(data);
         metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
@@ -1484,16 +1521,19 @@ function ensureBackgroundPort() {
     bgPort.onMessage.addListener(bgMetricsHandler);
     bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
     
+    log.info('bgPort listeners attached, id:', currentId);
+    
     // Send metrics request immediately after connect (in case capture is active)
     setTimeout(() => {
       if (bgPort) {
+        log.info('Sending REQUEST_METRICS');
         bgPort.postMessage({ type: 'REQUEST_METRICS' });
       }
     }, 100);
     
     return true;
   } catch (e) {
-    console.error('[Popup] Failed to create background port:', e);
+    log.error('Failed to create background port:', e);
     return false;
   }
 }
@@ -1512,14 +1552,16 @@ startBtn.addEventListener('click', () => {
   // Enable heatmap
   heatmapActive = true;
 
-  connectToBackground();
-
   const captureSource = captureSourceSelect?.value || 'tab';
+  log.info('Start capture requested, source:', captureSource);
+
+  connectToBackground();
   safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
     if (response?.ok) {
+      log.info('Capture started successfully');
       updateUI(true);
     } else {
-      console.error('[Popup] Capture failed:', response?.error);
+      log.error('Capture failed:', response?.error);
       alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
       captureActive = false;
       heatmapActive = false;
@@ -1532,6 +1574,7 @@ startBtn.addEventListener('click', () => {
 });
 
 stopBtn.addEventListener('click', () => {
+  log.info('Stop capture requested');
   // 1. Stop immediately — don't wait for SW response
   stopAudioProcessing();
   captureActive = false;
@@ -1981,18 +2024,137 @@ ensureBackgroundPort();
 
 // Global error handler — catch unhandled errors before they crash popup
 window.addEventListener('error', (e) => {
-  console.error('[Popup] Unhandled error:', e.message, 'at', e.filename, ':', e.lineno);
+  log.error('Unhandled error:', e.message, 'at', e.filename, ':', e.lineno);
   e.preventDefault();
 });
 window.addEventListener('unhandledrejection', (e) => {
-  console.error('[Popup] Unhandled rejection:', e.reason);
+  log.error('Unhandled rejection:', e.reason);
   e.preventDefault();
 });
 
 // Reconnect port on window focus (handles Chrome suspend/resume cycle)
 window.addEventListener('focus', () => {
   if (captureActive && !bgMetricsConnected) {
-    console.log('[Popup] Focus — reconnecting port');
+    log.info('Focus — reconnecting port');
     ensureBackgroundPort();
   }
 });
+
+// ============================================
+// Logs Panel UI
+// ============================================
+const logsToggleBtn = document.getElementById('logsToggleBtn');
+const logsSection = document.getElementById('logsSection');
+const logsPanel = document.getElementById('logsPanel');
+const logsCount = document.getElementById('logsCount');
+const logsClearBtn = document.getElementById('logsClearBtn');
+const logsExportBtn = document.getElementById('logsExportBtn');
+const logsCloseBtn = document.getElementById('logsCloseBtn');
+const logsFilterRow = document.getElementById('logsFilterRow');
+
+let logsVisible = false;
+let logsFilterLevel = 'all'; // 'all' | 'error' | 'warn' | 'info' | 'debug'
+const LOGS_MAX_VISIBLE = 200; // cap DOM entries
+
+function renderLogs() {
+  if (!logsPanel) return;
+  const all = window.__logger?.getAll?.() || [];
+  const filtered = logsFilterLevel === 'all'
+    ? all
+    : all.filter(l => l.level === logsFilterLevel);
+
+  // Show/hide toggle button
+  if (logsToggleBtn) {
+    logsToggleBtn.style.display = 'block';
+  }
+
+  // Render only if changes — append new ones
+  const currentHTML = logsPanel.innerHTML;
+  const html = filtered
+    .slice(-LOGS_MAX_VISIBLE)
+    .map(l => {
+      const levelClass = 'log-level-' + l.level;
+      const ts = l.iso?.slice(11, 19) || '';
+      const mod = (l.module || '?').slice(0, 8);
+      return `<div class="log-entry ${levelClass}"><span class="log-ts">${ts}</span><span class="log-level ${levelClass}">[${l.level.toUpperCase()}]</span><span class="log-mod">[${mod}]</span> ${l.args.join(' ')}</div>`;
+    })
+    .join('');
+
+  logsPanel.innerHTML = html || '<div style="text-align:center;opacity:0.5">No logs</div>';
+
+  // Scroll to bottom
+  logsPanel.scrollTop = logsPanel.scrollHeight;
+
+  // Count
+  if (logsCount) {
+    logsCount.textContent = `${filtered.length} logs (filter: ${logsFilterLevel})`;
+  }
+}
+
+function toggleLogs() {
+  logsVisible = !logsVisible;
+  if (logsSection) {
+    logsSection.style.display = logsVisible ? 'block' : 'none';
+  }
+}
+
+// Subscribe to log changes
+if (window.__logger) {
+  window.__logger.onLogChange(() => {
+    renderLogs();
+  });
+  // Initial load
+  window.__logger.load(() => {
+    renderLogs();
+  });
+}
+
+// Toggle button
+if (logsToggleBtn) {
+  logsToggleBtn.addEventListener('click', toggleLogs);
+}
+
+// Close button
+if (logsCloseBtn) {
+  logsCloseBtn.addEventListener('click', () => {
+    logsVisible = false;
+    if (logsSection) logsSection.style.display = 'none';
+  });
+}
+
+// Clear button
+if (logsClearBtn) {
+  logsClearBtn.addEventListener('click', () => {
+    window.__logger?.clear?.();
+    renderLogs();
+  });
+}
+
+// Export all logs as JSON
+if (logsExportBtn) {
+  logsExportBtn.addEventListener('click', () => {
+    const url = window.__logger?.exportJSON?.();
+    if (url) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ssa-logs-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+  });
+}
+
+// Filter buttons
+if (logsFilterRow) {
+  logsFilterRow.addEventListener('click', (e) => {
+    const btn = e.target.closest('.logs-filter');
+    if (!btn) return;
+    // Update active state
+    logsFilterRow.querySelectorAll('.logs-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    logsFilterLevel = btn.dataset.level;
+    renderLogs();
+  });
+}
