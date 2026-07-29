@@ -37,7 +37,6 @@ class MIDIExporter {
     this.output = null;
     this.isConnected = false;
     this.metricsListener = null;
-    this._notifyOnConnect();
   }
 
   /**
@@ -89,13 +88,15 @@ class MIDIExporter {
    * Notify via custom event when MIDI is connected
    */
   _notifyOnConnect() {
-    window.dispatchEvent(new CustomEvent('midiStatusChange', {
-      detail: {
+    const win = typeof window !== 'undefined' ? window : null;
+    if (win && typeof win.dispatchEvent === 'function') {
+      const detail = {
         available: this.isAvailable(),
         connected: this.isConnected,
         outputName: this.output?.name || null
-      }
-    }));
+      };
+      win.dispatchEvent(new CustomEvent('midiStatusChange', { detail }));
+    }
   }
 
   /**
@@ -167,7 +168,7 @@ class MIDIExporter {
     // Flatness → CC91 (Reverb Depth), scale 0-1 → 0-127
     this.sendCC(MIDI_CC.REVERB_DEPTH, this._toMIDI(flatness, 0, 1));
 
-    // Glitch count → CC19 (Capture Hold), modulo 127
+    // Glitch count → CC19 (Capture Hold), modulo 128
     this.sendCC(MIDI_CC.CAPTURE_HOLD, glitchCount % 128);
   }
 
@@ -224,4 +225,12 @@ class MIDIExporter {
   }
 }
 
-export const midiExporter = new MIDIExporter();
+export { MIDIExporter, MIDI_CC, MIDI_CHANNEL };
+
+// Create default singleton (safe for browser only)
+let midiExporter = null;
+if (typeof window !== 'undefined') {
+  midiExporter = new MIDIExporter();
+}
+
+export default midiExporter;

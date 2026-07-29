@@ -7,4 +7,6 @@ export default {
   moduleFileExtensions: ['js'],
   testMatch: ['**/__tests__/**/*.test.js'],
   verbose: true,
+  // Use jsdom for browser API tests (window, CustomEvent, etc.)
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
 };
