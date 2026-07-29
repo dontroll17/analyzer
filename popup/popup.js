@@ -920,7 +920,6 @@ function ensureBackgroundPort() {
   if (bgPort) return true; // Already connected
   
   try {
-    console.log('[Popup] Creating background port...');
     bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
     isConnected = true;
     gracefulStop = false;

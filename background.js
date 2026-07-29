@@ -6,6 +6,11 @@ let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 
+// Check if offscreen API is available (may be disabled in some Chrome versions)
+function canUseOffscreen() {
+  return !!(chrome.offscreen && chrome.offscreen.createDocument);
+}
+
 // Keepalive alarm to prevent SW sleep during capture (SW max lifetime ~30s-5min)
 chrome.alarms.create('ssa_keepalive', { periodInMinutes: 4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -16,22 +21,32 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function createOffscreenDocument() {
-  if (chrome.offscreen && !offscreenReady) {
-    try {
-      await chrome.offscreen.createDocument({
-        justification: 'media_capture',
-        reasons: ['USER_MEDIA'],
-        url: 'offscreen.html'
-      });
+  if (!canUseOffscreen()) {
+    console.warn('[BG] chrome.offscreen API not available');
+    return false;
+  }
+  
+  if (offscreenReady) {
+    return true;
+  }
+  
+  try {
+    await chrome.offscreen.createDocument({
+      justification: 'media_capture',
+      reasons: ['USER_MEDIA'],
+      url: 'offscreen.html'
+    });
+    offscreenReady = true;
+    return true;
+  } catch (err) {
+    // If already created, treat as ready
+    if (err.message?.includes('single offscreen')) {
       offscreenReady = true;
-    } catch (err) {
-      // If already created, treat as ready
-      if (err.message?.includes('single offscreen')) {
-        offscreenReady = true;
-      } else {
-        console.error('[BG] Failed to create offscreen:', err);
-        offscreenReady = false;
-      }
+      return true;
+    } else {
+      console.error('[BG] Failed to create offscreen:', err);
+      offscreenReady = false;
+      return false;
     }
   }
 }
@@ -87,10 +102,8 @@ chrome.runtime.onConnect.addListener((port) => {
   // === Overlay connection (persistent, for overlay widget metrics) ===
   if (port.name === 'overlay-metrics') {
     overlayPort = port;
-    console.log('[BG] overlay-metrics port connected');
 
     port.onDisconnect.addListener(() => {
-      console.log('[BG] overlay-metrics port disconnected');
       overlayPort = null;
     });
   }
@@ -112,6 +125,11 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {
+    if (!canUseOffscreen()) {
+      sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
+      return true;
+    }
+    
     if (offscreenReady) {
       chrome.runtime.sendMessage({ type: '_OFFSCREEN_START' }, response => {
         isCapturing = !!response?.ok;
@@ -126,7 +144,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(response);
       });
     } else {
-      sendResponse({ ok: false, error: 'Offscreen not ready' });
+      // Try to create offscreen document
+      createOffscreenDocument().then((success) => {
+        if (success) {
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START' }, (response) => {
+            isCapturing = !!response?.ok;
+            sendResponse(response);
+          });
+        } else {
+          sendResponse({ ok: false, error: 'Failed to create offscreen document' });
+        }
+      });
     }
     return true;
   }
