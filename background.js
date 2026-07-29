@@ -11,6 +11,7 @@ let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
+const MAX_METRICS_QUEUE = 5; // Limit to 5 latest frames for backpressure
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
@@ -254,20 +255,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.storage.local.set({ [DROP_COUNT_KEY]: d.audioDrops });
     }
     
-    // Also add to in-memory queue (limit to 50 to prevent memory buildup)
+    // Also add to in-memory queue (strict limit for backpressure)
     metricsQueue.push(d);
-    if (metricsQueue.length > 50) {
+    if (metricsQueue.length > MAX_METRICS_QUEUE) {
       metricsQueue.shift();
     }
     
     // Forward to popup if connected (live stream, no delay)
-    if (popupPort) {
+    // But only if queue hasn't exceeded threshold (backpressure)
+    if (popupPort && metricsQueue.length <= MAX_METRICS_QUEUE) {
       try {
         popupPort.postMessage({ type: 'METRICS', ...d });
       } catch (e) {
         log.error('Failed to forward to popup:', e.message);
         popupPort = null;
       }
+    } else if (popupPort) {
+      // Queue exceeded — skip this frame (backpressure)
+      log.debug('Backpressure: skipping frame, queue=', metricsQueue.length);
     } else {
       // Throttle: warn only once at disconnect, not every frame
       if (!popupDisconnectedWarned) {

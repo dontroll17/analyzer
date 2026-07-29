@@ -1408,6 +1408,7 @@ function ensureBackgroundPort() {
     // Drop metrics queue to prevent popup hang from backlog
     // When reconnecting, drop anything older than 500ms
     const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
+    const STALE_THRESHOLD_MS = 500; // Drop frames older than 500ms (prevents stale render)
     let lastMetricsApplyTime = 0;
     let metricsQueueDepth = 0;
     const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
@@ -1430,6 +1431,13 @@ function ensureBackgroundPort() {
         
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) {
+          return;
+        }
+        
+        // Drop stale frames — if frame timestamp is too old, skip rendering
+        // This prevents "catching up" with hundreds of old frames after popup is restored
+        if (data.timestamp && (Date.now() - data.timestamp > STALE_THRESHOLD_MS)) {
+          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
           return;
         }
         
