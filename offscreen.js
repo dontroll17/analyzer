@@ -141,7 +141,7 @@ async function startCapture(source) {
     }
     
     audioContext = new AudioContext({ sampleRate: 44100 });
-    const source = audioContext.createMediaStreamSource(mediaStream);
+    const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
     await audioContext.audioWorklet.addModule(workletPath);
@@ -153,7 +153,7 @@ async function startCapture(source) {
       channelCountMode: 'max',
       channelInterpretation: 'discrete'
     });
-    source.connect(workletNode);
+    audioSource.connect(workletNode);
     
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
