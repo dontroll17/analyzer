@@ -1,6 +1,15 @@
 import { RMS } from '../dsp-engine/rms.js';
 
 // ============================================
+// Background port & capture state
+// ============================================
+let bgPort = null;
+let bgMetricsHandler = null;
+let captureActive = false;
+let gracefulStop = false;
+let isConnected = false;
+
+// ============================================
 // Theme Colors
 // ============================================
 const THEME_COLORS = {
@@ -125,20 +134,25 @@ const perfDrawTime = document.getElementById('perfDrawTime');
 const perfQueue = document.getElementById('perfQueue');
 const togglePerfBtn = document.getElementById('togglePerfBtn');
 
-function togglePerfMonitor() {
-  perfActive = !perfActive;
-  perfFrameCount = 0;
-  perfDrawTimes = [];
-  if (perfMonitor) {
-    perfMonitor.style.display = perfActive ? 'block' : 'none';
-  }
-  if (togglePerfBtn) {
-    togglePerfBtn.textContent = perfActive ? 'Hide' : 'Perf';
-  }
-  chrome.storage.local.set({ [PERF_KEY]: perfActive });
+// Perf monitor visibility state (separate from perfActive which tracks measurement)
+let perfVisible = false;
 
+function togglePerfMonitor() {
+  perfVisible = !perfVisible;
+  perfActive = perfVisible; // If visible, also start measuring
+  
+  if (perfMonitor) {
+    perfMonitor.style.display = perfVisible ? 'block' : 'none';
+  }
+  
+  if (togglePerfBtn) {
+    togglePerfBtn.textContent = perfVisible ? 'Hide' : 'Perf';
+  }
+  
+  chrome.storage.local.set({ [PERF_KEY]: perfVisible });
+  
   // Start rAF loop when enabling
-  if (perfActive && !perfRunning) {
+  if (perfVisible && !perfRunning) {
     requestAnimationFrame(perfFrameLoop);
   }
 }
@@ -206,6 +220,7 @@ function perfAwareDraw(leftSamples, rightSamples) {
 // Load perf monitor state on startup
 chrome.storage.local.get([PERF_KEY], (result) => {
   if (result[PERF_KEY]) {
+    perfVisible = true;
     perfActive = true;
     if (perfMonitor) perfMonitor.style.display = 'block';
     if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
@@ -249,6 +264,7 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
           drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
         }
       }
+      // CRITICAL: Release reference to prevent memory leaks
       pendingOscDraw = null;
     }
     
@@ -502,12 +518,20 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
   drawBuffer(rightBuffer, colors.oscRight);
 }
 
-function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
+function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = false) {
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
   // No waveform data — skip
   if (!waveform || waveform.length === 0) return;
+  
+  if (frozen) {
+    // Freeze mode: don't update buffers, just redraw last frame
+    if (leftChannelHistory.some(v => v !== 0)) {
+      drawOscilloscope(leftChannelHistory, rightChannelHistory);
+    }
+    return;
+  }
   
   if (waveformRight && waveformRight.length > 0) {
     // Stereo: separate L/R waveforms
@@ -690,10 +714,9 @@ function applyMetrics(data) {
   const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
   updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
   
-  // Only update oscilloscope if not frozen
-  if (!oscFreeze) {
-    updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
-  }
+  // Update oscilloscope (freeze handled inside updateOscilloscopeFromWaveform)
+  // When frozen: keep drawing the last frame
+  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
 
   // Glitch detection display
   updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
@@ -762,31 +785,55 @@ async function initAudioProcessing(stream) {
 }
 
 function stopAudioProcessing() {
+  gracefulStop = true;
+  
   glitchLog = [];
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
   
-  // Clear channel history buffers
+  // CRITICAL: Clear all buffers to prevent memory leaks
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
-
+  
+  // Clear pending draw references
+  pendingOscDraw = null;
+  pendingTimelineDraw = false;
+  
+  // Clear channel history buffers
   if (popupMediaStreamSource) {
-    popupMediaStreamSource.disconnect();
+    try { popupMediaStreamSource.disconnect(); } catch (_) {}
     popupMediaStreamSource = null;
   }
   if (popupWorkletNode) {
-    popupWorkletNode.disconnect();
+    try { popupWorkletNode.disconnect(); } catch (_) {}
     popupWorkletNode = null;
   }
   if (popupAudioContext) {
-    popupAudioContext.close().catch(console.error);
+    if (popupAudioContext.state !== 'closed') {
+      popupAudioContext.close().catch(console.error);
+    }
     popupAudioContext = null;
   }
   if (popupCaptureStream) {
     popupCaptureStream.getTracks().forEach(track => track.stop());
     popupCaptureStream = null;
   }
+  
+  // Disconnect from background
+  if (bgPort) {
+    try {
+      bgPort.disconnect();
+    } catch (_) {}
+    bgPort = null;
+    bgMetricsHandler = null;
+  }
+  
+  isConnected = false;
+  captureActive = false;
   updateUI(false);
+  
+  // Reset flag after a short delay to prevent race condition
+  setTimeout(() => { gracefulStop = false; }, 200);
 }
 
 function addGlitchLogEntry(glitchCount) {
@@ -868,64 +915,75 @@ function sendSensitivityToWorklet(percentage) {
   });
 }
 
-let captureActive = false;
-let bgPort = null;
-let bgMetricsHandler = null; // Named handler reference for removeListener
+// Background port — create ONCE at page load to prevent memory leaks
+function ensureBackgroundPort() {
+  if (bgPort) return true; // Already connected
+  
+  try {
+    console.log('[Popup] Creating background port...');
+    bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
+    isConnected = true;
+    gracefulStop = false;
+    
+    // Named handler function for proper removeListener
+    bgMetricsHandler = (data) => {
+      if (data && data.type === 'METRICS') {
+        // Discard metrics if capture is not active (prevents post-stop spam)
+        if (!captureActive) return;
+        applyMetrics(data);
+      }
+      if (data && data.type === '_OFFSCREEN_ENDED') {
+        gracefulStop = true; // Prevent disconnect warning
+        stopAudioProcessing();
+        updateUI(false);
+        captureActive = false;
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+        setTimeout(() => { gracefulStop = false; }, 100);
+      }
+      // Handle offscreen capture errors (user cancelled, permission denied, etc.)
+      if (data && data.type === '_OFFSCREEN_ERROR') {
+        if (rmsLevel) {
+          rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
+          rmsLevel.style.color = tc('rms').SILENCE;
+        }
+        captureActive = false;
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+    };
+    
+    bgPort.onMessage.addListener(bgMetricsHandler);
+    bgPort.onDisconnect.addListener(() => {
+      // Only log if we didn't explicitly disconnect (stop was called)
+      if (!gracefulStop) {
+        console.warn('[Popup] Port unexpectedly disconnected from background');
+      }
+      isConnected = false;
+      bgPort = null;
+      bgMetricsHandler = null;
+      captureActive = false;
+      startBtn.textContent = 'Start Capture';
+      startBtn.disabled = false;
+      updateUI(false);
+    });
+    
+    // Send metrics request immediately after connect (in case capture is active)
+    setTimeout(() => {
+      if (bgPort) {
+        bgPort.postMessage({ type: 'REQUEST_METRICS' });
+      }
+    }, 100);
+    
+    return true;
+  } catch (e) {
+    console.error('[Popup] Failed to create background port:', e);
+    return false;
+  }
+}
 
 function connectToBackground() {
-  // Force disconnect previous port if exists
-  if (bgPort) {
-    // Remove old listener to prevent accumulation
-    if (bgMetricsHandler) {
-      try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
-    }
-    bgPort.disconnect();
-    bgPort = null;
-    bgMetricsHandler = null;
-  }
-
-  console.log('[Popup] Connecting to background...');
-  bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
-  
-  // Named handler function for proper removeListener
-  bgMetricsHandler = (data) => {
-    if (data && data.type === 'METRICS') {
-      // Discard metrics if capture is not active (prevents post-stop spam)
-      if (!captureActive) return;
-      applyMetrics(data);
-    }
-    if (data && data.type === '_OFFSCREEN_ENDED') {
-      stopAudioProcessing();
-      updateUI(false);
-      captureActive = false;
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
-    }
-    // Handle offscreen capture errors (user cancelled, permission denied, etc.)
-    if (data && data.type === '_OFFSCREEN_ERROR') {
-      if (rmsLevel) {
-        rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
-        rmsLevel.style.color = tc('rms').SILENCE;
-      }
-      captureActive = false;
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
-    }
-  };
-  
-  bgPort.onMessage.addListener(bgMetricsHandler);
-  bgPort.onDisconnect.addListener(() => {
-    console.warn('[Popup] Port disconnected from background');
-    bgPort = null;
-    bgMetricsHandler = null;
-  });
-  
-  // Send metrics request immediately after connect (in case capture is active)
-  setTimeout(() => {
-    if (bgPort) {
-      bgPort.postMessage({ type: 'REQUEST_METRICS' });
-    }
-  }, 100);
+  return ensureBackgroundPort();
 }
 
 startBtn.addEventListener('click', () => {
@@ -953,7 +1011,6 @@ startBtn.addEventListener('click', () => {
 stopBtn.addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, response => {
     stopAudioProcessing();
-    updateUI(false);
     captureActive = false;
     startBtn.textContent = 'Start Capture';
     startBtn.disabled = false;
@@ -1143,13 +1200,12 @@ if (freezeBtn) {
     saveOscOptions();
     updateOscButtonStates();
     
-    // If unfreezing, redraw immediately
-    if (!oscFreeze && pendingOscDraw) {
-      if (perfActive) {
-        perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
-      } else {
-        drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
-      }
+    // When freezing: save current buffers to pendingOscDraw for redraw
+    if (oscFreeze) {
+      pendingOscDraw = {
+        left: new Float32Array(leftChannelHistory),
+        right: new Float32Array(rightChannelHistory)
+      };
     }
   });
 }
@@ -1264,4 +1320,6 @@ window.addEventListener('beforeunload', async () => {
     bgMetricsHandler = null;
   }
 });
- 
+
+// Initialize background port ONCE at page load — prevents memory leaks from multiple connections
+ensureBackgroundPort();
