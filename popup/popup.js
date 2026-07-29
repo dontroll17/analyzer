@@ -308,7 +308,7 @@ function perfFrameLoop(timestamp) {
 // Performance-aware draw wrapper
 function perfAwareDraw(leftSamples, rightSamples) {
   const start = perfNow();
-  drawOscilloscope(ctx, bufferL, bufferR);
+  drawOscilloscope(leftSamples, rightSamples);
   const elapsed = perfNow() - start;
 
   perfDrawTimes.push(elapsed);
