@@ -345,6 +345,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // === Forward debug metrics (DSP time, latency) to popup ===
+  if (message.type === '_DEBUG_METRICS') {
+    if (popupPort) {
+      try {
+        popupPort.postMessage({ type: '_DEBUG_METRICS', ...message });
+      } catch (e) {
+        log.warn('Failed to forward _DEBUG_METRICS to popup:', e.message);
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   return false;
 });
 

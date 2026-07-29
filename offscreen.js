@@ -25,6 +25,10 @@ let _streamMonitorTimer = null;
 let _streamMonitorStopped = false;
 let _lastStreamActiveState = true;
 
+// DSP time: periodically request from AudioWorklet via workletNode.port
+let _dspTimeTimer = null;
+let _lastWorkletTimestamp = 0;
+
 // Suppress runtime.lastError spam when background is unavailable
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
@@ -181,8 +185,18 @@ async function startCapture(source) {
     });
     audioSource.connect(workletNode);
     
+    // Save reference at module level so DSP timer can access it
+    // (let declarations in async function are NOT visible to module-level vars)
+    window._ssaWorkletNode = workletNode;
+    
     // Save reference in closure to prevent race with cleanup()
     const savedAudioContext = audioContext;
+    
+    // Start DSP time polling: request DSP time from worklet every 2s
+    _dspTimeTimer = setInterval(() => {
+      if (!workletNode || !workletNode.port) return;
+      workletNode.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+    }, 2000);
     
     // Drop detection: poll MediaStream active state (reliable in MV3)
     // AudioContext.statechange is unreliable in offscreen docs — state stays 'running'
@@ -238,11 +252,27 @@ async function startCapture(source) {
         _metricsCounter++;
         lastMetrics = event.data;
         lastMetrics.audioDrops = audioDropCount;
+        _lastWorkletTimestamp = event.data.timestamp || Date.now();
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
         // Log every 1000 messages to avoid killing SW
         if (_metricsCounter % 1000 === 0) {
           log.info('Metrics sent:', _metricsCounter);
         }
+      }
+      
+      // Handle DSP time reports from AudioWorklet
+      if (event.data.type === 'DSP_TIME_REPORT') {
+        const dspTime = event.data.dspTime || 0;
+        // Calculate latency: time between worklet processing and now
+        const latency = _lastWorkletTimestamp > 0
+          ? Date.now() - _lastWorkletTimestamp
+          : 0;
+        log.info(`DSP time: ${dspTime.toFixed(2)}ms, round-trip: ${latency.toFixed(1)}ms`);
+        safeSendMessage({
+          type: '_DEBUG_METRICS',
+          dspTime: dspTime,
+          latency: latency
+        });
       }
     };
     
@@ -335,6 +365,12 @@ function scheduleCleanup() {
 function cleanup() {
   cleanupScheduled = false;
   
+  // Stop DSP time polling
+  if (_dspTimeTimer) {
+    clearInterval(_dspTimeTimer);
+    _dspTimeTimer = null;
+  }
+  
   // Stop keepalive ping
   if (_keepaliveTimer) {
     clearInterval(_keepaliveTimer);
@@ -347,6 +383,9 @@ function cleanup() {
     clearInterval(_streamMonitorTimer);
     _streamMonitorTimer = null;
   }
+  
+  // Clear worklet reference to prevent leaks
+  window._ssaWorkletNode = null;
   
   // Reset audio drop counter
   audioDropCount = 0;
