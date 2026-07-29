@@ -4,6 +4,15 @@ let audioContext = null;
 let cleanupScheduled = false;
 let lastMetrics = null;
 
+// Suppress runtime.lastError spam when background is unavailable
+function safeSendMessage(msg) {
+  chrome.runtime.sendMessage(msg, () => {
+    if (chrome.runtime.lastError) {
+      // Background terminated or no port — silent ignore
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_START') {
     startCapture().then(sendResponse);
@@ -17,10 +26,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === '_OFFSCREEN_REQ_METRICS') {
     if (lastMetrics) {
-      chrome.runtime.sendMessage(
-        { type: '_OFFSCREEN_METRICS', data: lastMetrics },
-        () => {}
-      );
+      safeSendMessage({ type: '_OFFSCREEN_METRICS', data: lastMetrics });
       sendResponse({ ok: true, replayed: true });
     } else {
       sendResponse({ ok: false, error: 'No metrics available yet' });
@@ -48,7 +54,7 @@ async function startCapture() {
     const audioTracks = mediaStream.getAudioTracks();
     
     if (audioTracks.length === 0) {
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: '_OFFSCREEN_ERROR',
         error: 'No audio tracks — make sure to check "Share tab audio"'
       });
@@ -74,10 +80,7 @@ async function startCapture() {
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
         lastMetrics = event.data;
-        chrome.runtime.sendMessage(
-          { type: '_OFFSCREEN_METRICS', data: event.data },
-          () => {}
-        );
+        safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
       }
     };
     
@@ -91,7 +94,7 @@ async function startCapture() {
   } catch (error) {
     // User cancelled the share dialog
     if (error.name === 'NotAllowedError') {
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: '_OFFSCREEN_ERROR',
         error: 'User denied tab capture'
       });
@@ -99,7 +102,7 @@ async function startCapture() {
     }
     
     // Other errors (permission, not available, etc.)
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: '_OFFSCREEN_ERROR',
       error: error.message || 'Unknown capture error'
     });
@@ -133,5 +136,5 @@ function cleanup() {
     audioContext.close().catch(() => {});
     audioContext = null;
   }
-  chrome.runtime.sendMessage({ type: '_OFFSCREEN_ENDED' }, () => {});
+  safeSendMessage({ type: '_OFFSCREEN_ENDED' });
 }
