@@ -379,7 +379,7 @@ let lastOscDrawTime = 0;
 
 function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
   // Guard: never draw if canvas is hidden or page is in background
-  if (document.hidden || !oscilloscopeCanvas) return;
+  if (document.hidden || !oscilloscopeCanvas || canvasDisabled) return;
   
   pendingOscDraw = { left: leftBuffer, right: rightBuffer };
   if (needsTimelineUpdate) pendingTimelineDraw = true;
@@ -1050,30 +1050,32 @@ function applyMetrics(data) {
     
     // Update oscilloscope (freeze handled inside updateOscilloscopeFromWaveform)
     // When frozen: keep drawing the last frame
-    updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
+    if (!canvasDisabled) {
+      updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
+
+      // Update heatmap (if enabled and capture active)
+      if (heatmapActive) {
+        updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
+      }
+
+      // Timeline recording (throttle ~5 Hz)
+      if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+      if (data.timestamp - lastTimelineRecord > 200) {
+        glitchHistory.push({
+          time: data.timestamp - CAPTURE_START_TIME,
+          rms: data.rms,
+          state: data.glitchState
+        });
+        lastTimelineRecord = data.timestamp;
+        if (glitchHistory.length > TIMELINE_MAX) {
+          glitchHistory.shift();
+        }
+        updateTimelineWithThrottle();
+      }
+    }
 
     // Glitch detection display
     updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
-
-    // Update heatmap (if enabled and capture active)
-    if (heatmapActive) {
-      updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
-    }
-
-    // Timeline recording (throttle ~5 Hz)
-    if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
-    if (data.timestamp - lastTimelineRecord > 200) {
-      glitchHistory.push({
-        time: data.timestamp - CAPTURE_START_TIME,
-        rms: data.rms,
-        state: data.glitchState
-      });
-      lastTimelineRecord = data.timestamp;
-      if (glitchHistory.length > TIMELINE_MAX) {
-        glitchHistory.shift();
-      }
-      updateTimelineWithThrottle();
-    }
   } catch (e) {
     // One bad metrics frame must not hang the popup
     console.warn('[Popup] applyMetrics error:', e.message);
@@ -1619,6 +1621,9 @@ if (exportBtn) {
 // Theme Management
 // ============================================
 
+// Canvas disable flag — set to true to debug non-canvas issues
+let canvasDisabled = false;
+
 const THEME_KEY = 'theme';
 const THEME_CYCLE = ['neon', 'light', 'system'];
 const THEME_ICONS = {
@@ -1973,3 +1978,21 @@ window.addEventListener('beforeunload', async () => {
 
 // Initialize background port ONCE at page load — prevents memory leaks from multiple connections
 ensureBackgroundPort();
+
+// Global error handler — catch unhandled errors before they crash popup
+window.addEventListener('error', (e) => {
+  console.error('[Popup] Unhandled error:', e.message, 'at', e.filename, ':', e.lineno);
+  e.preventDefault();
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[Popup] Unhandled rejection:', e.reason);
+  e.preventDefault();
+});
+
+// Reconnect port on window focus (handles Chrome suspend/resume cycle)
+window.addEventListener('focus', () => {
+  if (captureActive && !bgMetricsConnected) {
+    console.log('[Popup] Focus — reconnecting port');
+    ensureBackgroundPort();
+  }
+});
