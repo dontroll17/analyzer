@@ -596,6 +596,11 @@ function drawTimeline() {
 
   if (glitchHistory.length < 2) return;
 
+  // Normalize timestamps relative to oldest point in window (prevents timeline disappearing after shift)
+  const windowStart = glitchHistory[0].time;
+  const windowEnd = glitchHistory[glitchHistory.length - 1].time;
+  const windowDuration = windowEnd - windowStart;
+
   // Group consecutive points by state for batched color drawing
   var segments = [];
   var currentSegment = [];
@@ -626,7 +631,8 @@ function drawTimeline() {
     
     for (var i = 0; i < seg.points.length; i++) {
       var point = seg.points[i];
-      var x = (point.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
+      // Normalize X: relative to window start, not absolute time
+      var x = ((point.time - windowStart) / (windowDuration || 1)) * (canvasWidth - padding * 2) + padding;
       var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
       
       if (i === 0) {

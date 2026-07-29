@@ -12,6 +12,19 @@
   <button id="stopBtn" disabled>Stop Capture</button>
   <div id="status" class="disconnected">Not Connected</div>
 
+  <!-- Performance Monitor (always visible) -->
+  <div id="perfMonitor" class="section-tertiary" style="margin-top: 10px; display: none;">
+    <div class="flex-between" style="margin-bottom: 4px;">
+      <div class="label-sm">Performance Monitor</div>
+      <button id="togglePerfBtn" class="btn-sm">Hide</button>
+    </div>
+    <div class="flex-row" style="font-size: 10px; gap: 8px;">
+      <div id="perfFps" class="label-sm" style="min-width: 50px;">FPS: --</div>
+      <div id="perfDrawTime" class="label-sm" style="min-width: 70px;">Draw: --</div>
+      <div id="perfQueue" class="label-sm" style="min-width: 60px;">Queue: --</div>
+    </div>
+  </div>
+
   <!-- RMS Display Section -->
   <div id="rmsSection" class="section" style="display: none;">
     <div class="label" style="margin-bottom: 8px;">Current RMS:</div>
@@ -121,19 +134,6 @@
           <span class="text-red">Right</span>
         </div>
         <div id="freezeLabel" class="label-xs" style="display: none; text-align: center; color: var(--accent-blue);">FROZEN</div>
-
-        <!-- Performance Monitor -->
-        <div id="perfMonitor" class="section-tertiary" style="margin-top: 10px; display: none;">
-          <div class="flex-between" style="margin-bottom: 4px;">
-            <div class="label-sm">Performance Monitor</div>
-            <button id="togglePerfBtn" class="btn-sm">Hide</button>
-          </div>
-          <div class="flex-row" style="font-size: 10px; gap: 8px;">
-            <div id="perfFps" class="label-sm" style="min-width: 50px;">FPS: --</div>
-            <div id="perfDrawTime" class="label-sm" style="min-width: 70px;">Draw: --</div>
-            <div id="perfQueue" class="label-sm" style="min-width: 60px;">Queue: --</div>
-          </div>
-        </div>
       </div>
 
       <!-- Glitch Timeline Section -->
