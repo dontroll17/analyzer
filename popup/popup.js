@@ -1299,6 +1299,8 @@ function sendSensitivityToWorklet(percentage) {
 
 // Background port disconnect handler — named for proper removal
 function bgPortDisconnectHandler() {
+  bgMetricsConnected = false;
+  
   // Remove all listeners to prevent leaks
   if (bgPort) {
     bgPort.onMessage.removeListener(bgMetricsHandler);
@@ -1311,9 +1313,8 @@ function bgPortDisconnectHandler() {
   
   // If capture was active when port disconnected, trigger reconnect
   if (captureActive) {
-    // Port may have been recycled (SW woke up), try to reconnect
     setTimeout(() => {
-      if (captureActive && !bgPort) {
+      if (captureActive && !bgPort && !bgMetricsConnected) {
         ensureBackgroundPort();
       }
     }, 500);
@@ -1357,38 +1358,75 @@ function safePostMessage(port, msg) {
 }
 
 // Background port — create ONCE at page load to prevent memory leaks
+let bgPortId = 0; // Track connection generation to reject stale messages
+let bgMetricsConnected = false; // Track if port is actually connected
 function ensureBackgroundPort() {
-  if (bgPort) return true; // Already connected
+  // Skip if port is already connected
+  if (bgPort && !bgPort._disconnected && bgMetricsConnected) {
+    bgPort.postMessage({ type: 'REQUEST_METRICS' });
+    return true;
+  }
+  
+  // Create a new port generation
+  bgPortId++;
+  const currentId = bgPortId;
+  
+  // Clear any stale listeners from previous port
+  if (bgPort && !bgPort._disconnected) {
+    try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandler); } catch (_) {}
+    bgPort.disconnect();
+    bgPort = null;
+  }
+  bgMetricsConnected = false;
   
   try {
     bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
+    bgMetricsConnected = true;
     isConnected = true;
     gracefulStop = false;
     
-    // Throttle metrics processing to 30fps (prevents DOM/canvas thrashing at 60fps)
-    const METRICS_THROTTLE_MS = 33; // ~30fps
+    // Drop metrics queue to prevent popup hang from backlog
+    // When reconnecting, drop anything older than 500ms
+    const METRICS_THROTTLE_MS = 66; // ~15fps throttle
     let lastMetricsApplyTime = 0;
+    let metricsQueueDepth = 0;
+    const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
+      // Reject stale messages from previous connection
+      if (currentId !== bgPortId) return;
+      
       if (!data) return;
       
       if (data.type === 'METRICS') {
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) return;
         
-        // Throttle: skip if called faster than 30fps
+        // Drop queue if too deep (backlog from suspended popup)
+        if (metricsQueueDepth > MAX_QUEUE_DEPTH) {
+          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+          return;
+        }
+        metricsQueueDepth++;
+        
+        // Throttle: skip if called faster than 15fps
         const now = Date.now();
         if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) return;
         lastMetricsApplyTime = now;
         
         applyMetrics(data);
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
         
         // Update audio drop count from metrics
         if (data.audioDrops !== undefined) {
           updateDropCounter(data.audioDrops);
         }
       }
+      // Ignore control messages from stale connections
+      if (currentId !== bgPortId) return;
+      
       if (data.type === '_OFFSCREEN_ENDED') {
         gracefulStop = true; // Mark as graceful to prevent disconnect warning
         stopAudioProcessing();
@@ -1402,15 +1440,18 @@ function ensureBackgroundPort() {
       }
       // Handle audio drop events
       if (data.type === '_AUDIO_DROP') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
         dropCount = data.count;
         updateDropCounter(dropCount);
       }
       if (data.type === '_AUDIO_DROP_RESET') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
         dropCount = 0;
         updateDropCounter(0);
       }
       // Handle debug metrics (latency, DSP time)
       if (data.type === '_DEBUG_METRICS') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
         if (data.latency !== undefined) {
           lastLatency = data.latency;
         }
