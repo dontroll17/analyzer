@@ -26,6 +26,37 @@ const BIT_REVERSE = new Uint16Array(FFT_SIZE);
   }
 }
 
+// Precomputed twiddle factors table: ALL cos/sin values needed for all stages
+// Layout: for each stage s (0..9), for each k (0..m/2-1), store [cos, sin]
+// Total entries: sum(m/2 for m=2,4,8,...,1024) = 1+2+4+...+512 = 1023
+// Access: twiddle[s * 1024 + k * 2] = cos, twiddle[s * 1024 + k * 2 + 1] = sin
+// Using 1024 slots per stage for alignment (max m/2 = 512)
+const TWIDDLE_DEPTH = 10; // log2(FFT_SIZE) = 10
+const TWIDDLE_PER_STAGE = 1024;
+const TWIDDLE_TABLE = new Float32Array(TWIDDLE_DEPTH * TWIDDLE_PER_STAGE * 2);
+{
+  for (let s = 0; s < TWIDDLE_DEPTH; s++) {
+    const m = 1 << (s + 1); // 2, 4, 8, ..., 1024
+    const halfM = m >> 1;
+    const angle = -2 * Math.PI / m;
+    const cosW = Math.cos(angle);
+    const sinW = Math.sin(angle);
+    
+    let wRe = 1;
+    let wIm = 0;
+    for (let k = 0; k < halfM; k++) {
+      const base = s * TWIDDLE_PER_STAGE * 2 + k * 2;
+      TWIDDLE_TABLE[base] = wRe;     // cos(k * angle)
+      TWIDDLE_TABLE[base + 1] = wIm; // sin(k * angle) [negative because angle < 0]
+      // Recursive update
+      const newRe = wRe * cosW - wIm * sinW;
+      const newIm = wRe * sinW + wIm * cosW;
+      wRe = newRe;
+      wIm = newIm;
+    }
+  }
+}
+
 /**
  * In-place radix-2 FFT (DIT) — real input → complex output
  * Uses precomputed tables: BIT_REVERSE for permutation, HANNING for windowing.
@@ -50,37 +81,38 @@ function fftReal1024(input) {
     perm[2 * i + 1] = tmp[2 * j + 1];
   }
 
-  // 3) Cooley-Tukey iterative DIT FFT
-  let m = 2; // sub-DFT size: 2, 4, 8, ..., 1024
-  while (m <= N) {
+  // 3) Cooley-Tukey iterative DIT FFT with precomputed twiddle table
+  // Zero Math.cos/sin calls per frame — all twiddle factors precomputed
+  for (let s = 0; s < TWIDDLE_DEPTH; s++) {
+    const m = 1 << (s + 1); // 2, 4, 8, ..., 1024
     const halfM = m >> 1;
-    const angle = -2 * Math.PI / m;
-    const wRe = Math.cos(angle);
-    const wIm = Math.sin(angle);
+    const twiddleBase = s * TWIDDLE_PER_STAGE * 2; // table offset for this stage
 
     for (let k = 0; k < N; k += m) {
-      let wReCur = 1;
-      let wImCur = 0;
       for (let j = 0; j < halfM; j++) {
-        const tRe = wReCur * perm[2 * (k + halfM + j)] - wImCur * perm[2 * (k + halfM + j) + 1];
-        const tIm = wReCur * perm[2 * (k + halfM + j) + 1] + wImCur * perm[2 * (k + halfM + j)];
+        // Load precomputed twiddle factor (cos, -sin)
+        const twIdx = twiddleBase + j * 2;
+        const wRe = TWIDDLE_TABLE[twIdx];
+        const wIm = TWIDDLE_TABLE[twIdx + 1]; // already negative
         
-        const uRe = perm[2 * (k + j)];
-        const uIm = perm[2 * (k + j) + 1];
+        const idxU = 2 * (k + j);
+        const idxT = 2 * (k + halfM + j);
         
-        perm[2 * (k + j)] = uRe + tRe;
-        perm[2 * (k + j) + 1] = uIm + tIm;
-        perm[2 * (k + halfM + j)] = uRe - tRe;
-        perm[2 * (k + halfM + j) + 1] = uIm - tIm;
+        const uRe = perm[idxU];
+        const uIm = perm[idxU + 1];
+        const tReOrig = perm[idxT];
+        const tImOrig = perm[idxT + 1];
+        
+        // Butterfly with precomputed twiddle
+        const tRe = wRe * tReOrig - wIm * tImOrig;
+        const tIm = wRe * tImOrig + wIm * tReOrig;
+        
+        perm[idxU] = uRe + tRe;
+        perm[idxU + 1] = uIm + tIm;
+        perm[idxT] = uRe - tRe;
+        perm[idxT + 1] = uIm - tIm;
       }
-
-      // Twiddle factor multiplication (recursive update)
-      const newWRe = wRe * wReCur - wIm * wImCur;
-      const newWIm = wRe * wImCur + wIm * wReCur;
-      wReCur = newWRe;
-      wImCur = newWIm;
     }
-    m <<= 1;
   }
 
   // 4) Extract magnitude spectrum: |X[k]| = sqrt(re² + im²)
