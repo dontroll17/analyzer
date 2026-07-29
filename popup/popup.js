@@ -656,6 +656,8 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
 
   // Draw a single buffer with decimation + batched stroke
   // Canvas is ~200px wide — no point drawing 1024 points, decimate to ~200 samples
+  const clamp = (v) => v > 1 ? 1 : v < -1 ? -1 : v;
+  
   const drawBuffer = (buf, color) => {
     if (!buf || buf.length === 0) return;
     
