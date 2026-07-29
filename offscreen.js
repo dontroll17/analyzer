@@ -155,6 +155,9 @@ async function startCapture(source) {
     });
     audioSource.connect(workletNode);
     
+    // Save reference in closure to prevent race with cleanup()
+    const savedAudioContext = audioContext;
+    
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
         lastMetrics = event.data;
@@ -165,8 +168,8 @@ async function startCapture(source) {
     
     // Monitor AudioContext state for drops
     audioContext.addEventListener('statechange', () => {
-      const ctx = audioContext;
-      if (!ctx) return;
+      const ctx = savedAudioContext;
+      if (!ctx || ctx.state === 'closed') return;
       const newState = ctx.state;
       const now = Date.now();
       
