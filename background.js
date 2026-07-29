@@ -16,6 +16,38 @@ const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persis
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
 
+// === Storage write throttle (debounce 100ms) to prevent backpressure at 43fps ===
+let _storageWriteTimer = null;
+let _pendingMetricsData = null;
+let _pendingDropCount = null;
+const STORAGE_WRITE_DEBOUNCE_MS = 100; // 10fps max for storage
+
+function throttledPersistMetrics(data) {
+  _pendingMetricsData = data;
+  // Capture latest drop count so it's included in the next flush
+  if (data.audioDrops !== undefined) {
+    _pendingDropCount = data.audioDrops;
+  }
+  if (_storageWriteTimer) return;
+  _storageWriteTimer = setTimeout(() => {
+    _storageWriteTimer = null;
+    if (_pendingMetricsData) {
+      chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
+        const queue = result[PERSISTENT_METRICS_KEY] || [];
+        queue.push(_pendingMetricsData);
+        if (queue.length > 80) queue.shift();
+        chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
+      });
+      _pendingMetricsData = null;
+    }
+    // Also flush pending drop count if any
+    if (_pendingDropCount !== null) {
+      chrome.storage.local.set({ [DROP_COUNT_KEY]: _pendingDropCount });
+      _pendingDropCount = null;
+    }
+  }, STORAGE_WRITE_DEBOUNCE_MS);
+}
+
 // Restore isCapturing from storage on startup (SW lifecycle)
 chrome.storage.local.get([CAPTURING_KEY], (result) => {
   if (result[CAPTURING_KEY]) {
@@ -34,8 +66,8 @@ function canUseOffscreen() {
 }
 
 // Keepalive alarm to prevent SW sleep during capture
-// SW max lifetime ~30-60s, use 25s interval to stay safe
-chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.4 });
+// SW max lifetime ~30-60s, use 15s interval (synced with offscreen keepalive)
+chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
     // Ping offscreen to keep SW alive
@@ -242,18 +274,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     
-    // Persist to chrome.storage.local for reliability across SW wake/sleep (limit 80)
-    chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
-      const queue = result[PERSISTENT_METRICS_KEY] || [];
-      queue.push(d);
-      if (queue.length > 80) queue.shift();
-      chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
-    });
-    
-    // Persist audioDrops count so popup can retrieve it on reconnect
-    if (d.audioDrops !== undefined) {
-      chrome.storage.local.set({ [DROP_COUNT_KEY]: d.audioDrops });
-    }
+    // Persist to chrome.storage.local via throttled debounce (prevents 43fps backpressure)
+    throttledPersistMetrics(d);
     
     // Also add to in-memory queue (limit for stability)
     metricsQueue.push(d);
@@ -340,7 +362,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Restart keepalive alarm to extend SW lifetime
     // Alarm system resets on each interaction
     chrome.alarms.clear('ssa_keepalive', () => {
-      chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.4 });
+      chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
     });
     sendResponse({ ok: true });
     return false;

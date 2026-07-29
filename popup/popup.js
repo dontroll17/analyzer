@@ -280,6 +280,11 @@ let perfRafId = null; // Track rAF handle for cancellation
 let heatmapDirty = false; // Mark if heatmap data changed since last draw
 let heatmapRenderTimeout = null; // Separate timeout for heatmap rendering
 const HEATMAP_DRAW_INTERVAL_MS = 500;
+
+// Performance-aware heatmap: auto-disable when draw exceeds threshold
+const HEATMAP_PERF_MAX_AVG_MS = 15; // Auto-disable if avg draw > 15ms
+let heatmapDrawTimes = [];
+const HEATMAP_PERF_SAMPLE_SIZE = 10;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
     perfRunning = false;
@@ -940,6 +945,7 @@ function updateHeatmapData(bass, mid, treble, isGlitch) {
 function drawHeatmap() {
   if (!heatmapCtx || !heatmapCanvas) return;
   
+  const drawStart = perfNow();
   const canvasWidth = heatmapCanvas.width;
   const canvasHeight = heatmapCanvas.height;
   const colors = tc('canvas');
@@ -979,6 +985,22 @@ function drawHeatmap() {
         heatmapCtx.fillStyle = `rgb(${r},${g},${b})`;
         heatmapCtx.fillRect(x, y, cellWidth + 0.5, cellHeight + 0.5);
       }
+    }
+  }
+  
+  // Performance monitoring: auto-disable heatmap if drawing is too slow
+  const drawElapsed = perfNow() - drawStart;
+  heatmapDrawTimes.push(drawElapsed);
+  if (heatmapDrawTimes.length > HEATMAP_PERF_SAMPLE_SIZE) {
+    heatmapDrawTimes.shift();
+  }
+  if (heatmapDrawTimes.length === HEATMAP_PERF_SAMPLE_SIZE) {
+    const avgDrawMs = heatmapDrawTimes.reduce((a, b) => a + b, 0) / HEATMAP_PERF_SAMPLE_SIZE;
+    if (avgDrawMs > HEATMAP_PERF_MAX_AVG_MS) {
+      log.warn(`Heatmap avg draw ${avgDrawMs.toFixed(1)}ms > ${HEATMAP_PERF_MAX_AVG_MS}ms threshold — auto-disabling`);
+      heatmapActive = false;
+      chrome.storage.local.set({ [HEATMAP_KEY]: false });
+      heatmapDrawTimes = [];
     }
   }
 }
@@ -1410,6 +1432,11 @@ function ensureBackgroundPort() {
     let metricsDroppedThrottle = 0;
     let metricsDroppedQueue = 0;
     
+    // Connection gap detection — warn when metrics gap > 500ms (indicates SW freeze/drop)
+    let _lastMetricsTime = 0;
+    let _missedFrames = 0;
+    const METRICS_GAP_WARN_MS = 500;
+    
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
       // Reject stale messages from previous connection
@@ -1447,6 +1474,19 @@ function ensureBackgroundPort() {
           return;
         }
         lastMetricsApplyTime = now;
+        
+        // Connection gap detection
+        if (_lastMetricsTime > 0) {
+          const gap = Date.now() - _lastMetricsTime;
+          if (gap > METRICS_GAP_WARN_MS) {
+            _missedFrames++;
+            log.warn(`[POPUP] Metrics gap ${gap.toFixed(0)}ms, missed=${_missedFrames}`);
+          } else if (_missedFrames > 0) {
+            // Reset counter after gap recovery
+            _missedFrames = 0;
+          }
+        }
+        _lastMetricsTime = Date.now();
         
         // Log every 1000 metrics to track flow
         if (metricsRecvCount % 1000 === 0) {

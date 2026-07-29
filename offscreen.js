@@ -17,7 +17,7 @@ let lastContextState = 'running';
 let lastStateChangeTime = 0;
 const DROP_DEBOUNCE_MS = 500; // Minimum time between drops
 
-// Keepalive ping to prevent SW sleep (pings every 15s while capturing)
+// Keepalive ping to prevent SW sleep (pings every 10s while capturing)
 let _keepaliveTimer = null;
 
 // Stream monitor for drop detection (polled every 200ms)
@@ -30,10 +30,20 @@ let _dspTimeTimer = null;
 let _lastWorkletTimestamp = 0;
 
 // Suppress runtime.lastError spam when background is unavailable
+const MAX_SAFE_SEND_LOGS = 5; // Log first N errors, then silence
+let _safeSendErrorCount = 0;
+let _safeSendLastLogged = 0;
+
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
     if (chrome.runtime.lastError) {
-      // Background terminated or no port — silent ignore
+      // Log first N errors then throttle to prevent log spam during SW cycles
+      const now = Date.now();
+      if (_safeSendErrorCount < MAX_SAFE_LOGS && (now - _safeSendLastLogged > 5000)) {
+        _safeSendLastLogged = now;
+        _safeSendErrorCount++;
+        log.warn(`safeSendMessage error #${_safeSendErrorCount}:`, chrome.runtime.lastError.message);
+      }
     }
   });
 }
@@ -70,7 +80,7 @@ async function startCapture(source) {
     let streamOptions;
     
     // Start offscreen→BG keepalive to prevent SW sleep
-    // SW wake threshold ~30-60s, ping every 15s to keep BG alive
+    // SW wake threshold ~30-60s, ping every 10s to keep BG alive
     _keepaliveTimer = setInterval(() => {
       chrome.runtime.sendMessage({ type: '_OFFSCREEN_KEEPALIVE' }, () => {
         if (chrome.runtime.lastError) {
@@ -79,7 +89,7 @@ async function startCapture(source) {
           _keepaliveTimer = null;
         }
       });
-    }, 15000); // 15s — well under SW 30s lifetime
+    }, 10000); // 10s — well under SW 30s lifetime
     
     switch (source) {
       case 'mic': {
