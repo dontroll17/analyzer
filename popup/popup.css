@@ -660,3 +660,62 @@ h3 {
 .perf-good { color: var(--accent-green); }
 .perf-warn { color: var(--accent-orange); }
 .perf-bad { color: var(--accent-red); }
+
+/* ===== Logs Panel ===== */
+.logs-filter {
+  transition: all 0.2s ease;
+}
+
+.logs-filter.active {
+  background: var(--accent-blue) !important;
+  color: white !important;
+  border-color: var(--accent-blue) !important;
+  box-shadow: 0 0 6px rgba(0, 229, 255, 0.3);
+}
+
+#logsPanel::-webkit-scrollbar {
+  width: 4px;
+}
+
+#logsPanel::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+#logsPanel::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
+}
+
+#logsPanel::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-blue);
+}
+
+.log-entry {
+  padding: 1px 3px;
+  border-radius: 2px;
+  word-break: break-all;
+}
+
+.log-entry:hover {
+  background: rgba(0, 229, 255, 0.05);
+}
+
+.log-entry .log-level {
+  font-weight: bold;
+  margin-right: 4px;
+}
+
+.log-entry .log-ts {
+  opacity: 0.5;
+  margin-right: 4px;
+}
+
+.log-entry .log-mod {
+  color: var(--accent-blue);
+  margin-right: 4px;
+}
+
+.log-level-error { color: var(--accent-red); }
+.log-level-warn { color: var(--accent-orange); }
+.log-level-info { color: var(--accent-blue); }
+.log-level-debug { color: var(--text-tertiary); }
