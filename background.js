@@ -131,6 +131,10 @@ chrome.runtime.onConnect.addListener((port) => {
           chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
         }
       }
+      // Connection latency ping → pong (echo)
+      if (message && message.type === '_PONG_REQUEST') {
+        port.postMessage({ type: '_PONG_RESPONSE', pingTime: message.pingTime });
+      }
     };
     port.onMessage.addListener(popupPortMessageHandler);
 

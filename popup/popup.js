@@ -179,6 +179,7 @@ const perfLatency = document.getElementById('perfLatency');
 const perfDsp = document.getElementById('perfDsp');
 const perfDrops = document.getElementById('perfDrops');
 const perfConnection = document.getElementById('perfConnection');
+const perfConnLatency = document.getElementById('perfConnLatency');
 const perfMemory = document.getElementById('perfMemory');
 const perfAlerts = document.getElementById('perfAlerts');
 
@@ -194,6 +195,7 @@ const PERF_ALERT_RATE_LIMIT_MS = 5000; // Rate-limit alerts to once per 5s
 let perfLastPingTime = 0;
 let perfConnectionLatency = 0;
 let perfLatencySampleTimer = null;
+let lastConnectionLatency = 0; // RTT from ping/pong (ms)
 
 // ============================================
 // Glitch Heatmap
@@ -278,6 +280,16 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
     perfConnection.className = `label-sm ${colorClass}`;
     perfConnection.textContent = isConnected ? 'Conn: OK' : 'Conn: FAIL';
   }
+  // Connection RTT (from ping/pong)
+  if (perfConnLatency) {
+    const colorClass = lastConnectionLatency > 0
+      ? (lastConnectionLatency < 15 ? 'perf-good' : lastConnectionLatency < 50 ? 'perf-warn' : 'perf-bad')
+      : 'label-sm';
+    perfConnLatency.className = `label-sm ${colorClass}`;
+    perfConnLatency.textContent = lastConnectionLatency > 0
+      ? `RTT: ${Math.round(lastConnectionLatency)}ms`
+      : 'RTT: --';
+  }
   // Memory (Chrome-only API)
   if (perfMemory) {
     if (typeof performance !== 'undefined' && performance.memory && performance.memory.usedJSHeapSize) {
@@ -340,12 +352,19 @@ function perfFrameLoop(timestamp) {
     perfDrawTimes = [];
   }
   
-  // Sample latency every ~2 seconds (120 frames at 60fps)
+  // Ping background every ~3 seconds (180 frames at 60fps)
   perfLatencySampleCount++;
-  if (perfLatencySampleCount >= 120 && popupAudioContext) {
+  if (perfLatencySampleCount >= 180) {
     perfLatencySampleCount = 0;
-    const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
-    lastLatency = latency;
+    if (bgPort && bgMetricsConnected) {
+      const pingTime = Date.now();
+      safePostMessage(bgPort, { type: '_PONG_REQUEST', pingTime });
+    }
+    // Also sample device outputLatency if available
+    if (popupAudioContext) {
+      const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
+      lastLatency = latency;
+    }
     
     // Also request DSP time from worklet if available
     if (popupWorkletNode) {
@@ -1586,6 +1605,18 @@ function ensureBackgroundPort() {
         if (data.dspTime !== undefined) {
           lastDspTime = data.dspTime;
         }
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
+      }
+      // Handle connection latency pong (from _PONG_REQUEST roundtrip)
+      if (data.type === '_PONG_RESPONSE') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        const rtt = Date.now() - data.pingTime;
+        lastConnectionLatency = rtt;
         // Update perf display if active
         if (perfActive && perfFps) {
           const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
