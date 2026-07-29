@@ -238,7 +238,6 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
-- ✅ Web MIDI экспорт (CC-маппинг метрик)
 - ✅ Overlay widget поверх страницы (draggable, collapsible, position persistent)
 - ⚠️ При добавлении/изменении permissions в manifest.json нужно **полностью удалить** расширение (`chrome://extensions` → 🗑️) и загрузить заново. Простое "перезагрузить" не обновит permissions.
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
@@ -273,20 +272,11 @@
 
 ## Changelog
 
-### v1.1.1 (2026-07-29) — Web MIDI Export
+### v1.1.1 (2026-07-29) — Web MIDI Export (stub)
 
 **Новые фичи:**
-- ✅ Web MIDI API экспорт в реальном времени
-- ✅ Маппинг метрик на MIDI Control Change (CC):
-  - RMS Energy → CC1 (Modulation Wheel)
-  - Bass → CC7 (Balance)
-  - Mid → CC10 (Pan)
-  - Treble → CC11 (Expression)
-  - Entropy → CC12 (Input Gain)
-  - Flatness → CC91 (Reverb Depth)
-  - Glitch State → CC123 (All Notes Off: STABLE/DRIFT/GLITCH)
-  - Glitch Count → CC19 (Capture Hold)
-- ✅ UI: статус MIDI в popup, авто-подключение устройств
+- ✅ midi-export.js: модуль для маппинга метрик на MIDI CC (как библиотека)
+- ⚠️ Web MIDI API блокируется Chrome в popup-документе (popup → new tab workaround)
 
 ### v1.1.0 (2026-07-29) — Настоящий FFT
 
@@ -360,8 +350,8 @@
 - [x] Jest unit tests for RMS module (33/33 passed)
 - [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
 - [x] Split-screen oscilloscope (live vs reference comparison)
+- [ ] Web MIDI export (popup blocked → needs background worker or standalone page)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
-- [ ] Web MIDI export
 
 ---
 
