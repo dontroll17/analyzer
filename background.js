@@ -10,6 +10,7 @@ let popupPort = null;
 let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
+let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 
@@ -262,7 +263,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         popupPort = null;
       }
     } else {
-      log.warn('NO popupPort — metrics not forwarded!');
+      // Throttle: warn only once at disconnect, not every frame
+      if (!popupDisconnectedWarned) {
+        popupDisconnectedWarned = true;
+        log.warn('Popup disconnected — metrics not forwarded to popup');
+      }
+    }
+    } else {
+      // Throttle: only warn once per disconnect period, not every frame
+      if (!_noPopupWarned) {
+        _noPopupWarned = true;
+        log.warn('No popupPort — metrics forwarded only to offscreen (+ overlay)');
+      }
     }
     
     // Forward to overlay if connected
