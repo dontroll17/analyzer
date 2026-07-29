@@ -15,6 +15,9 @@ let captureActive = false;
 let gracefulStop = false;
 let isConnected = false;
 
+// Storage key for persisting drop count across popup reconnects
+const DROP_COUNT_KEY = 'ssa_audio_drop_count';
+
 // ============================================
 // Theme Colors
 // ============================================
@@ -1223,8 +1226,8 @@ function stopAudioProcessing() {
   captureActive = false;
   updateUI(false);
   
-  // Reset drop counter
-  dropCount = 0;
+  // Do NOT reset dropCount here — it should be cumulative across sessions
+  // Only _AUDIO_DROP_RESET from offscreen should reset it
   if (audioDropsContainer) {
     audioDropsContainer.style.display = 'none';
     audioDropsContainer.classList.remove('warning', 'critical');
@@ -1522,6 +1525,17 @@ function ensureBackgroundPort() {
     bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
     
     log.info('bgPort listeners attached, id:', currentId);
+    
+    // Restore drop count from storage (in case drops occurred while popup was closed)
+    chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
+      if (result[DROP_COUNT_KEY] && result[DROP_COUNT_KEY] > 0) {
+        dropCount = result[DROP_COUNT_KEY];
+        if (captureActive) {
+          updateDropCounter(dropCount);
+        }
+        log.info('Restored dropCount:', dropCount, 'from storage');
+      }
+    });
     
     // Send metrics request immediately after connect (in case capture is active)
     setTimeout(() => {

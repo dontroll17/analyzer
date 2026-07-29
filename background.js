@@ -13,6 +13,7 @@ let _bgMetricsRecv = 0; // total metrics received from offscreen
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
+const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
 
 // Restore isCapturing from storage on startup (SW lifecycle)
 chrome.storage.local.get([CAPTURING_KEY], (result) => {
@@ -247,6 +248,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (queue.length > 80) queue.shift();
       chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
     });
+    
+    // Persist audioDrops count so popup can retrieve it on reconnect
+    if (d.audioDrops !== undefined) {
+      chrome.storage.local.set({ [DROP_COUNT_KEY]: d.audioDrops });
+    }
     
     // Also add to in-memory queue (limit to 50 to prevent memory buildup)
     metricsQueue.push(d);
