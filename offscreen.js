@@ -20,6 +20,11 @@ const DROP_DEBOUNCE_MS = 500; // Minimum time between drops
 // Keepalive ping to prevent SW sleep (pings every 15s while capturing)
 let _keepaliveTimer = null;
 
+// Stream monitor for drop detection (polled every 200ms)
+let _streamMonitorTimer = null;
+let _streamMonitorStopped = false;
+let _lastStreamActiveState = true;
+
 // Suppress runtime.lastError spam when background is unavailable
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
@@ -179,6 +184,55 @@ async function startCapture(source) {
     // Save reference in closure to prevent race with cleanup()
     const savedAudioContext = audioContext;
     
+    // Drop detection: poll MediaStream active state (reliable in MV3)
+    // AudioContext.statechange is unreliable in offscreen docs — state stays 'running'
+    // when user stops sharing. MediaStream.active=false fires reliably.
+    _lastStreamActiveState = mediaStream.active;
+    _streamMonitorStopped = false;
+    _streamMonitorTimer = setInterval(() => {
+      if (_streamMonitorStopped || !mediaStream) return;
+      
+      // Detect: was active, now inactive (user stopped sharing)
+      if (_lastStreamActiveState && !mediaStream.active) {
+        const now = Date.now();
+        _lastStreamActiveState = false;
+        
+        // Check if any tracks still active before declaring drop
+        const activeTracks = mediaStream.getTracks().filter(t => t.readyState === 'live');
+        
+        audioDropCount++;
+        lastStateChangeTime = now;
+        
+        log.warn(`Stream dropped: active=false, liveTracks=${activeTracks.length}, dropCount=${audioDropCount}`);
+        
+        safeSendMessage({
+          type: '_AUDIO_DROP',
+          count: audioDropCount,
+          timestamp: now,
+          reason: 'stream_inactive'
+        });
+        
+        // If no tracks left, this is a full stop
+        if (activeTracks.length === 0) {
+          _streamMonitorStopped = true;
+          clearInterval(_streamMonitorTimer);
+          _streamMonitorTimer = null;
+          scheduleCleanup();
+        }
+      }
+      
+      // Detect: was inactive, now active (user resumed sharing)
+      if (!_lastStreamActiveState && mediaStream.active) {
+        audioDropCount = 0;
+        safeSendMessage({
+          type: '_AUDIO_DROP_RESET',
+          count: 0,
+          timestamp: Date.now()
+        });
+        _lastStreamActiveState = true;
+      }
+    }, 200); // Check every 200ms — responsive enough for user actions
+    
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
         _metricsCounter++;
@@ -192,12 +246,18 @@ async function startCapture(source) {
       }
     };
     
-    // Monitor AudioContext state for drops
+    // Monitor AudioContext state for drops (secondary to stream polling)
+    // statechange is unreliable in offscreen docs but may still fire in some cases
     audioContext.addEventListener('statechange', () => {
       const ctx = savedAudioContext;
       if (!ctx || ctx.state === 'closed') return;
       const newState = ctx.state;
       const now = Date.now();
+      
+      // Log state changes for debugging
+      if (newState !== lastContextState) {
+        log.info(`AudioContext statechange: ${lastContextState} → ${newState}`);
+      }
       
       // Detect interrupted/suspended states (audio drops)
       if (lastContextState === 'running' && (newState === 'interrupted' || newState === 'suspended')) {
@@ -205,18 +265,19 @@ async function startCapture(source) {
           audioDropCount++;
           lastStateChangeTime = now;
           
-          // Send drop notification
+          log.warn(`AudioContext drop: state=${newState}, dropCount=${audioDropCount}`);
+          
           safeSendMessage({
             type: '_AUDIO_DROP',
             count: audioDropCount,
-            timestamp: now
+            timestamp: now,
+            reason: 'context_state'
           });
         }
       }
       
       // Reset counter on return to running
       if (lastContextState !== 'running' && newState === 'running') {
-        // Reset drop count on reconnect
         audioDropCount = 0;
         safeSendMessage({
           type: '_AUDIO_DROP_RESET',
@@ -228,8 +289,10 @@ async function startCapture(source) {
       lastContextState = newState;
     });
     
+    // Fallback: track 'ended' events (triggers full stop)
     mediaStream.getTracks().forEach(track => {
       track.addEventListener('ended', () => {
+        log.info(`Track ended: ${track.kind}/${track.label}`);
         scheduleCleanup();
       });
     });
@@ -276,6 +339,13 @@ function cleanup() {
   if (_keepaliveTimer) {
     clearInterval(_keepaliveTimer);
     _keepaliveTimer = null;
+  }
+  
+  // Stop stream monitoring
+  _streamMonitorStopped = true;
+  if (_streamMonitorTimer) {
+    clearInterval(_streamMonitorTimer);
+    _streamMonitorTimer = null;
   }
   
   // Reset audio drop counter
