@@ -11,11 +11,12 @@ function canUseOffscreen() {
   return !!(chrome.offscreen && chrome.offscreen.createDocument);
 }
 
-// Keepalive alarm to prevent SW sleep during capture (SW max lifetime ~30s-5min)
-chrome.alarms.create('ssa_keepalive', { periodInMinutes: 4 });
+// Keepalive alarm to prevent SW sleep during capture
+// SW max lifetime ~30-60s, use 25s interval to stay safe
+chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
-    // Ping offscreen to keep it alive
+    // Ping offscreen to keep SW alive
     chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }).catch(() => {});
   }
 });
@@ -51,23 +52,32 @@ async function createOffscreenDocument() {
   }
 }
 
+// Named handlers for popup port (cleanup on disconnect)
+let popupPortDisconnectHandler = null;
+let popupPortMessageHandler = null;
+
 // === Popup connection (persistent, for metrics relay) ===
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'popup-metrics') {
     popupPort = port;
 
-    port.onDisconnect.addListener(() => {
+    // Clear queues on disconnect to prevent memory leak
+    popupPortDisconnectHandler = () => {
       popupPort = null;
-    });
+      metricsQueue = [];
+      chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+    };
+    port.onDisconnect.addListener(popupPortDisconnectHandler);
 
-    // Handle messages from popup
-    port.onMessage.addListener((message) => {
+    // Named handler for proper removal
+    popupPortMessageHandler = (message) => {
       if (message && message.type === 'REQUEST_METRICS') {
         if (isCapturing) {
           chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
         }
       }
-    });
+    };
+    port.onMessage.addListener(popupPortMessageHandler);
 
     // Drain queued metrics when popupPort reconnects (both in-memory and storage-persisted)
     if (metricsQueue.length > 0) {
@@ -103,9 +113,10 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'overlay-metrics') {
     overlayPort = port;
 
-    port.onDisconnect.addListener(() => {
+    let overlayDisconnectHandler = () => {
       overlayPort = null;
-    });
+    };
+    port.onDisconnect.addListener(overlayDisconnectHandler);
   }
   
   // === Overlay toggle (from popup icon click) ===
@@ -168,9 +179,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (offscreenReady) {
       chrome.runtime.sendMessage({ type: '_OFFSCREEN_STOP' }, response => {
         isCapturing = false;
-        popupPort = null; // Clean up popup connection on stop
         metricsQueue = []; // Clear in-memory queue on stop
         chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
+        // Note: popupPort is cleared by popupPortDisconnectHandler
         // Notify content script to hide overlay
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           if (tabs.length > 0) {
@@ -181,9 +192,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     } else {
       isCapturing = false;
-      popupPort = null;
       metricsQueue = []; // Clear in-memory queue on stop
       chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
+      // Note: popupPort is cleared by popupPortDisconnectHandler
       // Notify content script to hide overlay
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs.length > 0) {
@@ -210,17 +221,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     
-    // Persist to chrome.storage.local for reliability across SW wake/sleep
+    // Persist to chrome.storage.local for reliability across SW wake/sleep (limit 80)
     chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
       const queue = result[PERSISTENT_METRICS_KEY] || [];
       queue.push(d);
-      if (queue.length > 100) queue.shift();
+      if (queue.length > 80) queue.shift();
       chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
     });
     
-    // Also add to in-memory queue
+    // Also add to in-memory queue (limit to 50 to prevent memory buildup)
     metricsQueue.push(d);
-    if (metricsQueue.length > 100) {
+    if (metricsQueue.length > 50) {
       metricsQueue.shift();
     }
     
@@ -251,8 +262,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (popupPort) {
       popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
       popupPort.disconnect();
-      popupPort = null;
+      // popupPort will be nullified by popupPortDisconnectHandler
     }
+    // Also clear any lingering queues
+    metricsQueue = [];
+    chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
     // Notify content script to hide overlay
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs.length > 0) {

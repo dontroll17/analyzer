@@ -934,6 +934,16 @@ function bgPortDisconnectHandler() {
   bgPort = null;
   bgMetricsHandler = null;
   
+  // If capture was active when port disconnected, trigger reconnect
+  if (captureActive) {
+    // Port may have been recycled (SW woke up), try to reconnect
+    setTimeout(() => {
+      if (captureActive && !bgPort) {
+        ensureBackgroundPort();
+      }
+    }, 500);
+  }
+  
   // Only update UI if capture was active (spontaneous disconnect)
   if (gracefulStop) {
     return;
@@ -946,6 +956,29 @@ function bgPortDisconnectHandler() {
     startBtn.disabled = false;
   }
   updateUI(false);
+}
+
+// Send message to runtime with lastError suppression
+function safeSendMessage(msg, callback) {
+  chrome.runtime.sendMessage(msg, (response) => {
+    if (chrome.runtime.lastError) {
+      // SW may have terminated — ignore, will reconnect
+      if (callback) callback(null);
+      return;
+    }
+    if (callback) callback(response);
+  });
+}
+
+// Send port message safely
+function safePostMessage(port, msg) {
+  try {
+    if (port && !port._disconnected) {
+      port.postMessage(msg);
+    }
+  } catch (e) {
+    // Port disconnected
+  }
 }
 
 // Background port — create ONCE at page load to prevent memory leaks
@@ -1021,31 +1054,35 @@ startBtn.addEventListener('click', () => {
 
   connectToBackground();
 
-  chrome.runtime.sendMessage({ type: 'START_CAPTURE' }, response => {
+  safeSendMessage({ type: 'START_CAPTURE' }, response => {
     if (response?.ok) {
       updateUI(true);
     } else {
       console.error('[Popup] Capture failed:', response?.error);
       alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
       captureActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+    }
+  });
+});
+
+stopBtn.addEventListener('click', () => {
+  safeSendMessage({ type: 'STOP_CAPTURE' }, response => {
+    stopAudioProcessing();
+    captureActive = false;
+    if (startBtn) {
       startBtn.textContent = 'Start Capture';
       startBtn.disabled = false;
     }
   });
 });
 
-stopBtn.addEventListener('click', () => {
-  chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, response => {
-    stopAudioProcessing();
-    captureActive = false;
-    startBtn.textContent = 'Start Capture';
-    startBtn.disabled = false;
-  });
-});
-
 chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
+  // Ignore lastError — SW may have terminated
   if (chrome.runtime.lastError) {
-    // В случае если background еще не готов или отдал ошибку
     updateUI(false);
     return;
   }
@@ -1325,6 +1362,7 @@ window.addEventListener('beforeunload', async () => {
       await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
           stopPending = true;
+          // Ignore lastError — page unloading
           resolve(response);
         });
       });
