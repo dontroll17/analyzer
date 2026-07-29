@@ -1553,17 +1553,21 @@ if (exportBtn) {
 // ============================================
 
 const THEME_KEY = 'theme';
-const THEME_CYCLE = ['neon', 'light', 'default'];
+const THEME_CYCLE = ['neon', 'light', 'system'];
 const THEME_ICONS = {
   neon: '\uD83D\uDD06', // sparkles
   light: '\u263E', // light mode
-  default: '\u263C' // dark mode (sun with rays)
+  system: '\u263C' // dark mode (sun with rays)
 };
 
 function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
+  if (theme === 'system') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', theme);
+  }
   if (themeToggle) {
-    themeToggle.textContent = THEME_ICONS[theme] || THEME_ICONS.default;
+    themeToggle.textContent = THEME_ICONS[theme] || THEME_ICONS.system;
   }
 }
 
@@ -1613,7 +1617,14 @@ function applyTheme(theme) {
 if (themeToggle) {
   themeToggle.addEventListener('click', (e) => {
     e.stopPropagation();
-    const current = getTheme();
+    // Read actual attribute, not resolved theme
+    const attr = document.documentElement.getAttribute('data-theme');
+    let current;
+    if (attr === null || attr === 'system') {
+      current = 'system';
+    } else {
+      current = attr;
+    }
     const currentIndex = THEME_CYCLE.indexOf(current);
     const nextIndex = (currentIndex + 1) % THEME_CYCLE.length;
     const next = THEME_CYCLE[nextIndex];
