@@ -238,7 +238,9 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
+- ✅ Web MIDI экспорт (CC-маппинг метрик)
 - ✅ Overlay widget поверх страницы (draggable, collapsible, position persistent)
+- ⚠️ При добавлении/изменении permissions в manifest.json нужно **полностью удалить** расширение (`chrome://extensions` → 🗑️) и загрузить заново. Простое "перезагрузить" не обновит permissions.
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
 - ⚠️ Popup закрывается при клике вне его области (ограничение Chrome)
 - ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup (mitigated via setTimeout fallback)
