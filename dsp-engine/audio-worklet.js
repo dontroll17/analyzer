@@ -145,6 +145,15 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Pre-allocate combinedFFT buffer (512 bins for 1024-point FFT — zero GC per frame)
     this.combinedFFT = new Float32Array(HALF_N);
     
+    // Pre-allocate buffers for HNR autocorrelation (zero GC per frame)
+    this._hnrAutocorr = new Float32Array(HALF_N);
+    
+    // Pre-allocate buffers for Spectral Flux onset detection
+    this._prevFFT = new Float32Array(HALF_N);
+    this._fluxHistory = new Float32Array(10); // Sliding window of 10 frames
+    this._fluxIndex = 0;
+    this._fluxSum = 0;
+    
     // State per channel
     this.leftReady = false;
     this.rightReady = false;
@@ -357,6 +366,151 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
+   * C.2.3: Zero Crossing Rate (ZCR)
+   * Counts sign changes in the waveform buffer.
+   * High ZCR = noise/glitch, Low ZCR = tonal/stable
+   * O(N) per frame, no allocations.
+   */
+  calculateZCR(buffer) {
+    let crossings = 0;
+    for (let i = 1; i < buffer.length; i++) {
+      if ((buffer[i] >= 0) !== (buffer[i - 1] >= 0)) {
+        crossings++;
+      }
+    }
+    // Convert to crossings per second
+    const frameDuration = buffer.length / this.sampleRate;
+    return crossings / frameDuration;
+  }
+
+  /**
+   * C.2.4: Harmonic-to-Noise Ratio (HNR) approximation
+   * Uses autocorrelation peak-to-valley ratio as proxy.
+   * Optimized: computes on pre-allocated buffer, O(N²/2) but N=1024 is manageable.
+   * Returns HNR in dB (higher = more harmonic).
+   * NOTE: Compute every 2nd frame to stay within DSP budget.
+   */
+  calculateHNR(buffer) {
+    const N = buffer.length;
+    const maxLag = Math.floor(N / 4); // Limit search range
+    const autocorr = this._hnrAutocorr;
+    
+    // Compute autocorrelation (lag 0 to maxLag)
+    for (let lag = 0; lag <= maxLag; lag++) {
+      let sum = 0;
+      for (let i = 0; i < N - lag; i++) {
+        sum += buffer[i] * buffer[i + lag];
+      }
+      autocorr[lag] = sum / (N - lag);
+    }
+    
+    // Find max at lag 0 (should be the maximum)
+    const maxCorr = Math.abs(autocorr[0]);
+    
+    // Find first valley after lag 0 (min in range [1, maxLag/2])
+    let minCorr = Infinity;
+    const valleyEnd = Math.floor(maxLag / 2);
+    for (let lag = 1; lag <= valleyEnd; lag++) {
+      const val = Math.abs(autocorr[lag]);
+      if (val < minCorr) {
+        minCorr = val;
+      }
+    }
+    
+    const signalPower = Math.max(maxCorr, 1e-10);
+    const noisePower = Math.max(1e-10, signalPower - minCorr);
+    
+    return 10 * Math.log10(signalPower / noisePower);
+  }
+
+  /**
+   * C.2.1: Spectral Centroid
+   * Weighted average frequency of the spectrum.
+   * Formula: Σ(f[k] * |X[k]|) / Σ(|X[k]|)
+   * High centroid = bright/noisy, Low centroid = warm/tonal
+   * Units: Hz
+   */
+  calculateSpectralCentroid(fftData) {
+    let weightedSum = 0;
+    let totalSum = 0;
+    
+    for (let k = 0; k < fftData.length; k++) {
+      const freq = k * this.sampleRate / FFT_SIZE;
+      weightedSum += freq * fftData[k];
+      totalSum += fftData[k];
+    }
+    
+    if (totalSum < 1e-10) return 0;
+    return weightedSum / totalSum;
+  }
+
+  /**
+   * C.2.2: Spectral Rolloff
+   * Frequency below which 85% of spectral energy is contained.
+   * Cumulative sum of magnitudes, find bin where sum >= threshold * totalSum
+   * Units: Hz
+   */
+  calculateSpectralRolloff(fftData, threshold = 0.85) {
+    let totalSum = 0;
+    for (let k = 0; k < fftData.length; k++) {
+      totalSum += fftData[k];
+    }
+    
+    if (totalSum < 1e-10) return 0;
+    
+    const targetSum = totalSum * threshold;
+    let cumulativeSum = 0;
+    
+    for (let k = 0; k < fftData.length; k++) {
+      cumulativeSum += fftData[k];
+      if (cumulativeSum >= targetSum) {
+        return k * this.sampleRate / FFT_SIZE;
+      }
+    }
+    
+    // Should not reach here if threshold <= 1.0
+    return this.sampleRate / 2;
+  }
+
+  /**
+   * C.2.5: Spectral Flux for Onset Detection
+   * Sum of positive differences between consecutive power spectra.
+   * Onset when flux > 2x average flux (configurable).
+   * Returns { flux, onsetDetected }
+   */
+  calculateSpectralFlux(currentFFT) {
+    // Compute positive flux vs previous frame
+    let flux = 0;
+    for (let k = 0; k < currentFFT.length; k++) {
+      const diff = currentFFT[k] * currentFFT[k] - this._prevFFT[k] * this._prevFFT[k];
+      if (diff > 0) {
+        flux += diff;
+      }
+    }
+    
+    // Update sliding window
+    const oldEntry = this._fluxHistory[this._fluxIndex];
+    this._fluxSum -= oldEntry;
+    this._fluxHistory[this._fluxIndex] = flux;
+    this._fluxSum += flux;
+    this._fluxIndex = (this._fluxIndex + 1) % 10;
+    
+    // Copy current FFT to prev for next frame
+    for (let k = 0; k < currentFFT.length; k++) {
+      this._prevFFT[k] = currentFFT[k];
+    }
+    
+    // Average flux
+    let avgFlux = this._fluxSum / 10;
+    if (avgFlux < 1e-10) avgFlux = 1e-10;
+    
+    // Onset detected if flux > 2x average
+    const onsetDetected = flux > (2.0 * avgFlux);
+    
+    return { flux, onsetDetected };
+  }
+
+  /**
    * Glitch detection state machine
    * States: STABLE → DRIFT → GLITCH (transitions based on highFreqRatio + rms)
    * 
@@ -413,13 +567,13 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
-   * Обработка кадра для одного канала (L или R)
-   * Вызывается из process() когда буфер канала заполнен
-   * 
-   * NOTE: checkGlitchState() is called ONLY in processFrame() with combined
-   * metrics. Calling it here would corrupt consecutiveGlitchFrames and glitchCount
-   * because this function runs 2-3× per frame (per-channel + combined).
-   */
+    * Обработка кадра для одного канала (L или R)
+    * Вызывается из process() когда буфер канала заполнен
+    * 
+    * NOTE: checkGlitchState() is called ONLY in processFrame() with combined
+    * metrics. Calling it here would corrupt consecutiveGlitchFrames and glitchCount
+    * because this function runs 2-3× per frame (per-channel + combined).
+    */
   processChannelFrame(ch) {
     const buffer = this.inputBuffers[ch];
     const { rms, peak } = this.calculateRMS(buffer);
@@ -427,8 +581,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
     
+    // C.2.3: ZCR (per-channel, waveform-based metric)
+    const zcr = this.calculateZCR(buffer);
+    
     // Сохраняем данные для объединения позже
-    const frameData = { rms, peak, fft, bands, highFreqAnomaly };
+    const frameData = { rms, peak, fft, bands, highFreqAnomaly, zcr };
     
     if (ch === 0) {
       this.leftFrameData = frameData;
@@ -569,6 +726,55 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       entropyState = 'DRIFT';
     }
     
+    // C.2.1: Spectral Centroid (on combined FFT)
+    const spectralCentroid = this.calculateSpectralCentroid(this.combinedFFT);
+    
+    // C.2.2: Spectral Rolloff (on combined FFT)
+    const spectralRolloff = this.calculateSpectralRolloff(this.combinedFFT);
+    
+    // C.2.5: Spectral Flux / Onset Detection (on combined FFT)
+    const { onsetDetected } = this.calculateSpectralFlux(this.combinedFFT);
+    
+    // C.2.3: Combined ZCR (average of left/right)
+    let combinedZCR = 0;
+    if (leftData && rightData) {
+      combinedZCR = (leftData.zcr + rightData.zcr) / 2;
+    } else {
+      combinedZCR = leftData ? leftData.zcr : (rightData ? rightData.zcr : 0);
+    }
+    
+    // C.2.4: HNR (compute every 2nd frame to stay within DSP budget)
+    let hnr = 0;
+    if (this.frameCount % 2 === 0) {
+      const buffer = leftData ? this.waveformLeft : this.waveformRight;
+      hnr = this.calculateHNR(buffer);
+    }
+    
+    // C.2.8: Dynamic Range (Peak - RMS in dB)
+    const peakdB = peakRMS > 0 ? 20 * Math.log10(peakRMS) : -Infinity;
+    const rmsdB = combinedRMS > 0 ? 20 * Math.log10(combinedRMS) : -Infinity;
+    const dynamicRange = peakdB - rmsdB; // >= 0 dB
+    
+    // C.2.10: Inter-band Energy Ratios (log-scaled, ~0dB = balanced)
+    const bassMidRatio = combinedBands.mid > 1e-10
+      ? 10 * Math.log10(combinedBands.bass / combinedBands.mid)
+      : -Infinity;
+    const midTrebleRatio = combinedBands.treble > 1e-10
+      ? 10 * Math.log10(combinedBands.mid / combinedBands.treble)
+      : -Infinity;
+    
+    // C.2.9: Glitch Rate (glitches per second, sliding 1s window)
+    const now = Date.now();
+    if (this._glitchWindow) {
+      this._glitchWindow.push(now);
+      // Remove entries older than 1s
+      while (this._glitchWindow.length > 0 && this._glitchWindow[0] < now - 1000) {
+        this._glitchWindow.shift();
+      }
+    } else {
+      this._glitchWindow = [now];
+    }
+    
     // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
     const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
     
@@ -596,7 +802,18 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       entropyState: entropyState,
       isGlitch: glitchInfo.isGlitch,
       glitchState: glitchInfo.state,
-      glitchCount: this.glitchCount
+      glitchCount: this.glitchCount,
+      // C.2.x new metrics
+      hnr: hnr,
+      zcr: combinedZCR,
+      spectralCentroid: spectralCentroid,
+      spectralRolloff: spectralRolloff,
+      onsetDetected: onsetDetected,
+      // C.2.8–C.2.10
+      dynamicRange: dynamicRange,
+      bassMidRatio: bassMidRatio,
+      midTrebleRatio: midTrebleRatio,
+      glitchRate: this._glitchWindow ? this._glitchWindow.length : 0
     };
     
     if (includeWaveform) {

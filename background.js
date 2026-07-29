@@ -135,6 +135,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (message && message.type === '_PONG_REQUEST') {
         port.postMessage({ type: '_PONG_RESPONSE', pingTime: message.pingTime });
       }
+
     };
     port.onMessage.addListener(popupPortMessageHandler);
 
@@ -374,6 +375,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         log.warn('Failed to forward _DEBUG_METRICS to popup:', e.message);
       }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  // === Forward effects from popup to offscreen ===
+  if (message && message.type.startsWith('_SSA_SET_')) {
+    if (isCapturing && offscreenReady) {
+      chrome.runtime.sendMessage(message, (resp) => {
+        if (chrome.runtime.lastError) {
+          log.warn('Failed to forward effects to offscreen:', chrome.runtime.lastError.message);
+        }
+      });
     }
     sendResponse({ ok: true });
     return false;

@@ -110,6 +110,83 @@ const entropyState = document.getElementById('entropyState');
 const flatnessValue = document.getElementById('flatnessValue');
 const entropyHint = document.getElementById('entropyHint');
 
+// New DSP metrics section
+const newMetricsSection = document.getElementById('newMetricsSection');
+const hnrValue = document.getElementById('hnrValue');
+const zcrValue = document.getElementById('zcrValue');
+const centroidValue = document.getElementById('centroidValue');
+const rolloffValue = document.getElementById('rolloffValue');
+const onsetValue = document.getElementById('onsetValue');
+const rttValue = document.getElementById('rttValue');
+
+// Extended DSP metrics (C.2.8–C.2.10)
+const extendedMetricsSection = document.getElementById('extendedMetricsSection');
+const drValue = document.getElementById('drValue');
+const bassMidRatioValue = document.getElementById('bassMidRatioValue');
+const midTrebleRatioValue = document.getElementById('midTrebleRatioValue');
+const glitchRateValue = document.getElementById('glitchRateValue');
+
+// ============================================
+// Effects Section (C.3)
+// ============================================
+const effectsSection = document.getElementById('effectsSection');
+
+// Compressor
+const compressorToggle = document.getElementById('compressorToggle');
+const compThreshold = document.getElementById('compThreshold');
+const compRatio = document.getElementById('compRatio');
+const compKnee = document.getElementById('compKnee');
+const compAttack = document.getElementById('compAttack');
+const compRelease = document.getElementById('compRelease');
+const compThresholdVal = document.getElementById('compThresholdVal');
+const compRatioVal = document.getElementById('compRatioVal');
+const compKneeVal = document.getElementById('compKneeVal');
+const compAttackVal = document.getElementById('compAttackVal');
+const compReleaseVal = document.getElementById('compReleaseVal');
+
+// Parametric EQ
+const eqToggle = document.getElementById('eqToggle');
+const hpfFreq = document.getElementById('hpfFreq');
+const lpfFreq = document.getElementById('lpfFreq');
+const peakFreq = document.getElementById('peakFreq');
+const peakGain = document.getElementById('peakGain');
+const peakQ = document.getElementById('peakQ');
+const hpfFreqVal = document.getElementById('hpfFreqVal');
+const lpfFreqVal = document.getElementById('lpfFreqVal');
+const peakFreqVal = document.getElementById('peakFreqVal');
+const peakGainVal = document.getElementById('peakGainVal');
+const peakQVal = document.getElementById('peakQVal');
+
+// Limiter
+const limiterToggle = document.getElementById('limiterToggle');
+const limThresh = document.getElementById('limThresh');
+const limThreshVal = document.getElementById('limThreshVal');
+
+// Delay
+const delayToggle = document.getElementById('delayToggle');
+const delayTime = document.getElementById('delayTime');
+const delayFeedback = document.getElementById('delayFeedback');
+const delayMix = document.getElementById('delayMix');
+const delayTimeVal = document.getElementById('delayTimeVal');
+const delayFeedbackVal = document.getElementById('delayFeedbackVal');
+const delayMixVal = document.getElementById('delayMixVal');
+
+// Reset All
+const effectsResetBtn = document.getElementById('effectsResetBtn');
+
+// Effects storage keys
+const EFFECTS_STORAGE_KEY = 'ssa_effectsSettings';
+const EFFECTS_DEFAULTS = {
+  compressor: { active: false, threshold: -24, ratio: 12, knee: 30, attack: 3, release: 250 },
+  eq: { active: false, hpfFreq: 20, lpfFreq: 22050, peakFreq: 1000, peakGain: 0, peakQ: 1 },
+  limiter: { active: false, threshold: -1 },
+  delay: { active: false, delayTime: 0, feedback: 0, mix: 0 }
+};
+
+// Effects local state
+let effectsSettings = JSON.parse(JSON.stringify(EFFECTS_DEFAULTS));
+let effectsUIEnabled = false; // Whether sliders are enabled (capture active)
+
 // Glitch settings elements
 const thresholdSlider = document.getElementById('thresholdSlider');
 const thresholdValue = document.getElementById('thresholdValue');
@@ -354,7 +431,7 @@ function perfFrameLoop(timestamp) {
   
   // Ping background every ~3 seconds (180 frames at 60fps)
   perfLatencySampleCount++;
-  if (perfLatencySampleCount >= 180) {
+  if (perfLatencySampleCount >= 90) { // ~1.5s at 60fps
     perfLatencySampleCount = 0;
     if (bgPort && bgMetricsConnected) {
       const pingTime = Date.now();
@@ -600,6 +677,9 @@ function updateUI(connected) {
     if (heatmapSection) heatmapSection.style.display = 'block';
     if (entropySection) entropySection.style.display = '';
     if (entropyHint) entropyHint.style.display = '';
+    // Effects section — show when capture active
+    if (effectsSection) effectsSection.style.display = 'block';
+    setEffectsEnabled(true);
   } else {
     if (startBtn) startBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = true;
@@ -613,6 +693,7 @@ function updateUI(connected) {
     if (glitchSettings) glitchSettings.style.display = 'none';
     if (timelineSection) timelineSection.style.display = 'none';
     if (heatmapSection) heatmapSection.style.display = 'none';
+    if (effectsSection) effectsSection.style.display = 'none';
     if (entropySection) entropySection.style.display = 'none';
     if (entropyHint) entropyHint.style.display = 'none';
 
@@ -656,6 +737,9 @@ function updateUI(connected) {
 
     if (entropyValue) entropyValue.textContent = '0.00';
     if (flatnessValue) flatnessValue.textContent = '0.00';
+
+    // Disable effects on stop
+    setEffectsEnabled(false);
     if (entropyState) {
       entropyState.textContent = 'STABLE';
       entropyState.style.color = tc('glitch').STABLE;
@@ -878,7 +962,7 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = 
   updateOscilloscopeWithThrottle(leftChannelHistory, rightChannelHistory);
 }
 
-function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
+function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness, hnr, zcr, spectralCentroid, spectralRolloff, onsetDetected, rtt, dynamicRange, bassMidRatio, midTrebleRatio, glitchRate) {
   updateGlitchStatus(state, count);
 
   if (entropySection && entropy !== undefined) {
@@ -905,6 +989,47 @@ function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
         entropyState.style.color = colors.STABLE;
         break;
     }
+  }
+  
+  // C.2.11: Update new DSP metrics display
+  if (newMetricsSection) {
+    newMetricsSection.style.display = 'block';
+  }
+  if (hnrValue && hnr !== undefined && hnr !== 0) {
+    hnrValue.textContent = hnr.toFixed(1) + ' dB';
+  }
+  if (zcrValue && zcr !== undefined) {
+    zcrValue.textContent = zcr.toFixed(0);
+  }
+  if (centroidValue && spectralCentroid !== undefined) {
+    centroidValue.textContent = spectralCentroid.toFixed(0) + ' Hz';
+  }
+  if (rolloffValue && spectralRolloff !== undefined) {
+    rolloffValue.textContent = spectralRolloff.toFixed(0) + ' Hz';
+  }
+  if (onsetValue && onsetDetected !== undefined) {
+    onsetValue.textContent = onsetDetected ? 'YES' : 'NO';
+    onsetValue.style.color = onsetDetected ? 'var(--text-red)' : 'var(--accent-blue)';
+  }
+  if (rttValue && rtt !== undefined && rtt > 0) {
+    rttValue.textContent = Math.round(rtt) + 'ms';
+  }
+  
+  // C.2.8–C.2.10: Extended metrics display
+  if (extendedMetricsSection) {
+    extendedMetricsSection.style.display = 'block';
+  }
+  if (dynamicRange !== undefined && dynamicRange != null && dynamicRange > 0) {
+    drValue.textContent = dynamicRange.toFixed(1) + ' dB';
+  }
+  if (bassMidRatio !== undefined && bassMidRatio != null) {
+    bassMidRatioValue.textContent = bassMidRatio.toFixed(2) + ' dB';
+  }
+  if (midTrebleRatio !== undefined && midTrebleRatio != null) {
+    midTrebleRatioValue.textContent = midTrebleRatio.toFixed(2) + ' dB';
+  }
+  if (glitchRate !== undefined && glitchRate != null) {
+    glitchRateValue.textContent = glitchRate.toFixed(1) + '/s';
   }
 }
 
@@ -1187,7 +1312,23 @@ function applyMetrics(data) {
     }
 
     // Glitch detection display
-    updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+    updateGlitchDisplay(
+      data.glitchState,
+      data.glitchCount,
+      data.entropy,
+      data.entropyState,
+      data.flatness,
+      data.hnr,
+      data.zcr,
+      data.spectralCentroid,
+      data.spectralRolloff,
+      data.onsetDetected,
+      lastConnectionLatency,
+      data.dynamicRange,
+      data.bassMidRatio,
+      data.midTrebleRatio,
+      data.glitchRate
+    );
   } catch (e) {
     // One bad metrics frame must not hang the popup
     log.warn('applyMetrics error:', e.message);
@@ -1221,9 +1362,8 @@ async function initAudioProcessing(stream) {
     // 1. Источник направляем в воркет для спектрального анализа
     popupMediaStreamSource.connect(popupWorkletNode);
 
-    // 2. ВАЖНО: Подключаем воркет (или источник) к колонкам/наушникам, 
-    // чтобы не было глушения оригинального звука
-    popupWorkletNode.connect(popupAudioContext.destination);
+    // 2. Подключаем источник (не воркет!) к колонкам, чтобы не глушить оригинальный звук
+    popupMediaStreamSource.connect(popupAudioContext.destination);
 
     // Named handler for proper cleanup — previous handlers lost on reassignment
     const workletMetricsHandler = (event) => {
@@ -1427,11 +1567,22 @@ function bgPortDisconnectHandler() {
   
   // If capture was active when port disconnected, trigger reconnect
   if (captureActive) {
-    setTimeout(() => {
-      if (captureActive && !bgPort && !bgMetricsConnected) {
-        ensureBackgroundPort();
-      }
-    }, 500);
+    // Retry up to 3 times with increasing delays
+    let retries = 0;
+    const maxRetries = 3;
+    
+    function tryReconnect() {
+      retries++;
+      if (retries > maxRetries) return;
+      
+      setTimeout(() => {
+        if (captureActive && !bgPort && !bgMetricsConnected) {
+          ensureBackgroundPort();
+        }
+      }, 500 * retries); // Exponential backoff: 500ms, 1000ms, 1500ms
+    }
+    
+    tryReconnect();
   }
   
   // Only update UI if capture was active (spontaneous disconnect)
@@ -1768,6 +1919,432 @@ if (resetSensitivityBtn) {
   });
 }
 
+// ============================================
+// Effects Helper Functions
+// ============================================
+
+/**
+ * Send compressor settings to offscreen (direct via runtime)
+ */
+function sendCompressorSettings() {
+  chrome.runtime.sendMessage({
+    type: '_SSA_SET_COMPRESSOR',
+    active: effectsSettings.compressor.active,
+    params: {
+      threshold: effectsSettings.compressor.threshold,
+      ratio: effectsSettings.compressor.ratio,
+      knee: effectsSettings.compressor.knee,
+      attack: effectsSettings.compressor.attack,
+      release: effectsSettings.compressor.release
+    }
+  }).catch(() => {});
+}
+
+/**
+ * Send EQ settings to offscreen (direct via runtime)
+ */
+function sendEQSettings() {
+  chrome.runtime.sendMessage({
+    type: '_SSA_SET_EQ',
+    active: effectsSettings.eq.active,
+    params: {
+      hpfFreq: effectsSettings.eq.hpfFreq,
+      lpfFreq: effectsSettings.eq.lpfFreq,
+      peakFreq: effectsSettings.eq.peakFreq,
+      peakGain: effectsSettings.eq.peakGain,
+      peakQ: effectsSettings.eq.peakQ
+    }
+  }).catch(() => {});
+}
+
+/**
+ * Send limiter settings to offscreen (direct via runtime)
+ */
+function sendLimiterSettings() {
+  chrome.runtime.sendMessage({
+    type: '_SSA_SET_LIMITER',
+    active: effectsSettings.limiter.active,
+    params: {
+      threshold: effectsSettings.limiter.threshold
+    }
+  }).catch(() => {});
+}
+
+/**
+ * Send delay settings to offscreen (direct via runtime)
+ */
+function sendDelaySettings() {
+  chrome.runtime.sendMessage({
+    type: '_SSA_SET_DELAY',
+    active: effectsSettings.delay.active,
+    params: {
+      delayTime: effectsSettings.delay.delayTime,
+      feedback: effectsSettings.delay.feedback,
+      mix: effectsSettings.delay.mix
+    }
+  }).catch(() => {});
+}
+
+/**
+ * Save all effects settings to chrome.storage
+ */
+function saveEffectsSettings() {
+  chrome.storage.local.set({ [EFFECTS_STORAGE_KEY]: effectsSettings });
+}
+
+/**
+ * Load effects settings from chrome.storage
+ */
+function loadEffectsSettings() {
+  chrome.storage.local.get([EFFECTS_STORAGE_KEY], (result) => {
+    if (result[EFFECTS_STORAGE_KEY] && typeof result[EFFECTS_STORAGE_KEY] === 'object') {
+      const saved = result[EFFECTS_STORAGE_KEY];
+      // Merge with defaults
+      if (saved.compressor && typeof saved.compressor === 'object') {
+        Object.assign(effectsSettings.compressor, saved.compressor);
+      }
+      if (saved.eq && typeof saved.eq === 'object') {
+        Object.assign(effectsSettings.eq, saved.eq);
+      }
+      if (saved.limiter && typeof saved.limiter === 'object') {
+        Object.assign(effectsSettings.limiter, saved.limiter);
+      }
+      if (saved.delay && typeof saved.delay === 'object') {
+        Object.assign(effectsSettings.delay, saved.delay);
+      }
+      applyEffectsUIValues();
+    }
+  });
+}
+
+/**
+ * Apply stored values to UI elements (without sending to offscreen)
+ */
+function applyEffectsUIValues() {
+  // Compressor
+  if (compThreshold) compThreshold.value = effectsSettings.compressor.threshold;
+  if (compThresholdVal) compThresholdVal.textContent = effectsSettings.compressor.threshold;
+  if (compRatio) compRatio.value = effectsSettings.compressor.ratio;
+  if (compRatioVal) compRatioVal.textContent = effectsSettings.compressor.ratio;
+  if (compKnee) compKnee.value = effectsSettings.compressor.knee;
+  if (compKneeVal) compKneeVal.textContent = effectsSettings.compressor.knee;
+  if (compAttack) compAttack.value = effectsSettings.compressor.attack;
+  if (compAttackVal) compAttackVal.textContent = effectsSettings.compressor.attack;
+  if (compRelease) compRelease.value = effectsSettings.compressor.release;
+  if (compReleaseVal) compReleaseVal.textContent = effectsSettings.compressor.release;
+  if (compressorToggle) compressorToggle.checked = effectsSettings.compressor.active;
+
+  // EQ
+  if (hpfFreq) hpfFreq.value = effectsSettings.eq.hpfFreq;
+  if (hpfFreqVal) hpfFreqVal.textContent = effectsSettings.eq.hpfFreq;
+  if (lpfFreq) lpfFreq.value = effectsSettings.eq.lpfFreq;
+  if (lpfFreqVal) lpfFreqVal.textContent = effectsSettings.eq.lpfFreq;
+  if (peakFreq) peakFreq.value = effectsSettings.eq.peakFreq;
+  if (peakFreqVal) peakFreqVal.textContent = effectsSettings.eq.peakFreq;
+  if (peakGain) peakGain.value = effectsSettings.eq.peakGain;
+  if (peakGainVal) peakGainVal.textContent = effectsSettings.eq.peakGain;
+  if (peakQ) peakQ.value = effectsSettings.eq.peakQ;
+  if (peakQVal) peakQVal.textContent = effectsSettings.eq.peakQ;
+  if (eqToggle) eqToggle.checked = effectsSettings.eq.active;
+
+  // Limiter
+  if (limThresh) limThresh.value = effectsSettings.limiter.threshold;
+  if (limThreshVal) limThreshVal.textContent = effectsSettings.limiter.threshold;
+  if (limiterToggle) limiterToggle.checked = effectsSettings.limiter.active;
+
+  // Delay
+  if (delayTime) delayTime.value = effectsSettings.delay.delayTime;
+  if (delayTimeVal) delayTimeVal.textContent = (effectsSettings.delay.delayTime / 1000).toFixed(1);
+  if (delayFeedback) delayFeedback.value = effectsSettings.delay.feedback;
+  if (delayFeedbackVal) delayFeedbackVal.textContent = effectsSettings.delay.feedback;
+  if (delayMix) delayMix.value = effectsSettings.delay.mix;
+  if (delayMixVal) delayMixVal.textContent = effectsSettings.delay.mix;
+  if (delayToggle) delayToggle.checked = effectsSettings.delay.active;
+
+  // Update slider disabled states
+  updateEffectsSliderStates();
+}
+
+/**
+ * Enable/disable sliders based on capture active state
+ */
+function updateEffectsSliderStates() {
+  const sliders = [
+    compThreshold, compRatio, compKnee, compAttack, compRelease,
+    hpfFreq, lpfFreq, peakFreq, peakGain, peakQ,
+    limThresh,
+    delayTime, delayFeedback, delayMix
+  ];
+  
+  sliders.forEach(slider => {
+    if (slider) {
+      slider.disabled = !effectsUIEnabled;
+      slider.style.opacity = effectsUIEnabled ? '1' : '0.5';
+    }
+  });
+  
+  // Toggles always enabled
+  if (compressorToggle) compressorToggle.disabled = false;
+  if (eqToggle) eqToggle.disabled = false;
+  if (limiterToggle) limiterToggle.disabled = false;
+  if (delayToggle) delayToggle.disabled = false;
+}
+
+/**
+ * Reset all effects to defaults
+ */
+function resetEffects() {
+  effectsSettings = JSON.parse(JSON.stringify(EFFECTS_DEFAULTS));
+  saveEffectsSettings();
+  applyEffectsUIValues();
+  
+  // Send reset values to offscreen
+  sendCompressorSettings();
+  sendEQSettings();
+  sendLimiterSettings();
+  sendDelaySettings();
+}
+
+/**
+ * Toggle effects UI enabled state (capture active)
+ */
+function setEffectsEnabled(enabled) {
+  effectsUIEnabled = enabled;
+  updateEffectsSliderStates();
+  
+  if (!enabled) {
+    // Disable all effect toggles when capture stops
+    if (compressorToggle) compressorToggle.checked = false;
+    if (eqToggle) eqToggle.checked = false;
+    if (limiterToggle) limiterToggle.checked = false;
+    if (delayToggle) delayToggle.checked = false;
+    
+    effectsSettings.compressor.active = false;
+    effectsSettings.eq.active = false;
+    effectsSettings.limiter.active = false;
+    effectsSettings.delay.active = false;
+    
+    // Send disabled state
+    sendCompressorSettings();
+    sendEQSettings();
+    sendLimiterSettings();
+    sendDelaySettings();
+  }
+  
+  saveEffectsSettings();
+}
+
+// ============================================
+// Effects Event Handlers
+// ============================================
+
+// Compressor toggle
+if (compressorToggle) {
+  compressorToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.compressor.active = e.target.checked;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+
+// Compressor sliders
+if (compThreshold) {
+  compThreshold.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.threshold = val;
+    if (compThresholdVal) compThresholdVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compRatio) {
+  compRatio.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.ratio = val;
+    if (compRatioVal) compRatioVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compKnee) {
+  compKnee.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.knee = val;
+    if (compKneeVal) compKneeVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compAttack) {
+  compAttack.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.attack = val;
+    if (compAttackVal) compAttackVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compRelease) {
+  compRelease.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.release = val;
+    if (compReleaseVal) compReleaseVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+
+// EQ toggle
+if (eqToggle) {
+  eqToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.eq.active = e.target.checked;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+
+// EQ sliders
+if (hpfFreq) {
+  hpfFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.hpfFreq = val;
+    if (hpfFreqVal) hpfFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (lpfFreq) {
+  lpfFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.lpfFreq = val;
+    if (lpfFreqVal) lpfFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakFreq) {
+  peakFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.peakFreq = val;
+    if (peakFreqVal) peakFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakGain) {
+  peakGain.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.peakGain = val;
+    if (peakGainVal) peakGainVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakQ) {
+  peakQ.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseFloat(e.target.value);
+    effectsSettings.eq.peakQ = val;
+    if (peakQVal) peakQVal.textContent = val.toFixed(1);
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+
+// Limiter toggle
+if (limiterToggle) {
+  limiterToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.limiter.active = e.target.checked;
+    saveEffectsSettings();
+    sendLimiterSettings();
+  });
+}
+
+// Limiter slider
+if (limThresh) {
+  limThresh.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseFloat(e.target.value);
+    effectsSettings.limiter.threshold = val;
+    if (limThreshVal) limThreshVal.textContent = val.toFixed(1);
+    saveEffectsSettings();
+    sendLimiterSettings();
+  });
+}
+
+// Delay toggle
+if (delayToggle) {
+  delayToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.delay.active = e.target.checked;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+
+// Delay sliders
+if (delayTime) {
+  delayTime.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.delayTime = val;
+    if (delayTimeVal) delayTimeVal.textContent = (val / 1000).toFixed(1);
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+if (delayFeedback) {
+  delayFeedback.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.feedback = val;
+    if (delayFeedbackVal) delayFeedbackVal.textContent = val;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+if (delayMix) {
+  delayMix.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.mix = val;
+    if (delayMixVal) delayMixVal.textContent = val;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+
+// Reset All button
+if (effectsResetBtn) {
+  effectsResetBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetEffects();
+  });
+}
+
+// Prevent popup closing on effects control clicks
+[compThreshold, compRatio, compKnee, compAttack, compRelease,
+ hpfFreq, lpfFreq, peakFreq, peakGain, peakQ,
+ limThresh, delayTime, delayFeedback, delayMix,
+ compressorToggle, eqToggle, limiterToggle, delayToggle].forEach(el => {
+  if (el) {
+    el.addEventListener('click', (e) => e.stopPropagation());
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+});
+
 // Кнопка экспорта лога глитчей
 if (exportLogBtn) {
   exportLogBtn.addEventListener('click', exportGlitchLog);
@@ -1851,6 +2428,9 @@ function applyTheme(theme) {
     if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
     requestAnimationFrame(perfFrameLoop);
   }
+  
+  // Load effects settings
+  loadEffectsSettings();
 })();
 
 if (themeToggle) {

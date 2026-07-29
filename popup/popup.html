@@ -138,6 +138,164 @@
         H: voice&lt;1.0 DRIFT · &gt;1.5+noise GLITCH
       </div>
 
+      <!-- New DSP Metrics Display -->
+      <div id="newMetricsSection" class="section-tertiary" style="margin-top: 8px; display: none;">
+        <div class="flex-between" style="margin-bottom: 4px;">
+          <span class="label-sm">HNR:</span>
+          <span id="hnrValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="label-sm">ZCR:</span>
+          <span id="zcrValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+        </div>
+        <div class="flex-between" style="margin-bottom: 4px;">
+          <span class="label-sm">Centroid:</span>
+          <span id="centroidValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="label-sm">Rolloff:</span>
+          <span id="rolloffValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+        </div>
+        <div class="flex-between">
+          <span class="label-sm">Onset:</span>
+          <span id="onsetValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">NO</span>
+          <span class="label-sm">RTT:</span>
+          <span id="rttValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+        </div>
+      </div>
+
+      <!-- Extended DSP Metrics (C.2.8–C.2.10) -->
+      <div id="extendedMetricsSection" class="section-tertiary" style="margin-top: 6px; display: none;">
+        <div class="flex-between" style="margin-bottom: 3px;">
+          <span class="label-sm">D.Range:</span>
+          <span id="drValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="label-sm">B/M:</span>
+          <span id="bassMidRatioValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+        </div>
+        <div class="flex-between">
+          <span class="label-sm">M/T:</span>
+          <span id="midTrebleRatioValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="label-sm">Rate:</span>
+          <span id="glitchRateValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+        </div>
+      </div>
+
+      <!-- Audio Effects Section (C.3) -->
+      <div id="effectsSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="flex-between" style="margin-bottom: 8px;">
+          <div class="label">Audio Effects</div>
+          <button id="effectsResetBtn" class="btn-sm">Reset All</button>
+        </div>
+
+        <!-- Compressor -->
+        <div id="compressorSection" class="section-tertiary" style="margin-bottom: 8px;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <span class="label-sm">🔽 Compressor</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="compressorToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="flex-gap" style="font-size: 9px;">
+            <div style="flex:1;">
+              <label class="label-xs">Threshold: <span id="compThresholdVal">-24</span>dB</label>
+              <input type="range" id="compThreshold" min="-60" max="0" value="-24" step="1" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Ratio: <span id="compRatioVal">12</span>:1</label>
+              <input type="range" id="compRatio" min="1" max="20" value="12" step="1" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Knee: <span id="compKneeVal">30</span>dB</label>
+              <input type="range" id="compKnee" min="0" max="40" value="30" step="1" disabled>
+            </div>
+          </div>
+          <div class="flex-gap" style="font-size: 9px; margin-top: 4px;">
+            <div style="flex:1;">
+              <label class="label-xs">Attack: <span id="compAttackVal">3</span>ms</label>
+              <input type="range" id="compAttack" min="0" max="100" value="3" step="1" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Release: <span id="compReleaseVal">250</span>ms</label>
+              <input type="range" id="compRelease" min="0" max="1000" value="250" step="10" disabled>
+            </div>
+          </div>
+        </div>
+
+        <!-- Parametric EQ -->
+        <div id="eqSection" class="section-tertiary" style="margin-bottom: 8px;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <span class="label-sm">🎵 Parametric EQ</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="eqToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="flex-gap" style="font-size: 9px;">
+            <div style="flex:1;">
+              <label class="label-xs">HPF Freq: <span id="hpfFreqVal">20</span>Hz</label>
+              <input type="range" id="hpfFreq" min="20" max="20000" value="20" step="10" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">LPF Freq: <span id="lpfFreqVal">22050</span>Hz</label>
+              <input type="range" id="lpfFreq" min="20" max="22050" value="22050" step="10" disabled>
+            </div>
+          </div>
+          <div class="flex-gap" style="font-size: 9px; margin-top: 4px;">
+            <div style="flex:1;">
+              <label class="label-xs">Peaking Freq: <span id="peakFreqVal">1000</span>Hz</label>
+              <input type="range" id="peakFreq" min="20" max="20000" value="1000" step="10" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Peaking Gain: <span id="peakGainVal">0</span>dB</label>
+              <input type="range" id="peakGain" min="-24" max="24" value="0" step="1" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Peaking Q: <span id="peakQVal">1.0</span></label>
+              <input type="range" id="peakQ" min="0.1" max="20" value="1" step="0.1" disabled>
+            </div>
+          </div>
+        </div>
+
+        <!-- Limiter -->
+        <div id="limiterSection" class="section-tertiary" style="margin-bottom: 8px;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <span class="label-sm">⚡ Limiter (WaveShaper)</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="limiterToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="flex-gap" style="font-size: 9px;">
+            <div style="flex:1;">
+              <label class="label-xs">Threshold: <span id="limThreshVal">-1</span>dB</label>
+              <input type="range" id="limThresh" min="-6" max="0" value="-1" step="0.5" disabled>
+            </div>
+          </div>
+        </div>
+
+        <!-- Delay -->
+        <div id="delaySection" class="section-tertiary" style="margin-bottom: 8px;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <span class="label-sm">🔁 Delay</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="delayToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="flex-gap" style="font-size: 9px;">
+            <div style="flex:1;">
+              <label class="label-xs">Time: <span id="delayTimeVal">0.0</span>s</label>
+              <input type="range" id="delayTime" min="0" max="1000" value="0" step="10" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Feedback: <span id="delayFeedbackVal">0</span>%</label>
+              <input type="range" id="delayFeedback" min="0" max="95" value="0" step="1" disabled>
+            </div>
+            <div style="flex:1;">
+              <label class="label-xs">Mix: <span id="delayMixVal">0</span>%</label>
+              <input type="range" id="delayMix" min="0" max="100" value="0" step="1" disabled>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Oscilloscope Section -->
       <div id="oscilloscopeSection" class="section" style="margin-top: 15px; display: none;">
         <div class="flex-between" style="margin-bottom: 8px;">

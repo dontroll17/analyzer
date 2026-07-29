@@ -11,6 +11,18 @@ let cleanupScheduled = false;
 let lastMetrics = null;
 let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
 
+// Effects chain state (C.3.1 + C.3.2 + C.3.3 + C.3.4 + C.3.5)
+let _effectsState = {
+  compressor: { enabled: false, threshold: -24, knee: 30, ratio: 12, attack: 0.003, release: 0.250 },
+  limiter: { enabled: false, threshold: -1, attack: 0.001, release: 0.1 },
+  eq: {
+    hpf: { enabled: false, frequency: 20 },
+    lpf: { enabled: false, frequency: 22050 },
+    peaking: { enabled: false, frequency: 1000, gain: 0, Q: 1 }
+  },
+  delay: { delayTime: 0, feedback: 0, mix: 0 }
+};
+
 // Audio Drop Counter
 let audioDropCount = 0;
 let lastContextState = 'running';
@@ -34,12 +46,174 @@ const MAX_SAFE_SEND_LOGS = 5; // Log first N errors, then silence
 let _safeSendErrorCount = 0;
 let _safeSendLastLogged = 0;
 
+// C.3.2: Update compressor settings
+function _updateCompressor(params) {
+  if (!window._ssaCompressor) return;
+  
+  const comp = window._ssaCompressor;
+  if (params.enabled !== undefined) {
+    _effectsState.compressor.enabled = params.enabled;
+    // Toggle: ratio=1 (bypass) vs ratio=params.ratio (active)
+    if (params.enabled) {
+      comp.ratio.value = params.ratio !== undefined ? params.ratio : 12;
+    } else {
+      comp.ratio.value = 1; // bypass
+    }
+  }
+  if (params.threshold !== undefined) comp.threshold.value = params.threshold;
+  if (params.knee !== undefined) comp.knee.value = params.knee;
+  if (params.ratio !== undefined && _effectsState.compressor.enabled) {
+    comp.ratio.value = params.ratio;
+  }
+  // attack/release are in ms from UI, but AudioParam expects seconds [0, 1]
+  if (params.attack !== undefined) comp.attack.value = params.attack / 1000;
+  if (params.release !== undefined) comp.release.value = params.release / 1000;
+}
+
+// C.3.3: Soft-clipping limiter curve (4x oversample)
+function createLimiterCurve(thresholdDb, oversampleRate) {
+  // Convert dB threshold to linear
+  const threshold = Math.pow(10, thresholdDb / 20);
+  const samples = 441 * oversampleRate; // 10ms at oversampled rate
+  const curve = new Float32Array(samples);
+  
+  // Soft-knee: smooth transition at threshold
+  const knee = 0.05; // ±0.05 linear range
+  
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2 / samples) - 1; // -1 to 1
+    let y;
+    
+    if (Math.abs(x) > threshold + knee) {
+      // Hard limiting beyond knee
+      y = threshold + Math.sign(x) * (Math.abs(x) - threshold) * 0.1;
+    } else if (Math.abs(x) > threshold - knee) {
+      // Soft clipping region
+      const t = (Math.abs(x) - (threshold - knee)) / (2 * knee); // 0-1
+      y = Math.sign(x) * (threshold - knee + t * t * knee);
+    } else {
+      // Pass-through below knee
+      y = x;
+    }
+    
+    // Clamp to avoid DC offset
+    curve[i] = Math.max(-1, Math.min(1, y));
+  }
+  
+  // Final sample must mirror first for smooth interpolation
+  curve[curve.length - 1] = -curve[0];
+  
+  return curve;
+}
+
+// C.3.3: Update limiter settings
+function _updateLimiter(params) {
+  if (!window._ssaWaveShaper) return;
+  
+  const ws = window._ssaWaveShaper;
+  const threshold = params.threshold !== undefined ? params.threshold : _effectsState.limiter.threshold;
+  
+  if (params.enabled !== undefined) _effectsState.limiter.enabled = params.enabled;
+  if (params.enabled && _effectsState.limiter.enabled) {
+    ws.curve = createLimiterCurve(threshold, 4);
+    ws.oversample = '4x';
+  } else {
+    ws.curve = new Float32Array([0, 1]);
+    ws.oversample = 'none';
+  }
+  
+  if (params.threshold !== undefined) {
+    _effectsState.limiter.threshold = threshold;
+    if (_effectsState.limiter.enabled) ws.curve = createLimiterCurve(threshold, 4);
+  }
+  
+  // NOTE: Limiter does NOT call _setEffectsActive — it's just one node in the chain
+  // Routing is controlled by compressor EQ/delay toggles
+}
+
+// C.3.4: Parametric EQ update
+function _updateEQ(params) {
+  if (!window._ssaHPF || !window._ssaLPF || !window._ssaPeaking) return;
+  
+  const hpf = window._ssaHPF;
+  const lpf = window._ssaLPF;
+  const peak = window._ssaPeaking;
+  
+  if (params.enabled !== undefined) {
+    _effectsState.eq.enabled = params.enabled;
+  }
+  
+  // HPF — toggle frequency: 20Hz (bypass) vs value (active)
+  if (params.hpfFreq !== undefined) {
+    _effectsState.eq.hpfFreq = params.hpfFreq;
+    if (_effectsState.eq.enabled) {
+      hpf.frequency.value = params.hpfFreq;
+    } else {
+      hpf.frequency.value = 20; // bypass
+    }
+  }
+  
+  // LPF — toggle frequency: 22050Hz (bypass) vs value (active)
+  if (params.lpfFreq !== undefined) {
+    _effectsState.eq.lpfFreq = params.lpfFreq;
+    if (_effectsState.eq.enabled) {
+      lpf.frequency.value = params.lpfFreq;
+    } else {
+      lpf.frequency.value = 22050; // bypass
+    }
+  }
+  
+  // Peaking gain — toggle: 0dB (bypass) vs value (active)
+  if (params.peakFreq !== undefined) {
+    _effectsState.eq.peakFreq = params.peakFreq;
+    if (_effectsState.eq.enabled) peak.frequency.value = params.peakFreq;
+  }
+  if (params.peakGain !== undefined) {
+    _effectsState.eq.peakGain = params.peakGain;
+    if (_effectsState.eq.enabled) {
+      peak.gain.value = params.peakGain;
+    } else {
+      peak.gain.value = 0; // bypass
+    }
+  }
+  if (params.peakQ !== undefined) {
+    _effectsState.eq.peakQ = params.peakQ;
+    if (_effectsState.eq.enabled) peak.Q.value = params.peakQ;
+  }
+}
+
+// C.3.5: Delay update
+function _updateDelay(params) {
+  if (!window._ssaDelay) return;
+  
+  if (params.enabled !== undefined) {
+    _effectsState.delay.enabled = params.enabled;
+  }
+  
+  if (params.delayTime !== undefined) {
+    // popup sends delayTime in ms (0-1000), delay-processor expects seconds
+    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', delayTime: params.delayTime / 1000 });
+    _effectsState.delay.delayTime = params.delayTime;
+  }
+  if (params.feedback !== undefined) {
+    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', feedback: params.feedback / 100 });
+    _effectsState.delay.feedback = params.feedback;
+  }
+  if (params.mix !== undefined) {
+    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', mix: params.mix / 100 });
+    _effectsState.delay.mix = params.mix;
+    // mix=0 = bypass, mix>0 = active
+    const actualMix = _effectsState.delay.enabled ? params.mix / 100 : 0;
+    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', mix: actualMix });
+  }
+}
+
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
     if (chrome.runtime.lastError) {
       // Log first N errors then throttle to prevent log spam during SW cycles
       const now = Date.now();
-      if (_safeSendErrorCount < MAX_SAFE_LOGS && (now - _safeSendLastLogged > 5000)) {
+      if (_safeSendErrorCount < MAX_SAFE_SEND_LOGS && (now - _safeSendLastLogged > 5000)) {
         _safeSendLastLogged = now;
         _safeSendErrorCount++;
         log.warn(`safeSendMessage error #${_safeSendErrorCount}:`, chrome.runtime.lastError.message);
@@ -58,6 +232,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_STOP') {
     stopCapture().then(sendResponse);
     return true;
+  }
+  
+  // Effect controls — popup sends { type, active, params }
+  // offscreen receives active as top-level field, params nested
+  if (message.type === '_SSA_SET_COMPRESSOR') {
+    _updateCompressor({ enabled: message.active, ...message.params });
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message.type === '_SSA_SET_LIMITER') {
+    _updateLimiter({ enabled: message.active, ...message.params });
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message.type === '_SSA_SET_EQ') {
+    _updateEQ({ enabled: message.active, ...message.params });
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message.type === '_SSA_SET_DELAY') {
+    _updateDelay({ enabled: message.active, ...message.params });
+    sendResponse({ ok: true });
+    return false;
   }
   
   if (message.type === '_OFFSCREEN_REQ_METRICS') {
@@ -193,7 +390,80 @@ async function startCapture(source) {
       channelCountMode: 'max',
       channelInterpretation: 'discrete'
     });
-    audioSource.connect(workletNode);
+    
+    // C.3.1: Create effects chain
+    // Default: source → bypassGain → worklet
+    // Active: source → compressor → hpf → lpf → peaking → delay → waveShaper → effectGain → worklet
+    const effectGainNode = audioContext.createGain(); // gain after effects chain
+    
+    // Create effect nodes (all bypassed by default via parameters)
+    const compressorNode = audioContext.createDynamicsCompressor();
+    // Compressor: set ratio=1 to effectively bypass
+    compressorNode.ratio.value = 1;
+    
+    const hpfNode = audioContext.createBiquadFilter();
+    hpfNode.type = 'highpass';
+    hpfNode.frequency.value = 20; // 20Hz — effectively bypassed
+    
+    const lpfNode = audioContext.createBiquadFilter();
+    lpfNode.type = 'lowpass';
+    lpfNode.frequency.value = 22050; // Nyquist — effectively bypassed
+    
+    const peakingNode = audioContext.createBiquadFilter();
+    peakingNode.type = 'peaking';
+    peakingNode.frequency.value = 1000; // 1kHz center
+    peakingNode.gain.value = 0; // 0dB — bypassed
+    peakingNode.Q.value = 1;
+    
+    // C.3.5: Custom delay effect via AudioWorkletProcessor
+    const delayWorkletPath = chrome.runtime.getURL('dsp-engine/delay-processor.js');
+    await audioContext.audioWorklet.addModule(delayWorkletPath);
+    
+    const delayNode = new AudioWorkletNode(audioContext, 'delay-effect', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 2,
+      channelCountMode: 'max',
+      channelInterpretation: 'discrete'
+    });
+    
+    const waveShaperNode = audioContext.createWaveShaper();
+    waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
+    waveShaperNode.oversample = 'none';
+    
+    // Bypass gain (always connected)
+    const bypassGainNode = audioContext.createGain();
+    bypassGainNode.gain.value = 1;
+    
+    // Save effect references at module level
+    window._ssaCompressor = compressorNode;
+    window._ssaHPF = hpfNode;
+    window._ssaLPF = lpfNode;
+    window._ssaPeaking = peakingNode;
+    window._ssaDelay = delayNode;
+    window._ssaWaveShaper = waveShaperNode;
+    window._ssaEffectGainNode = effectGainNode;
+    window._ssaBypassGainNode = bypassGainNode;
+    window._ssaGainNode = bypassGainNode; // legacy: point to bypass
+    window._ssaEffectGainNode = effectGainNode;
+    window._ssaAudioSource = audioSource;
+    
+    // Effect chain (always connected internally)
+    // routing: source → compressor → hpf → lpf → peaking → delay → waveShaper → worklet
+    compressorNode.connect(hpfNode);
+    hpfNode.connect(lpfNode);
+    lpfNode.connect(peakingNode);
+    peakingNode.connect(delayNode);
+    delayNode.connect(waveShaperNode);
+    waveShaperNode.connect(workletNode);
+    
+    // Default: source → compressor → ... → worklet (all bypassed via parameter defaults)
+    audioSource.connect(compressorNode);
+    
+    // Legacy toggle (kept for backward compat)
+    window._ssaSetEffectsActive = function(active) {
+      // No-op: effects are now controlled per-node via parameters
+    };
     
     // Save reference at module level so DSP timer can access it
     // (let declarations in async function are NOT visible to module-level vars)
@@ -391,6 +661,27 @@ function cleanup() {
   
   // Clear worklet reference to prevent leaks
   window._ssaWorkletNode = null;
+  
+  // Clear effects chain references — reset to clean bypass state
+  if (window._ssaAudioSource) {
+    try {
+      window._ssaAudioSource.disconnect();
+      if (window._ssaBypassGainNode) window._ssaAudioSource.connect(window._ssaBypassGainNode);
+    } catch (_) {}
+  }
+  
+  window._ssaCompressor = null;
+  window._ssaHPF = null;
+  window._ssaLPF = null;
+  window._ssaPeaking = null;
+  if (window._ssaDelay) {
+    try { window._ssaDelay.disconnect(); } catch (_) {}
+    window._ssaDelay = null;
+  }
+  window._ssaWaveShaper = null;
+  window._ssaBypassGainNode = null;
+  window._ssaEffectGainNode = null;
+  window._ssaGainNode = null;
   
   // Reset audio drop counter
   audioDropCount = 0;

@@ -15,7 +15,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["dsp-engine/audio-worklet.js", "offscreen.html"],
+      "resources": ["dsp-engine/audio-worklet.js", "dsp-engine/delay-processor.js", "offscreen.html"],
       "matches": ["<all_urls>"]
     }
   ],
