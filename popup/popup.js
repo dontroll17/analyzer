@@ -112,6 +112,12 @@ let rightChannelHistory = new Float32Array(HISTORY_SIZE);
 let oscFreeze = false;
 let oscZoom = false; // false = full buffer (1024), true = visible samples only
 let oscLogScale = false; // false = linear, true = logarithmic Y-axis
+let oscSplit = false; // false = single view, true = split (live + reference)
+let referenceBufferLeft = null;
+let referenceBufferRight = null;
+
+const OSC_SPLIT_KEY = 'oscSplit';
+const OSC_REF_KEY = 'oscReferenceSet';
 
 // rAF throttle for Canvas rendering
 let pendingOscDraw = null;
@@ -406,6 +412,9 @@ function updateUI(connected) {
     // Reset oscilloscope options on stop
     oscFreeze = false;
     oscZoom = false;
+    oscSplit = false;
+    referenceBufferLeft = null;
+    referenceBufferRight = null;
     saveOscOptions();
     updateOscButtonStates();
 
@@ -474,6 +483,12 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
 
 function drawOscilloscope(leftBuffer, rightBuffer) {
   if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+  
+  // Split-screen mode: draw live + reference
+  if (oscSplit) {
+    drawOscilloscopeSplit(leftBuffer, rightBuffer);
+    return;
+  }
 
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
@@ -517,6 +532,84 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
 
   drawBuffer(leftBuffer, colors.oscLeft);
   drawBuffer(rightBuffer, colors.oscRight);
+}
+
+/**
+ * Draw split-screen oscilloscope: top half = live, bottom half = reference
+ * Used when oscSplit mode is enabled
+ */
+function drawOscilloscopeSplit(leftBuffer, rightBuffer) {
+  if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+  
+  const canvasWidth = oscilloscopeCanvas.width;
+  const canvasHeight = oscilloscopeCanvas.height;
+  const halfHeight = canvasHeight / 2;
+  const centerYTop = halfHeight / 2;
+  const centerYBottom = halfHeight + centerYTop;
+  const colors = tc('canvas');
+  
+  // Clear canvas
+  oscilloscopeCtx.fillStyle = colors.bg;
+  oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+  
+  // Draw horizontal divider
+  oscilloscopeCtx.strokeStyle = colors.grid;
+  oscilloscopeCtx.lineWidth = 1;
+  oscilloscopeCtx.beginPath();
+  oscilloscopeCtx.moveTo(0, halfHeight);
+  oscilloscopeCtx.lineTo(canvasWidth, halfHeight);
+  oscilloscopeCtx.stroke();
+  
+  // Draw top half (live)
+  oscilloscopeCtx.strokeStyle = colors.grid;
+  oscilloscopeCtx.lineWidth = 1;
+  oscilloscopeCtx.beginPath();
+  oscilloscopeCtx.moveTo(0, centerYTop);
+  oscilloscopeCtx.lineTo(canvasWidth, centerYTop);
+  oscilloscopeCtx.stroke();
+  
+  // Draw bottom half (reference)
+  oscilloscopeCtx.beginPath();
+  oscilloscopeCtx.moveTo(0, centerYBottom);
+  oscilloscopeCtx.lineTo(canvasWidth, centerYBottom);
+  oscilloscopeCtx.stroke();
+  
+  // Helper to draw buffer in a half-canvas
+  const drawInHalf = (buf, color, cy) => {
+    if (!buf || buf.length === 0) return;
+    oscilloscopeCtx.strokeStyle = color;
+    oscilloscopeCtx.lineWidth = 1.5;
+    oscilloscopeCtx.beginPath();
+    
+    const startIdx = oscZoom ? 0 : 0;
+    const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
+    
+    for (let i = startIdx; i < endIdx; i++) {
+      const x = (i / (endIdx - 1 || 1)) * canvasWidth;
+      const normalized = oscLogScale
+        ? Math.max(-1, Math.min(1, Math.log10(Math.abs(buf[i]) + 1e-10) / Math.log10(2) / 30))
+        : (buf[i] > 1 ? 1 : buf[i] < -1 ? -1 : buf[i]);
+      const y = cy - (normalized * centerYTop);
+      if (i === startIdx) oscilloscopeCtx.moveTo(x, y);
+      else oscilloscopeCtx.lineTo(x, y);
+    }
+    oscilloscopeCtx.stroke();
+  };
+  
+  // Top: live signal
+  drawInHalf(leftBuffer, colors.oscLeft, centerYTop);
+  drawInHalf(rightBuffer, colors.oscRight, centerYTop);
+  
+  // Bottom: reference signal
+  if (referenceBufferLeft) {
+    drawInHalf(referenceBufferLeft, colors.oscLeft, centerYBottom);
+  }
+  if (referenceBufferRight) {
+    drawInHalf(referenceBufferRight, colors.oscRight, centerYBottom);
+  } else if (referenceBufferLeft) {
+    // Mono reference: draw same for both
+    drawInHalf(referenceBufferLeft, colors.oscRight, centerYBottom);
+  }
 }
 
 function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = false) {
@@ -1217,14 +1310,18 @@ function redrawOscilloscope() {
 const OSC_OPTIONS_KEY = 'oscOptions';
 
 // Load saved oscilloscope options
-chrome.storage.local.get([OSC_OPTIONS_KEY], (result) => {
+chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
   if (result[OSC_OPTIONS_KEY] && typeof result[OSC_OPTIONS_KEY] === 'object') {
     const opts = result[OSC_OPTIONS_KEY];
     if (opts.freeze) oscFreeze = true;
     if (opts.zoom) oscZoom = true;
     if (opts.logScale) oscLogScale = true;
-    updateOscButtonStates();
   }
+  if (result[OSC_SPLIT_KEY]) oscSplit = !!result[OSC_SPLIT_KEY];
+  if (result[OSC_SPLIT_KEY] && result[OSC_REF_KEY] && referenceBufferLeft) {
+    // Reference was set, split mode was on — restore split
+  }
+  updateOscButtonStates();
 });
 
 function saveOscOptions() {
@@ -1233,7 +1330,9 @@ function saveOscOptions() {
       freeze: oscFreeze,
       zoom: oscZoom,
       logScale: oscLogScale
-    }
+    },
+    [OSC_SPLIT_KEY]: oscSplit,
+    [OSC_REF_KEY]: !!referenceBufferLeft
   });
 }
 
@@ -1253,6 +1352,10 @@ function updateOscButtonStates() {
   if (freezeLabel) {
     freezeLabel.style.display = oscFreeze ? 'block' : 'none';
   }
+  if (splitBtn) {
+    splitBtn.style.borderColor = oscSplit ? 'var(--accent-blue)' : '';
+    splitBtn.style.background = oscSplit ? 'var(--accent-blue-dark)' : '';
+  }
 }
 
 if (freezeBtn) {
@@ -1268,6 +1371,44 @@ if (freezeBtn) {
         left: new Float32Array(leftChannelHistory),
         right: new Float32Array(rightChannelHistory)
       };
+    }
+  });
+}
+
+if (splitBtn) {
+  splitBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    oscSplit = !oscSplit;
+    saveOscOptions();
+    updateOscButtonStates();
+    
+    // Redraw with new split setting if capture is active and not frozen
+    if (!oscFreeze && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
+    }
+  });
+}
+
+if (setRefBtn) {
+  setRefBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Save current buffers as reference
+    referenceBufferLeft = new Float32Array(leftChannelHistory);
+    if (rightChannelHistory.some(v => v !== 0)) {
+      referenceBufferRight = new Float32Array(rightChannelHistory);
+    }
+    saveOscOptions();
+    
+    // Visual feedback: flash the button
+    if (setRefBtn) {
+      const origText = setRefBtn.textContent;
+      setRefBtn.textContent = '✓';
+      setTimeout(() => { setRefBtn.textContent = origText; }, 500);
+    }
+    
+    // Redraw if in split mode
+    if (oscSplit && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
     }
   });
 }
@@ -1308,6 +1449,9 @@ if (clearOscBtn) {
     rightChannelHistory.fill(0);
     // Clear freeze state
     oscFreeze = false;
+    // Clear reference
+    referenceBufferLeft = null;
+    referenceBufferRight = null;
     saveOscOptions();
     updateOscButtonStates();
     // Clear canvas
