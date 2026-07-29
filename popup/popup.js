@@ -774,13 +774,14 @@ async function initAudioProcessing(stream) {
     // чтобы не было глушения оригинального звука
     popupWorkletNode.connect(popupAudioContext.destination);
 
-    // Use shared applyMetrics for metrics rendering
-    popupWorkletNode.port.onmessage = (event) => {
+    // Named handler for proper cleanup — previous handlers lost on reassignment
+    const workletMetricsHandler = (event) => {
       const data = event.data;
-      if (data.type === 'METRICS') {
+      if (data && data.type === 'METRICS') {
         applyMetrics(data);
       }
     };
+    popupWorkletNode.port.onmessage = workletMetricsHandler;
 
     updateUI(true);
   } catch (error) {
@@ -825,13 +826,13 @@ function stopAudioProcessing() {
     popupCaptureStream = null;
   }
   
-  // Disconnect from background
+  // Disconnect from background — bgPortDisconnectHandler will clean up listeners and null bgPort
   if (bgPort) {
     try {
       bgPort.disconnect();
     } catch (_) {}
-    bgPort = null;
-    bgMetricsHandler = null;
+    // IMPORTANT: Do NOT null bgPort here — bgPortDisconnectHandler handles it
+    // Nullifying here causes race condition with onDisconnect callback
   }
   
   isConnected = false;
@@ -921,6 +922,32 @@ function sendSensitivityToWorklet(percentage) {
   });
 }
 
+// Background port disconnect handler — named for proper removal
+function bgPortDisconnectHandler() {
+  // Remove all listeners to prevent leaks
+  if (bgPort) {
+    bgPort.onMessage.removeListener(bgMetricsHandler);
+    bgPort.onDisconnect.removeListener(bgPortDisconnectHandler);
+  }
+  
+  isConnected = false;
+  bgPort = null;
+  bgMetricsHandler = null;
+  
+  // Only update UI if capture was active (spontaneous disconnect)
+  if (gracefulStop) {
+    return;
+  }
+  
+  // Port disconnected unexpectedly — stop capture gracefully
+  captureActive = false;
+  if (startBtn) {
+    startBtn.textContent = 'Start Capture';
+    startBtn.disabled = false;
+  }
+  updateUI(false);
+}
+
 // Background port — create ONCE at page load to prevent memory leaks
 function ensureBackgroundPort() {
   if (bgPort) return true; // Already connected
@@ -932,46 +959,40 @@ function ensureBackgroundPort() {
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
-      if (data && data.type === 'METRICS') {
+      if (!data) return;
+      
+      if (data.type === 'METRICS') {
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) return;
         applyMetrics(data);
       }
-      if (data && data.type === '_OFFSCREEN_ENDED') {
-        gracefulStop = true; // Prevent disconnect warning
+      if (data.type === '_OFFSCREEN_ENDED') {
+        gracefulStop = true; // Mark as graceful to prevent disconnect warning
         stopAudioProcessing();
         updateUI(false);
         captureActive = false;
-        startBtn.textContent = 'Start Capture';
-        startBtn.disabled = false;
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
         setTimeout(() => { gracefulStop = false; }, 100);
       }
       // Handle offscreen capture errors (user cancelled, permission denied, etc.)
-      if (data && data.type === '_OFFSCREEN_ERROR') {
+      if (data.type === '_OFFSCREEN_ERROR') {
         if (rmsLevel) {
           rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
           rmsLevel.style.color = tc('rms').SILENCE;
         }
         captureActive = false;
-        startBtn.textContent = 'Start Capture';
-        startBtn.disabled = false;
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
       }
     };
     
     bgPort.onMessage.addListener(bgMetricsHandler);
-    bgPort.onDisconnect.addListener(() => {
-      // Only log if we didn't explicitly disconnect (stop was called)
-      if (!gracefulStop) {
-        console.warn('[Popup] Port unexpectedly disconnected from background');
-      }
-      isConnected = false;
-      bgPort = null;
-      bgMetricsHandler = null;
-      captureActive = false;
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
-      updateUI(false);
-    });
+    bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
     
     // Send metrics request immediately after connect (in case capture is active)
     setTimeout(() => {
