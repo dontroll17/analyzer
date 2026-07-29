@@ -373,6 +373,9 @@ const OSC_DRAW_INTERVAL = 33;
 let lastOscDrawTime = 0;
 
 function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
+  // Guard: never draw if canvas is hidden or page is in background
+  if (document.hidden || !oscilloscopeCanvas) return;
+  
   pendingOscDraw = { left: leftBuffer, right: rightBuffer };
   if (needsTimelineUpdate) pendingTimelineDraw = true;
   
@@ -382,44 +385,46 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
   requestAnimationFrame((timestamp) => {
     rafScheduled = false;
     
-    if (pendingOscDraw) {
-      // Throttle to ~30fps
-      const now = perfNow();
-      if (now - lastOscDrawTime < OSC_DRAW_INTERVAL && lastOscDrawTime > 0) {
-        // Skip draw but update buffer for next frame
-        // Buffer is already Float32Array — no copy overhead
-      } else {
-        lastOscDrawTime = now;
-        if (perfActive) {
-          perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+    try {
+      if (pendingOscDraw) {
+        // Throttle to ~15fps (canvas is expensive — 30fps causes hangs)
+        const now = perfNow();
+        if (now - lastOscDrawTime < 66 && lastOscDrawTime > 0) {
+          // Skip draw but update buffer for next frame
+          // Buffer is already Float32Array — no copy overhead
         } else {
-          drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+          lastOscDrawTime = now;
+          if (perfActive) {
+            perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+          } else {
+            drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+          }
         }
+        // CRITICAL: Release reference to prevent memory leaks
+        pendingOscDraw = null;
       }
-      // CRITICAL: Release reference to prevent memory leaks
-      pendingOscDraw = null;
-    }
-    
-    if (pendingTimelineDraw) {
-      if (perfActive) {
-        const tStart = perfNow();
-        drawTimeline();
-        perfDrawTimes.push(perfNow() - tStart);
-      } else {
-        drawTimeline();
+      
+      if (pendingTimelineDraw) {
+        if (perfActive) {
+          const tStart = perfNow();
+          drawTimeline();
+          perfDrawTimes.push(perfNow() - tStart);
+        } else {
+          drawTimeline();
+        }
+        pendingTimelineDraw = false;
       }
-      pendingTimelineDraw = false;
-    }
-    
-    // Draw heatmap if active
-    if (heatmapActive && captureActive) {
-      if (perfActive) {
+      
+      // Draw heatmap if active — only when perfActive to reduce load
+      if (perfActive && heatmapActive && captureActive) {
         const hStart = perfNow();
         drawHeatmap();
         perfDrawTimes.push(perfNow() - hStart);
-      } else {
-        drawHeatmap();
       }
+    } catch (e) {
+      // One failed draw must not hang the popup
+      console.warn('[Popup] Canvas draw error:', e.message);
+      rafScheduled = false;
     }
   });
 }
@@ -998,66 +1003,74 @@ function drawHeatmap() {
  * @param {string} data.entropyState - Entropy classification (STABLE / DRIFT / GLITCH)
  */
 function applyMetrics(data) {
-  // Update current metrics state
-  currentMetrics = {
-    rms: data.rms,
-    bass: data.bass,
-    mid: data.mid,
-    treble: data.treble,
-    highFreqAnomaly: data.highFreqAnomaly,
-    rmsRight: data.rmsRight
-  };
-
-  // Update RMS display
-  updateRMSDisplay(data.rms, data.peakRMS);
-
-  // Stereo: combine L+R for overall bands, or use mono data
-  const isStereo = data.bassRight !== undefined;
-  const combinedBass = isStereo
-    ? (data.bass + data.bassRight) / 2
-    : data.bass;
-  const combinedMid = isStereo
-    ? (data.mid + data.midRight) / 2
-    : data.mid;
-  const combinedTreble = isStereo
-    ? (data.treble + data.trebleRight) / 2
-    : data.treble;
-
-  // Update channel indicator
-  if (channelIndicator) {
-    const chColors = tc('channel');
-    channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
-    channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
-  }
-
-  const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
-  updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+  // Quick bail for invalid data
+  if (!data || typeof data.rms === 'undefined') return;
   
-  // Update oscilloscope (freeze handled inside updateOscilloscopeFromWaveform)
-  // When frozen: keep drawing the last frame
-  updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
-
-  // Glitch detection display
-  updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
-
-  // Update heatmap (if enabled and capture active)
-  if (heatmapActive) {
-    updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
-  }
-
-  // Timeline recording (throttle ~5 Hz)
-  if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
-  if (data.timestamp - lastTimelineRecord > 200) {
-    glitchHistory.push({
-      time: data.timestamp - CAPTURE_START_TIME,
+  try {
+    // Update current metrics state
+    currentMetrics = {
       rms: data.rms,
-      state: data.glitchState
-    });
-    lastTimelineRecord = data.timestamp;
-    if (glitchHistory.length > TIMELINE_MAX) {
-      glitchHistory.shift();
+      bass: data.bass,
+      mid: data.mid,
+      treble: data.treble,
+      highFreqAnomaly: data.highFreqAnomaly,
+      rmsRight: data.rmsRight
+    };
+
+    // Update RMS display
+    updateRMSDisplay(data.rms, data.peakRMS);
+
+    // Stereo: combine L+R for overall bands, or use mono data
+    const isStereo = data.bassRight !== undefined;
+    const combinedBass = isStereo
+      ? (data.bass + data.bassRight) / 2
+      : data.bass;
+    const combinedMid = isStereo
+      ? (data.mid + data.midRight) / 2
+      : data.mid;
+    const combinedTreble = isStereo
+      ? (data.treble + data.trebleRight) / 2
+      : data.treble;
+
+    // Update channel indicator
+    if (channelIndicator) {
+      const chColors = tc('channel');
+      channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
+      channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
     }
-    updateTimelineWithThrottle();
+
+    const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
+    updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+    
+    // Update oscilloscope (freeze handled inside updateOscilloscopeFromWaveform)
+    // When frozen: keep drawing the last frame
+    updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
+
+    // Glitch detection display
+    updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+
+    // Update heatmap (if enabled and capture active)
+    if (heatmapActive) {
+      updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
+    }
+
+    // Timeline recording (throttle ~5 Hz)
+    if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+    if (data.timestamp - lastTimelineRecord > 200) {
+      glitchHistory.push({
+        time: data.timestamp - CAPTURE_START_TIME,
+        rms: data.rms,
+        state: data.glitchState
+      });
+      lastTimelineRecord = data.timestamp;
+      if (glitchHistory.length > TIMELINE_MAX) {
+        glitchHistory.shift();
+      }
+      updateTimelineWithThrottle();
+    }
+  } catch (e) {
+    // One bad metrics frame must not hang the popup
+    console.warn('[Popup] applyMetrics error:', e.message);
   }
 }
 
