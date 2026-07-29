@@ -128,6 +128,7 @@ let perfLastTime = 0;
 let perfDrawTimes = [];
 let PERF_MAX_DRAWS = 30;
 
+const perfMonitorHeader = document.getElementById('perfMonitorHeader');
 const perfMonitor = document.getElementById('perfMonitor');
 const perfFps = document.getElementById('perfFps');
 const perfDrawTime = document.getElementById('perfDrawTime');

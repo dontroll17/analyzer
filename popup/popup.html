@@ -12,12 +12,14 @@
   <button id="stopBtn" disabled>Stop Capture</button>
   <div id="status" class="disconnected">Not Connected</div>
 
-  <!-- Performance Monitor (always visible) -->
-  <div id="perfMonitor" class="section-tertiary" style="margin-top: 10px; display: none;">
-    <div class="flex-between" style="margin-bottom: 4px;">
-      <div class="label-sm">Performance Monitor</div>
-      <button id="togglePerfBtn" class="btn-sm">Hide</button>
+  <!-- Performance Monitor -->
+  <div id="perfMonitorHeader" class="section-tertiary" style="margin-top: 10px; padding: 4px 8px;">
+    <div class="flex-between">
+      <div class="label-sm">Performance</div>
+      <button id="togglePerfBtn" class="btn-sm">Perf</button>
     </div>
+  </div>
+  <div id="perfMonitor" class="section-tertiary" style="margin-top: 4px; display: none;">
     <div class="flex-row" style="font-size: 10px; gap: 8px;">
       <div id="perfFps" class="label-sm" style="min-width: 50px;">FPS: --</div>
       <div id="perfDrawTime" class="label-sm" style="min-width: 70px;">Draw: --</div>
