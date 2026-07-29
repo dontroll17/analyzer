@@ -267,6 +267,11 @@ let perfLastFrameTime = perfNow();
 let perfRunning = false;
 let perfLatencySampleCount = 0;
 let perfRafId = null; // Track rAF handle for cancellation
+
+// Heatmap render throttle — 2fps (500ms intervals) to reduce canvas thrashing
+let heatmapDirty = false; // Mark if heatmap data changed since last draw
+let heatmapRenderTimeout = null; // Separate timeout for heatmap rendering
+const HEATMAP_DRAW_INTERVAL_MS = 500;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
     perfRunning = false;
@@ -413,13 +418,6 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
           drawTimeline();
         }
         pendingTimelineDraw = false;
-      }
-      
-      // Draw heatmap if active — only when perfActive to reduce load
-      if (perfActive && heatmapActive && captureActive) {
-        const hStart = perfNow();
-        drawHeatmap();
-        perfDrawTimes.push(perfNow() - hStart);
       }
     } catch (e) {
       // One failed draw must not hang the popup
@@ -917,9 +915,17 @@ function updateHeatmapData(bass, mid, treble, isGlitch) {
   heatmapData[2][heatmapTimeIndex] = Math.min(1, t * boost);
   
   heatmapTimeIndex = (heatmapTimeIndex + 1) % HEATMAP_SLOTS;
+  heatmapDirty = true;
   
-  // Schedule draw
-  pendingTimelineDraw = true;
+  // Schedule draw at 2fps interval — don't block canvas cycle
+  if (heatmapRenderTimeout) return; // Already scheduled
+  heatmapRenderTimeout = setTimeout(() => {
+    heatmapRenderTimeout = null;
+    if (heatmapDirty) {
+      drawHeatmap();
+      heatmapDirty = false;
+    }
+  }, HEATMAP_DRAW_INTERVAL_MS);
 }
 
 /**
@@ -1156,6 +1162,13 @@ function stopAudioProcessing() {
     new Float32Array(HEATMAP_SLOTS),
   ];
   heatmapTimeIndex = 0;
+  heatmapDirty = false;
+  
+  // Clear pending heatmap render
+  if (heatmapRenderTimeout) {
+    clearTimeout(heatmapRenderTimeout);
+    heatmapRenderTimeout = null;
+  }
   
   // Clear pending draw references
   pendingOscDraw = null;
