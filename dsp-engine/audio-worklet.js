@@ -185,6 +185,13 @@ class AudioAnalyzer extends AudioWorkletProcessor {
           this.glitchConfig.highFreqThreshold = event.data.highFreqThreshold;
         }
       }
+      // Request DSP processing time
+      if (event.data && event.data.type === 'REQUEST_DSP_TIME') {
+        this.port.postMessage({
+          type: 'DSP_TIME_REPORT',
+          dspTime: this.lastDspTimeMs || 0
+        });
+      }
     };
   }
 
@@ -442,6 +449,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     const output = outputs[0];
+    const processStartTime = performance.now();
     
     // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
@@ -485,6 +493,15 @@ class AudioAnalyzer extends AudioWorkletProcessor {
         this.leftFrameData = null;
         this.rightFrameData = null;
       }
+    }
+    
+    // Measure DSP processing time
+    const processElapsed = performance.now() - processStartTime;
+    // Smooth with exponential moving average (alpha=0.1)
+    if (!this.lastDspTimeMs) {
+      this.lastDspTimeMs = processElapsed;
+    } else {
+      this.lastDspTimeMs += (processElapsed - this.lastDspTimeMs) * 0.1;
     }
     
     return true;

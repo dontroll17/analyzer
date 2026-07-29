@@ -15,21 +15,27 @@ let isConnected = false;
 // ============================================
 const THEME_COLORS = {
   dark: {
-    glitch: { GLITCH: '#f44336', DRIFT: '#FF9800', STABLE: '#4CAF50' },
-    rms: { SILENCE: '#ff6b6b', LOW: '#ffa94d', MEDIUM: '#95df6c', HIGH: '#3ac7a3', CRITICAL: '#d9363e', default: '#333' },
-    canvas: { bg: '#1a1a1a', grid: '#333333', oscLeft: '#2196F3', oscRight: '#f44336', timelineRef: '#333' },
-    channel: { stereo: '#4CAF50', mono: '#888' }
+    glitch: { GLITCH: '#FF007F', DRIFT: '#9D00FF', STABLE: '#00E5FF' },
+    rms: { SILENCE: '#FF007F', LOW: '#9D00FF', MEDIUM: '#00E5FF', HIGH: '#00B8D4', CRITICAL: '#FF4DA6', default: '#2C353F' },
+    canvas: { bg: '#0B0C10', grid: 'rgba(69, 162, 158, 0.15)', oscLeft: '#00E5FF', oscRight: '#FF007F', timelineRef: 'rgba(69, 162, 158, 0.15)' },
+    channel: { stereo: '#00E5FF', mono: '#8899AA' }
   },
   light: {
     glitch: { GLITCH: '#E53935', DRIFT: '#FB8C00', STABLE: '#43A047' },
     rms: { SILENCE: '#ef5350', LOW: '#FFA726', MEDIUM: '#66BB6A', HIGH: '#26A69A', CRITICAL: '#D32F2F', default: '#bdbdbd' },
     canvas: { bg: '#fafafa', grid: '#e0e0e0', oscLeft: '#1E88E5', oscRight: '#E53935', timelineRef: '#e0e0e0' },
     channel: { stereo: '#43A047', mono: '#666' }
+  },
+  neon: {
+    glitch: { GLITCH: '#FF007F', DRIFT: '#9D00FF', STABLE: '#00E5FF' },
+    rms: { SILENCE: '#FF007F', LOW: '#9D00FF', MEDIUM: '#00E5FF', HIGH: '#00B8D4', CRITICAL: '#FF4DA6', default: '#2C353F' },
+    canvas: { bg: '#0B0C10', grid: 'rgba(69, 162, 158, 0.15)', oscLeft: '#00E5FF', oscRight: '#FF007F', timelineRef: 'rgba(69, 162, 158, 0.15)' },
+    channel: { stereo: '#00E5FF', mono: '#8899AA' }
   }
 };
 
 function getTheme() {
-  return document.documentElement.getAttribute('data-theme') || 'dark';
+  return document.documentElement.getAttribute('data-theme') || 'neon';
 }
 
 function tc(key) {
@@ -67,6 +73,12 @@ const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
 const timelineSection = document.getElementById('timelineSection');
 const heatmapSection = document.getElementById('heatmapSection');
 const channelIndicator = document.getElementById('channelIndicator');
+
+// Audio Drop Counter
+let dropCount = 0;
+let lastDropTime = 0;
+let dropCountEl = document.getElementById('dropCount');
+let audioDropsContainer = document.getElementById('audioDropsContainer');
 
 // Capture source select
 const captureSourceSelect = document.getElementById('captureSourceSelect');
@@ -138,12 +150,22 @@ let perfLastTime = 0;
 let perfDrawTimes = [];
 let PERF_MAX_DRAWS = 30;
 
+// Debug metrics state
+let lastLatency = 0;
+let lastDspTime = 0;
+let debugMetricsHandler = null;
+
 const perfMonitorHeader = document.getElementById('perfMonitorHeader');
 const perfMonitor = document.getElementById('perfMonitor');
 const perfFps = document.getElementById('perfFps');
 const perfDrawTime = document.getElementById('perfDrawTime');
 const perfQueue = document.getElementById('perfQueue');
 const togglePerfBtn = document.getElementById('togglePerfBtn');
+// Additional debug metrics
+const perfLatency = document.getElementById('perfLatency');
+const perfDsp = document.getElementById('perfDsp');
+const perfDrops = document.getElementById('perfDrops');
+const perfConnection = document.getElementById('perfConnection');
 
 // Perf monitor visibility state (separate from perfActive which tracks measurement)
 let perfVisible = false;
@@ -207,11 +229,36 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
     perfQueue.className = `label-sm ${colorClass}`;
     perfQueue.textContent = `Queue: ${queueLen}`;
   }
+  // Latency
+  if (perfLatency) {
+    const colorClass = lastLatency < 10 ? 'perf-good' : lastLatency < 30 ? 'perf-warn' : 'perf-bad';
+    perfLatency.className = `label-sm ${colorClass}`;
+    perfLatency.textContent = `Latency: ${lastLatency.toFixed(1)}ms`;
+  }
+  // DSP time
+  if (perfDsp) {
+    const colorClass = lastDspTime < 2 ? 'perf-good' : lastDspTime < 5 ? 'perf-warn' : 'perf-bad';
+    perfDsp.className = `label-sm ${colorClass}`;
+    perfDsp.textContent = `DSP: ${lastDspTime.toFixed(1)}ms`;
+  }
+  // Drops
+  if (perfDrops) {
+    const colorClass = dropCount === 0 ? 'perf-good' : dropCount <= 5 ? 'perf-warn' : 'perf-bad';
+    perfDrops.className = `label-sm ${colorClass}`;
+    perfDrops.textContent = `Drops: ${dropCount}`;
+  }
+  // Connection status
+  if (perfConnection) {
+    const colorClass = isConnected ? 'perf-good' : 'perf-bad';
+    perfConnection.className = `label-sm ${colorClass}`;
+    perfConnection.textContent = isConnected ? 'Conn: OK' : 'Conn: FAIL';
+  }
 }
 
 // Performance frame loop
 let perfLastFrameTime = performance.now();
 let perfRunning = false;
+let perfLatencySampleCount = 0;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
     perfRunning = false;
@@ -232,6 +279,26 @@ function perfFrameLoop(timestamp) {
 
     updatePerfDisplay(fps, avgDrawMs, 0);
     perfDrawTimes = [];
+  }
+  
+  // Sample latency every ~2 seconds (120 frames at 60fps)
+  perfLatencySampleCount++;
+  if (perfLatencySampleCount >= 120 && popupAudioContext) {
+    perfLatencySampleCount = 0;
+    const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
+    lastLatency = latency;
+    
+    // Also request DSP time from worklet if available
+    if (popupWorkletNode) {
+      popupWorkletNode.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+    }
+    
+    // Update perf display with latency
+    if (perfFps) {
+      const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+      const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+      updatePerfDisplay(fps, drawMs, 0);
+    }
   }
 
   requestAnimationFrame(perfFrameLoop);
@@ -271,8 +338,8 @@ if (togglePerfBtn) {
 // Capture source select handler
 if (captureSourceSelect) {
   captureSourceSelect.addEventListener('change', async (e) => {
-    const source = e.target.value;
-    await saveSetting('captureSource', source);
+    const captureSource = e.target.value;
+    await saveSetting('captureSource', captureSource);
   });
 }
 
@@ -865,10 +932,10 @@ function drawHeatmap() {
       const value = heatmapData[band][slot];
       
       if (value > 0.01) {
-        // Color interpolation: blue (low) → yellow (mid) → red (high)
-        const r = Math.min(255, Math.floor(value * 2 * 255));
-        const g = Math.min(255, Math.floor(Math.max(0, 1 - Math.abs(value - 0.5) * 2) * 255));
-        const b = Math.min(255, Math.floor(Math.max(0, 1 - value) * 2 * 255));
+        // Color interpolation: cyan (low) → purple (mid) → magenta (high)
+        const r = Math.min(255, Math.floor(Math.max(0, 1 - value) * 2 * 255));
+        const g = Math.min(255, Math.floor(Math.max(0, 1 - Math.abs(value - 0.5) * 2) * 100));
+        const b = Math.min(255, Math.floor(value * 2 * 255));
         
         heatmapCtx.fillStyle = `rgb(${r},${g},${b})`;
         heatmapCtx.fillRect(x, y, cellWidth + 0.5, cellHeight + 0.5);
@@ -1003,8 +1070,20 @@ async function initAudioProcessing(stream) {
     // Named handler for proper cleanup — previous handlers lost on reassignment
     const workletMetricsHandler = (event) => {
       const data = event.data;
-      if (data && data.type === 'METRICS') {
+      if (!data) return;
+      
+      if (data.type === 'METRICS') {
         applyMetrics(data);
+      }
+      // Handle DSP time reports
+      if (data.type === 'DSP_TIME_REPORT') {
+        lastDspTime = data.dspTime || 0;
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
       }
     };
     popupWorkletNode.port.onmessage = workletMetricsHandler;
@@ -1076,6 +1155,13 @@ function stopAudioProcessing() {
   isConnected = false;
   captureActive = false;
   updateUI(false);
+  
+  // Reset drop counter
+  dropCount = 0;
+  if (audioDropsContainer) {
+    audioDropsContainer.style.display = 'none';
+    audioDropsContainer.classList.remove('warning', 'critical');
+  }
   
   // Reset flag after a short delay to prevent race condition
   setTimeout(() => { gracefulStop = false; }, 200);
@@ -1236,6 +1322,11 @@ function ensureBackgroundPort() {
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) return;
         applyMetrics(data);
+        
+        // Update audio drop count from metrics
+        if (data.audioDrops !== undefined) {
+          updateDropCounter(data.audioDrops);
+        }
       }
       if (data.type === '_OFFSCREEN_ENDED') {
         gracefulStop = true; // Mark as graceful to prevent disconnect warning
@@ -1247,6 +1338,30 @@ function ensureBackgroundPort() {
           startBtn.disabled = false;
         }
         setTimeout(() => { gracefulStop = false; }, 100);
+      }
+      // Handle audio drop events
+      if (data.type === '_AUDIO_DROP') {
+        dropCount = data.count;
+        updateDropCounter(dropCount);
+      }
+      if (data.type === '_AUDIO_DROP_RESET') {
+        dropCount = 0;
+        updateDropCounter(0);
+      }
+      // Handle debug metrics (latency, DSP time)
+      if (data.type === '_DEBUG_METRICS') {
+        if (data.latency !== undefined) {
+          lastLatency = data.latency;
+        }
+        if (data.dspTime !== undefined) {
+          lastDspTime = data.dspTime;
+        }
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
       }
       // Handle offscreen capture errors (user cancelled, permission denied, etc.)
       if (data.type === '_OFFSCREEN_ERROR') {
@@ -1295,8 +1410,8 @@ startBtn.addEventListener('click', () => {
 
   connectToBackground();
 
-  const source = captureSourceSelect?.value || 'tab';
-  safeSendMessage({ type: 'START_CAPTURE', captureSource: source }, response => {
+  const captureSource = captureSourceSelect?.value || 'tab';
+  safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
     if (response?.ok) {
       updateUI(true);
     } else {
@@ -1403,12 +1518,17 @@ if (exportBtn) {
 // ============================================
 
 const THEME_KEY = 'theme';
-const THEME_DEFAULT = 'dark';
+const THEME_CYCLE = ['neon', 'light', 'default'];
+const THEME_ICONS = {
+  neon: '\uD83D\uDD06', // sparkles
+  light: '\u263E', // light mode
+  default: '\u263C' // dark mode (sun with rays)
+};
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   if (themeToggle) {
-    themeToggle.textContent = theme === 'dark' ? '\u263C' : '\u263E';
+    themeToggle.textContent = THEME_ICONS[theme] || THEME_ICONS.default;
   }
 }
 
@@ -1459,7 +1579,9 @@ if (themeToggle) {
   themeToggle.addEventListener('click', (e) => {
     e.stopPropagation();
     const current = getTheme();
-    const next = current === 'dark' ? 'light' : 'dark';
+    const currentIndex = THEME_CYCLE.indexOf(current);
+    const nextIndex = (currentIndex + 1) % THEME_CYCLE.length;
+    const next = THEME_CYCLE[nextIndex];
     applyTheme(next);
     chrome.storage.local.set({ [THEME_KEY]: next });
   });
@@ -1518,6 +1640,30 @@ function saveOscOptions() {
     [OSC_SPLIT_KEY]: oscSplit,
     [OSC_REF_KEY]: !!referenceBufferLeft
   });
+}
+
+function updateDropCounter(count) {
+  dropCount = count;
+  
+  if (!audioDropsContainer) return;
+  
+  // Show container when capture is active
+  if (captureActive) {
+    audioDropsContainer.style.display = 'block';
+  }
+  
+  if (dropCountEl) {
+    dropCountEl.textContent = count;
+  }
+  
+  // Update styling based on count
+  audioDropsContainer.classList.remove('warning', 'critical');
+  
+  if (count > 10) {
+    audioDropsContainer.classList.add('critical');
+  } else if (count > 5) {
+    audioDropsContainer.classList.add('warning');
+  }
 }
 
 function updateOscButtonStates() {

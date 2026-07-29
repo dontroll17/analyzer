@@ -5,6 +5,12 @@ let cleanupScheduled = false;
 let lastMetrics = null;
 let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
 
+// Audio Drop Counter
+let audioDropCount = 0;
+let lastContextState = 'running';
+let lastStateChangeTime = 0;
+const DROP_DEBOUNCE_MS = 500; // Minimum time between drops
+
 // Suppress runtime.lastError spam when background is unavailable
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
@@ -152,9 +158,44 @@ async function startCapture(source) {
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
         lastMetrics = event.data;
+        lastMetrics.audioDrops = audioDropCount;
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
       }
     };
+    
+    // Monitor AudioContext state for drops
+    audioContext.addEventListener('statechange', () => {
+      const newState = audioContext.state;
+      const now = Date.now();
+      
+      // Detect interrupted/suspended states (audio drops)
+      if (lastContextState === 'running' && (newState === 'interrupted' || newState === 'suspended')) {
+        if (now - lastStateChangeTime >= DROP_DEBOUNCE_MS) {
+          audioDropCount++;
+          lastStateChangeTime = now;
+          
+          // Send drop notification
+          safeSendMessage({
+            type: '_AUDIO_DROP',
+            count: audioDropCount,
+            timestamp: now
+          });
+        }
+      }
+      
+      // Reset counter on return to running
+      if (lastContextState !== 'running' && newState === 'running') {
+        // Reset drop count on reconnect
+        audioDropCount = 0;
+        safeSendMessage({
+          type: '_AUDIO_DROP_RESET',
+          count: 0,
+          timestamp: now
+        });
+      }
+      
+      lastContextState = newState;
+    });
     
     mediaStream.getTracks().forEach(track => {
       track.addEventListener('ended', () => {
@@ -199,6 +240,11 @@ function scheduleCleanup() {
 
 function cleanup() {
   cleanupScheduled = false;
+  
+  // Reset audio drop counter
+  audioDropCount = 0;
+  lastContextState = 'running';
+  lastStateChangeTime = 0;
   
   if (mediaStream) {
     mediaStream.getTracks().forEach(t => t.stop());

@@ -3,7 +3,7 @@
 
 const DEFAULTS = Object.freeze({
   // Theme
-  theme: 'dark',
+  theme: 'neon',
   
   // Glitch sensitivity (60-90%)
   glitchSensitivity: 85,

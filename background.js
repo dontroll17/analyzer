@@ -259,6 +259,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // === Forward audio drop events to popup ===
+  if (message.type === '_AUDIO_DROP') {
+    if (popupPort) {
+      try {
+        popupPort.postMessage(message);
+      } catch (e) {
+        // popup disconnected
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  if (message.type === '_AUDIO_DROP_RESET') {
+    if (popupPort) {
+      try {
+        popupPort.postMessage(message);
+      } catch (e) {
+        // popup disconnected
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   if (message.type === '_OFFSCREEN_ENDED') {
     isCapturing = false;
     if (popupPort) {
