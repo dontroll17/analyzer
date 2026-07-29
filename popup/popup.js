@@ -260,9 +260,11 @@ const perfNow = () => (typeof performance !== 'undefined' && performance.now) ? 
 let perfLastFrameTime = perfNow();
 let perfRunning = false;
 let perfLatencySampleCount = 0;
+let perfRafId = null; // Track rAF handle for cancellation
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
     perfRunning = false;
+    perfRafId = null; // Clear the handle
     return;
   }
   if (!perfRunning) perfRunning = true;
@@ -302,7 +304,23 @@ function perfFrameLoop(timestamp) {
     }
   }
 
-  requestAnimationFrame(perfFrameLoop);
+  if (perfActive) {
+    perfRafId = requestAnimationFrame(perfFrameLoop);
+  } else {
+    perfRafId = null;
+  }
+}
+
+// Stop perf monitor loop
+function stopPerfMonitor() {
+  perfActive = false;
+  perfVisible = false;
+  if (perfMonitor) perfMonitor.style.display = 'none';
+  if (togglePerfBtn) togglePerfBtn.textContent = 'Perf';
+  if (perfRafId) {
+    cancelAnimationFrame(perfRafId);
+    perfRafId = null;
+  }
 }
 
 // Performance-aware draw wrapper
@@ -1315,6 +1333,10 @@ function ensureBackgroundPort() {
     isConnected = true;
     gracefulStop = false;
     
+    // Throttle metrics processing to 30fps (prevents DOM/canvas thrashing at 60fps)
+    const METRICS_THROTTLE_MS = 33; // ~30fps
+    let lastMetricsApplyTime = 0;
+    
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
       if (!data) return;
@@ -1322,6 +1344,12 @@ function ensureBackgroundPort() {
       if (data.type === 'METRICS') {
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) return;
+        
+        // Throttle: skip if called faster than 30fps
+        const now = Date.now();
+        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) return;
+        lastMetricsApplyTime = now;
+        
         applyMetrics(data);
         
         // Update audio drop count from metrics
