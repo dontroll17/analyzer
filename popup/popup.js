@@ -256,7 +256,8 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
 }
 
 // Performance frame loop
-let perfLastFrameTime = performance.now();
+const perfNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let perfLastFrameTime = perfNow();
 let perfRunning = false;
 let perfLatencySampleCount = 0;
 function perfFrameLoop(timestamp) {
@@ -306,9 +307,9 @@ function perfFrameLoop(timestamp) {
 
 // Performance-aware draw wrapper
 function perfAwareDraw(leftSamples, rightSamples) {
-  const start = performance.now();
-  drawOscilloscope(leftSamples, rightSamples);
-  const elapsed = performance.now() - start;
+  const start = perfNow();
+  drawOscilloscope(ctx, bufferL, bufferR);
+  const elapsed = perfNow() - start;
 
   perfDrawTimes.push(elapsed);
   if (perfDrawTimes.length > PERF_MAX_DRAWS) {
@@ -359,7 +360,7 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
     
     if (pendingOscDraw) {
       // Throttle to ~30fps
-      const now = performance.now();
+      const now = perfNow();
       if (now - lastOscDrawTime < OSC_DRAW_INTERVAL && lastOscDrawTime > 0) {
         // Skip draw but update buffer for next frame
         // Buffer is already Float32Array — no copy overhead
@@ -377,9 +378,9 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
     
     if (pendingTimelineDraw) {
       if (perfActive) {
-        const tStart = performance.now();
+        const tStart = perfNow();
         drawTimeline();
-        perfDrawTimes.push(performance.now() - tStart);
+        perfDrawTimes.push(perfNow() - tStart);
       } else {
         drawTimeline();
       }
@@ -389,9 +390,9 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
     // Draw heatmap if active
     if (heatmapActive && captureActive) {
       if (perfActive) {
-        const hStart = performance.now();
+        const hStart = perfNow();
         drawHeatmap();
-        perfDrawTimes.push(performance.now() - hStart);
+        perfDrawTimes.push(perfNow() - hStart);
       } else {
         drawHeatmap();
       }

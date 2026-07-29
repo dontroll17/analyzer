@@ -449,7 +449,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     const output = outputs[0];
-    const processStartTime = performance.now();
+    const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
     
     // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
@@ -496,7 +496,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     }
     
     // Measure DSP processing time
-    const processElapsed = performance.now() - processStartTime;
+    const nowTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
+    const processElapsed = nowTime - processStartTime;
     // Smooth with exponential moving average (alpha=0.1)
     if (!this.lastDspTimeMs) {
       this.lastDspTimeMs = processElapsed;
