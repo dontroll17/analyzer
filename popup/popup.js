@@ -1,4 +1,11 @@
 import { RMS } from '../dsp-engine/rms.js';
+import { midiExporter } from '../dsp-engine/midi-export.js';
+
+// ============================================
+// MIDI Export state
+// ============================================
+let midiAvailable = false;
+let midiConnected = false;
 
 // ============================================
 // Background port & capture state
@@ -821,6 +828,11 @@ function applyMetrics(data) {
   // Glitch detection display
   updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
 
+  // MIDI export: send metrics to MIDI device
+  if (midiAvailable && midiConnected) {
+    midiExporter.sendMetrics(data);
+  }
+
   // Timeline recording (throttle ~5 Hz)
   if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
   if (data.timestamp - lastTimelineRecord > 200) {
@@ -952,7 +964,6 @@ function addGlitchLogEntry(glitchCount) {
   if (glitchLog.length > GLITCH_LOG_MAX) {
     glitchLog.shift();
   }
-  // Entry logged silently
 }
 
 function exportGlitchLog() {
@@ -1528,5 +1539,47 @@ window.addEventListener('beforeunload', async () => {
   }
 });
 
-// Initialize background port ONCE at page load — prevents memory leaks from multiple connections
-ensureBackgroundPort(    
+// ============================================
+// MIDI Export Initialization
+// ============================================
+
+// Listen for MIDI status changes
+window.addEventListener('midiStatusChange', (e) => {
+  midiAvailable = e.detail.available;
+  midiConnected = e.detail.connected;
+  
+  // Update UI if MIDI status element exists
+  const midiStatus = document.getElementById('midiStatus');
+  const midiBtn = document.getElementById('midiConnectBtn');
+  
+  if (midiStatus) {
+    if (!midiAvailable) {
+      midiStatus.textContent = 'MIDI: N/A';
+      midiStatus.style.color = 'var(--text-tertiary)';
+    } else if (midiConnected) {
+      midiStatus.textContent = 'MIDI: ' + (e.detail.outputName || 'Connected');
+      midiStatus.style.color = 'var(--accent-green)';
+    } else {
+      midiStatus.textContent = 'MIDI: No device';
+      midiStatus.style.color = 'var(--text-secondary)';
+    }
+  }
+  
+  if (midiBtn) {
+    midiBtn.style.borderColor = midiConnected ? 'var(--accent-green)' : '';
+    midiBtn.style.background = midiConnected ? 'var(--accent-green-dark)' : '';
+  }
+});
+
+// Initialize MIDI on startup
+(async () => {
+  if (midiExporter.isAvailable()) {
+    const connected = await midiExporter.requestAccess();
+    midiConnected = midiConnected || connected;
+  }
+})();
+
+// Cleanup MIDI on unload
+window.addEventListener('beforeunload', () => {
+  midiExporter.close();
+});

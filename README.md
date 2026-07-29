@@ -271,6 +271,21 @@
 
 ## Changelog
 
+### v1.1.1 (2026-07-29) — Web MIDI Export
+
+**Новые фичи:**
+- ✅ Web MIDI API экспорт в реальном времени
+- ✅ Маппинг метрик на MIDI Control Change (CC):
+  - RMS Energy → CC1 (Modulation Wheel)
+  - Bass → CC7 (Balance)
+  - Mid → CC10 (Pan)
+  - Treble → CC11 (Expression)
+  - Entropy → CC12 (Input Gain)
+  - Flatness → CC91 (Reverb Depth)
+  - Glitch State → CC123 (All Notes Off: STABLE/DRIFT/GLITCH)
+  - Glitch Count → CC19 (Capture Hold)
+- ✅ UI: статус MIDI в popup, авто-подключение устройств
+
 ### v1.1.0 (2026-07-29) — Настоящий FFT
 
 **Radix-2 Cooley-Tukey FFT (1024 точки):**
@@ -338,11 +353,13 @@
 - [x] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale, Clear)
 - [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
 
-### Sprint 2 (Будущее)
+### Sprint 2
 - [x] Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins)
+- [x] Jest unit tests for RMS module (33/33 passed)
+- [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
+- [x] Split-screen oscilloscope (live vs reference comparison)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
-- [ ] Сравнение захватов (Split screen oscilloscope)
-- [ ] Web MIDI / API экспорт
+- [ ] Web MIDI export
 
 ---
 
@@ -355,4 +372,4 @@
 
 ---
 
-**Версия:** 1.1.0  |  **Дата:** 2026-07-29  |  **Статус:** Radix-2 FFT (Sprint 2)
+**Версия:** 1.1.1  |  **Дата:** 2026-07-29  |  **Статус:** Web MIDI Export + Radix-2 FFT
