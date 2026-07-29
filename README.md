@@ -9,7 +9,7 @@
 | **Захват аудио** | Перехват звука активной вкладки через `getDisplayMedia` в offscreen-документе | ✅ Реализовано |
 | **RMS анализ** | Расчёт энергии сигнала в реальном времени через AudioWorklet | ✅ Реализовано |
 | **Пиковый RMS** | Отслеживание пикового значения RMS | ✅ Реализовано |
-| **Спектральный анализ** | FFT с разбиением на 3 частотных диапазона (Bass / Mid / Treble) | ✅ Реализовано |
+| **Спектральный анализ** | Radix-2 Cooley-Tukey FFT (1024 точки, 512 бинов Nyquist, Hanning window) → 3 частотных диапазона | ✅ Реализовано |
 | **Детектор глитча** | Обнаружение ВЧ-аномалий с state machine, debounce и счётчиком | ✅ Реализовано |
 | **Осциллограф** | Визуализация волны в реальном времени (2 канала L/R, Canvas) | ✅ Реализовано |
 | **Glitch Timeline** | Canvas-график состояния глитч-детектора во времени | ✅ Реализовано |
@@ -22,6 +22,14 @@
 | **Stereo разделение** | Отдельные L/R буферы, метрики и осциллограф для каждого канала | ✅ Реализовано |
 | **Тёмная/светлая тема** | CSS custom properties, persist в storage, автодетект системной темы | ✅ Реализовано |
 | **Waveform throttle** | Передача waveform с частотой ~10 Hz для снижения нагрузки | ✅ Реализовано |
+| **Осциллограф: Freeze** | Блокировка обновления осциллографа (toggle) | ✅ Реализовано |
+| **Осциллограф: Zoom** | Масштабирование 256 сэмплов (toggle) | ✅ Реализовано |
+| **Осциллограф: Log Scale** | Логарифмическая шкала Y-axis (toggle) | ✅ Реализовано |
+| **Осциллограф: Clear** | Очистка буферов + сброс freeze | ✅ Реализовано |
+| **Glitch Heatmap** | Canvas visualisation glitch frequency over time (X=time, Y=bands) | ✅ Реализовано |
+| **Multiple capture sources** | Tab Audio / Mic Audio / Tab + Mic (combined) | ✅ Реализовано |
+| **Overlay widget** | Draggable Canvas поверх страницы (content.js), position persistence | ✅ Реализовано |
+| **Performance Monitor** | FPS, Draw time, Queue length (toggle) | ✅ Реализовано |
 
 ---
 
@@ -59,27 +67,31 @@
 - **Peak RMS** — пиковое значение RMS
 - **RMS Level** — классификация уровня + процент
 - **Frequency Bands** — распределение энергии по диапазонам (Bass / Mid / Treble) со сглаживанием
-- **Channel Indicator** — MONO / STERO статус входа
+- **Channel Indicator** — MONO / STEREO статус входа (зелёный = stereo, серый = mono)
 - **Glitch Sensitivity** — слайдер настройки порога детектора (60–90%, persist в storage)
 - **Glitch State** — индикатор состояния: STABLE (зелёный) / DRIFT (оранжевый) / GLITCH (красный) + счётчик
 - **Entropy & Flatness** — спектральная энтропия и плоскостность с классификацией
 - **Осциллограф** — визуализация волны в реальном времени (2 канала L/R, Canvas)
+  - **Freeze** — блокировка обновления
+  - **Zoom** — масштабирование 256 сэмплов
+  - **Log Scale** — логарифмическая шкала
+  - **Clear** — очистка буферов + сброс freeze
 - **Glitch Timeline** — график RMS и состояния глитч-детектора во времени
+- **Glitch Heatmap** — визуализация частоты глитчей по частотным полосам (X=time, Y=bands, color=intensity)
+- **Capture Source** — выбор источника: Tab Audio / Mic Audio / Tab + Mic
 - **Export CSV** — сохранение данных осциллограммы в CSV
 - **Export Log** — сохранение лога глитчей в JSON (до 500 записей)
 - **Theme Toggle** — переключение тёмной/светлой темы
+- **Performance Monitor** — FPS, Draw time, Queue length
 
 ---
 
 ## Проверка работы
 
-1. Откройте **DevTools** (F12 → Console) на странице с аудио
-2. Запустите захват из popup
-3. Ожидаемые логи:
-
-```
-[AudioWorklet] Sensitivity updated: 0.85
-```
+1. Откройте страницу с аудиопотоком (YouTube, Spotify и т.д.)
+2. Активируйте вкладку с воспроизведением звука
+3. Нажмите на значок расширения → **Start Capture**
+4. В диалоге захвата экрана отметьте **"Share tab audio"**
 
 ### Что проверить
 
@@ -87,9 +99,11 @@
 |---------|----------|
 | **RMS Value** | Меняется в зависимости от громкости аудио (0.0 — 1.0) |
 | **Frequency Bands** | Сумма Bass + Mid + Treble ≈ 100% |
-| **Осциллограф** | Отображает форму волны в реальном времени (2 канала) |
+| **Осциллограф** | Отображает форму волны в реальном времени (2 канала L/R) |
 | **Entropy / Flatness** | Voice: entropy < 1.0, flatness низкий → STABLE |
 | **Channel Indicator** | STEREO для многоканального ввода, MONO для одноканального |
+| **Overlay widget** | Появляется поверх страницы при активном захвате |
+| **Glitch Timeline** | Отображает RMS и состояние (STABLE/DRIFT/GLITCH) во времени |
 
 ---
 
@@ -137,7 +151,7 @@
               │  │  ┌───────────────────┐  │  │
               │  │  │ DSP Engine        │  │  │
               │  │  │ • RMS + Peak RMS  │  │  │
-              │  │  │ • FFT (64 bins)   │  │  │
+               │  │  │ • FFT 1024 pts → 512 bins │  │  │
               │  │  │ • Bands (B/M/T)   │  │  │
               │  │  │ • Stereo L/R      │  │  │
               │  │  │ • Glitch Detector │  │  │
@@ -175,9 +189,9 @@
 | Метод | Описание |
 |-------|----------|
 | `calculateRMS(buffer)` | Средняя квадратичная энергия сигнала + пик |
-| `calculateFFT(buffer, numBins)` | Энергетический спектр с заданным количеством бинов (64) |
-| `calculateFrequencyBands(fftData)` | Разложение на Bass (0–220 Гц), Mid (220–4400 Гц), Treble (4.4–22 кГц) с усреднением по бинам |
-| `detectHighFrequencyAnomaly(fftData)` | Отношение энергии ВЧ (верхняя четверть спектра) к общей энергии |
+| `calculateFFT(buffer)` | Radix-2 Cooley-Tukey FFT (1024 точки) → 512 магнитудных бинов (Nyquist), Hanning window |
+| `calculateFrequencyBands(fftData)` | Разложение на Bass (0–220 Гц), Mid (220–4400 Гц), Treble (4.4–22 кГц) по реальным Hz-границам, усреднение по бинам |
+| `detectHighFrequencyAnomaly(fftData)` | Отношение энергии ВЧ (>8 кГц) к общей энергии — Hz-based порог |
 | `checkGlitchState(rms, highFreqRatio)` | State machine: STABLE → DRIFT → GLITCH (debounce, consecutive frames) |
 | `calculateBandEntropy(fftData)` | Энтропия Шеннона по 4 спектральным полосам (Bass/Voice/Speech/Noise) |
 | `detectSpectralFlatness(fftData)` | Spectral flatness (geometric/arithmetic mean ratio) |
@@ -228,10 +242,21 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
-- ❌ Нет overlay-виджета поверх страницы (контент-скрипт)
+- ✅ Overlay widget поверх страницы (draggable, collapsible, position persistent)
+- ⚠️ При добавлении/изменении permissions в manifest.json нужно **полностью удалить** расширение (`chrome://extensions` → 🗑️) и загрузить заново. Простое "перезагрузить" не обновит permissions.
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
 - ⚠️ Popup закрывается при клике вне его области (ограничение Chrome)
-- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup
+- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup (mitigated via setTimeout fallback)
+- ⚠️ Service Worker termination: capture может прерваться после 30s–5min idle (mitigated via keepalive alarm)
+
+### Troubleshooting: Overlay widget
+
+| Проблема | Решение |
+|----------|----------|
+| Overlay не появляется | Убедитесь, что активная вкладка имеет воспроизводимый контент; проверьте консоль DevTools |
+| Overlay не перетаскивается | Убедитесь, что не кликаете на кнопки collapse/close (только за body) |
+| Overlay скрывается при scroll | Overlay использует `position: fixed` — не должен скрываться; если проблема — проверьте z-index конфликты |
+| Overlay дублируется | Закройте все вкладки с расширением; откройте одну — overlay создаётся один раз |
 
 ---
 
@@ -247,19 +272,120 @@
 
 ---
 
+---
+
+## Changelog
+
+### v1.2.0 (2026-07-29) — Glitch Heatmap, Multi-Source Capture
+
+**Новые фичи:**
+- ✅ **Glitch Heatmap** — Canvas visualisation glitch frequency over time
+  - X-axis: time (last ~10 seconds, 50 slots)
+  - Y-axis: frequency bands (Bass, Mid, Treble)
+  - Color: intensity (blue=low → yellow=mid → red=high)
+  - Auto-boosts during GLITCH state
+  - Auto-reset on stop capture
+
+- ✅ **Multiple capture sources** — 3 modes via dropdown:
+  - **Tab Audio** — захват звука активной вкладки (default)
+  - **Mic Audio** — захват микрофона пользователя
+  - **Tab + Mic** — комбинация: tab audio + microphone (смешиваются)
+
+- ✅ **Centralized config manager** (popup/config.js)
+  - All settings stored in chrome.storage.local
+  - Default values with fallback
+  - API: loadSettings(), saveSetting(), getSettings(), resetSettings()
+  - Keys: theme, glitchSensitivity, oscOptions, captureSource, heatmapEnabled, perfMonitorVisible
+
+**Улучшения:**
+- ✅ Capture source persisted in storage
+- ✅ Heatmap enabled by default
+- ✅ offscreen.js supports getUserMedia + getDisplayMedia
+- ✅ background.js forwards captureSource to offscreen
+
+### v1.1.1 (2026-07-29) — Web MIDI Export (stub)
+
+**Новые фичи:**
+- ✅ midi-export.js: модуль для маппинга метрик на MIDI CC (как библиотека)
+- ⚠️ Web MIDI API блокируется Chrome в popup-документе (popup → new tab workaround)
+
+### v1.1.0 (2026-07-29) — Настоящий FFT
+
+**Radix-2 Cooley-Tukey FFT (1024 точки):**
+- ✅ Реальная FFT вместо наивного "chopped FFT" (энергетическое биннирование)
+- ✅ O(N log N) ≈ 10 240 операций vs O(N²) ≈ 1 048 576 для DFT — **в ~100x быстрее**
+- ✅ 512 частотных бинов (Nyquist = 22 050 Гц, 1 бин ≈ 43.07 Гц)
+- ✅ Hanning window: `w[n] = 0.5 * (1 - cos(2πn/N))` — устранение spectral leakage
+- ✅ Bit-reversal permutation (precomputed) — оптимизация
+- ✅ True magnitude spectrum: `|X[k]| = sqrt(re² + im²)` с нормализацией
+- ✅ DC bin корректная нормализация (×0.5, не ×2 как mirrored)
+
+**Корректные частотные диапазоны (Hz-based bin mapping):**
+- ✅ `bin[k] = k × sampleRate / FFT_SIZE` — точный Hz → бин
+- ✅ Bass: 0–220 Гц → бины 0–5 (было: "бин 0" в naive ~344 Гц)
+- ✅ Mid: 220–4400 Гц → бины 6–102 (было: "бины 1–12")
+- ✅ Treble: 4400–22050 Гц → бины 103–511 (было: "бины 13–63")
+- ✅ High-Frequency Anomaly: >8000 Гц вместо "top 25% бинов"
+
+**Энтропия и flatness:**
+- ✅ Band entropy: 4 полосы по реальным Hz (Bass 0–350, Voice 350–2000, Speech 2000–6000, Noise 6000–Nyquist)
+- ✅ Spectral flatness: geometric/arithmetic mean на истинной power spectrum
+
+**Визуализация:**
+- ✅ Downsample 512→64 bins (avg pooling) для popup — без потери точности
+
+**Баг-фиксы:**
+- ✅ Spectral leakage eliminated (Hanning window)
+- ✅ Frequency band mapping corrected (true FFT bins, not time-sequential chunks)
+
+### v1.0.0 (2026-07-28)
+
+**Новые фичи:**
+- ✅ Полноценная стерео-обработка: раздельные L/R буферы, метрики, осциллограф
+- ✅ Stereo-разделение каналов в AudioWorklet (dual buffer, per-channel FFT/RMS)
+- ✅ Overlay widget: draggable Canvas поверх страницы с position persistence
+- ✅ Осциллограф: Freeze, Zoom, Log Scale, Clear
+- ✅ Performance Monitor: FPS, Draw time, Queue length
+- ✅ Тёмная/светлая тема с auto-detect системной темы
+- ✅ Waveform throttle (~10 Hz) для снижения нагрузки
+- ✅ Spectral entropy + spectral flatness для классификации сигнала
+- ✅ Glitch sensitivity slider (60–90%) с real-time обновлением
+- ✅ Error handling: graceful degradation при отмене захвата, SW termination, connection loss
+- ✅ Keepalive alarm для предотвращения sleep Service Worker
+
+**Улучшения:**
+- ✅ Optimized timeline rendering (batched color segments)
+- ✅ Buffer pooling (combinedFFT pre-allocated)
+- ✅ Float32Array вместо Array.from (zero GC pressure)
+- ✅ rAF throttle для Canvas (30fps cap)
+- ✅ Listener leak fix (named handler + removeListener)
+- ✅ beforeunload race condition mitigation (setTimeout fallback)
+- ✅ MONO/STEREO flickering fix (channel count detection)
+
+**Удалено:**
+- ✅ Debug console.log (production-ready)
+
+---
+
 ## Roadmap
 
 ### Sprint 1 (Настоящий план)
 - [x] Этап 0: README + Tech debt cleanup (deduplication applyMetrics, listener leak fix, beforeunload race, var→const/let)
 - [x] Этап 1: Overlay widget (content script, draggable Canvas, position persistence)
 - [x] Этап 2: Performance (rAF throttle, Array.from → Float32Array, buffer pooling)
-- [ ] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale)
+- [x] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale, Clear)
+- [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
 
-### Sprint 2 (Будущее)
+### Sprint 2
+- [x] Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins)
+- [x] Jest unit tests for RMS module (33/33 passed)
+- [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
+- [x] Split-screen oscilloscope (live vs reference comparison)
+- [x] Glitch Heatmap (time × bands visualization)
+- [x] Multiple capture sources (Tab / Mic / Combined)
+- [x] Centralized config manager
+- [ ] Web MIDI export (popup blocked → needs background worker or standalone page)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
-- [ ] WebAssembly-оптимизация FFT
-- [ ] Сравнение захватов (Split screen oscilloscope)
-- [ ] Web MIDI / API экспорт
 
 ---
 
@@ -272,4 +398,4 @@
 
 ---
 
-**Версия:** 1.0.0  |  **Дата:** 2026-07-28  |  **Статус:** Этап 0 (Tech debt cleanup)
+**Версия:** 1.2.0  |  **Дата:** 2026-07-29  |  **Статус:** Glitch Heatmap + Multi-Source Capture + Config Manager

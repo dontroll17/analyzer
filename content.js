@@ -1,5 +1,8 @@
 // content.js — Overlay widget for Stream Sensation Analyzer
-// Injects a draggable Canvas widget on web pages when capture is active
+const log = (self.__logger?.forModule('content')) || {
+  debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn('[CONTENT]', m, ...a),
+  error: (m, ...a) => console.error('[CONTENT]', m, ...a),
+};
 
 let overlayVisible = false;
 let overlayCollapsed = false;
@@ -28,29 +31,53 @@ let currentRMS = 0;
 let currentGlitchState = 'STABLE';
 let currentGlitchCount = 0;
 
+// Waveform data (from popup metrics)
+let leftChannelHistory = new Float32Array(1024);
+let rightChannelHistory = new Float32Array(1024);
+let waveformBufferLeft = null;
+let waveformBufferRight = null;
+let pendingWaveformUpdate = false;
+let lastWaveformDraw = 0;
+const WAVEFORM_DRAW_INTERVAL = 66; // ~15fps
+
+// Glitch timeline data
+let glitchTimelineData = []; // {time, state, rms}
+let glitchTimelineMax = 200;
+
+// Heatmap data
+let heatmapData = [new Float32Array(50), new Float32Array(50), new Float32Array(50)];
+let heatmapTimeIndex = 0;
+let heatmapDirty = false;
+let lastHeatmapDraw = 0;
+
 const OVERLAY_WIDTH = 200;
 const OVERLAY_COLLAPSED_WIDTH = 60;
 const OVERLAY_HEIGHT = 50;
+const OVERLAY_CANVAS_WIDTH = 200;
+const OVERLAY_CANVAS_HEIGHT = 100;
 const STORAGE_KEY = 'overlayPosition';
 const OVERLAY_CSS = `
   #ssa-overlay {
     position: fixed;
     z-index: 999999;
-    background: rgba(15, 15, 35, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(11, 12, 16, 0.9);
+    border: 1px solid rgba(0, 229, 255, 0.25);
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.15), 0 4px 12px rgba(0, 0, 0, 0.5);
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 4px 8px;
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 10px;
-    color: #e0e0e0;
+    color: #FFFFFF;
     user-select: none;
     cursor: grab;
     min-width: 60px;
-    transition: min-width 0.2s ease;
+    transition: min-width 0.2s ease, box-shadow 0.3s ease;
+  }
+  #ssa-overlay:hover {
+    box-shadow: 0 0 18px rgba(0, 229, 255, 0.3), 0 4px 12px rgba(0, 0, 0, 0.5);
   }
   #ssa-overlay.dragging {
     cursor: grabbing;
@@ -60,11 +87,13 @@ const OVERLAY_CSS = `
     min-width: 60px;
   }
   #ssa-overlay-canvas {
-    width: 120px;
-    height: 30px;
+    width: 200px;
+    height: 100px;
     border-radius: 4px;
     margin-right: 6px;
-    background: rgba(0, 0, 0, 0.3);
+    background: rgba(0, 0, 0, 0.4);
+    filter: drop-shadow(0 0 3px rgba(0, 229, 255, 0.3));
+    flex-shrink: 0;
   }
   .ssa-status-dot {
     width: 8px;
@@ -78,17 +107,19 @@ const OVERLAY_CSS = `
     margin-right: 8px;
     white-space: nowrap;
     min-width: 55px;
+    color: #00E5FF;
   }
   .ssa-rms-value {
     font-weight: bold;
     margin-right: 8px;
     white-space: nowrap;
     font-size: 10px;
+    color: #C5C6C7;
   }
   .ssa-rms-mini-bar {
     width: 40px;
     height: 4px;
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.15);
     border-radius: 2px;
     overflow: hidden;
     margin-right: 8px;
@@ -96,9 +127,10 @@ const OVERLAY_CSS = `
   }
   .ssa-rms-mini-bar-fill {
     height: 100%;
-    background: #4CAF50;
+    background: #00E5FF;
     border-radius: 2px;
     transition: width 0.1s ease-out;
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.4);
   }
   .ssa-controls {
     display: flex;
@@ -108,10 +140,10 @@ const OVERLAY_CSS = `
   .ssa-btn {
     width: 18px;
     height: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    border: 1px solid rgba(0, 229, 255, 0.3);
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.1);
-    color: #e0e0e0;
+    background: rgba(0, 229, 255, 0.08);
+    color: #00E5FF;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -119,9 +151,11 @@ const OVERLAY_CSS = `
     font-size: 9px;
     padding: 0;
     margin: 0;
+    transition: background-color 0.2s, box-shadow 0.2s;
   }
   .ssa-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(0, 229, 255, 0.2);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
   }
 `;
 
@@ -146,10 +180,10 @@ function loadPosition() {
 // Get glitch state color
 function getGlitchColor(state) {
   switch (state) {
-    case 'GLITCH': return '#f44336';
-    case 'DRIFT': return '#FF9800';
+    case 'GLITCH': return '#FF007F';
+    case 'DRIFT': return '#9D00FF';
     case 'STABLE':
-    default: return '#4CAF50';
+    default: return '#00E5FF';
   }
 }
 
@@ -456,4 +490,4 @@ window.addEventListener('beforeunload', () => {
   if (styleEl) styleEl.remove();
 });
 
-console.log('[SSA] Content script loaded');
+

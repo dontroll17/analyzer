@@ -1,30 +1,59 @@
 import { RMS } from '../dsp-engine/rms.js';
-console.log('[Popup] popup.js loaded, RMS:', typeof RMS);
+import { loadSettings, saveSetting } from './config.js';
+
+// Logger from logger.js (loaded via regular script tag) or fallback
+const _lf = { forModule: (mod) => ({ debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn(`[${mod}] ${m}`, ...a), error: (m, ...a) => console.error(`[${mod}] ${m}`, ...a) }) };
+const log = (window.__logger) ? window.__logger.forModule('popup') : _lf.forModule('popup');
+log.info('Popup init OK, logger:', typeof log, 'window.__logger:', !!window.__logger);
+
+// ============================================
+// Background port & capture state
+// ============================================
+let bgPort = null;
+let bgMetricsHandler = null;
+let captureActive = false;
+let gracefulStop = false;
+let isConnected = false;
+
+// Storage key for persisting drop count across popup reconnects
+const DROP_COUNT_KEY = 'ssa_audio_drop_count';
 
 // ============================================
 // Theme Colors
 // ============================================
 const THEME_COLORS = {
   dark: {
-    glitch: { GLITCH: '#f44336', DRIFT: '#FF9800', STABLE: '#4CAF50' },
-    rms: { SILENCE: '#ff6b6b', LOW: '#ffa94d', MEDIUM: '#95df6c', HIGH: '#3ac7a3', CRITICAL: '#d9363e', default: '#333' },
-    canvas: { bg: '#1a1a1a', grid: '#333333', oscLeft: '#2196F3', oscRight: '#f44336', timelineRef: '#333' },
-    channel: { stereo: '#4CAF50', mono: '#888' }
+    glitch: { GLITCH: '#FF007F', DRIFT: '#9D00FF', STABLE: '#00E5FF' },
+    rms: { SILENCE: '#FF007F', LOW: '#9D00FF', MEDIUM: '#00E5FF', HIGH: '#00B8D4', CRITICAL: '#FF4DA6', default: '#2C353F' },
+    canvas: { bg: '#0B0C10', grid: 'rgba(69, 162, 158, 0.15)', oscLeft: '#00E5FF', oscRight: '#FF007F', timelineRef: 'rgba(69, 162, 158, 0.15)' },
+    channel: { stereo: '#00E5FF', mono: '#8899AA' }
   },
   light: {
     glitch: { GLITCH: '#E53935', DRIFT: '#FB8C00', STABLE: '#43A047' },
     rms: { SILENCE: '#ef5350', LOW: '#FFA726', MEDIUM: '#66BB6A', HIGH: '#26A69A', CRITICAL: '#D32F2F', default: '#bdbdbd' },
     canvas: { bg: '#fafafa', grid: '#e0e0e0', oscLeft: '#1E88E5', oscRight: '#E53935', timelineRef: '#e0e0e0' },
     channel: { stereo: '#43A047', mono: '#666' }
+  },
+  neon: {
+    glitch: { GLITCH: '#FF007F', DRIFT: '#9D00FF', STABLE: '#00E5FF' },
+    rms: { SILENCE: '#FF007F', LOW: '#9D00FF', MEDIUM: '#00E5FF', HIGH: '#00B8D4', CRITICAL: '#FF4DA6', default: '#2C353F' },
+    canvas: { bg: '#0B0C10', grid: 'rgba(69, 162, 158, 0.15)', oscLeft: '#00E5FF', oscRight: '#FF007F', timelineRef: 'rgba(69, 162, 158, 0.15)' },
+    channel: { stereo: '#00E5FF', mono: '#8899AA' }
   }
 };
 
 function getTheme() {
-  return document.documentElement.getAttribute('data-theme') || 'dark';
+  return document.documentElement.getAttribute('data-theme') || 'neon';
 }
 
 function tc(key) {
-  return THEME_COLORS[getTheme()][key];
+  const theme = getTheme();
+  const colors = THEME_COLORS[theme];
+  if (!colors) {
+    log.warn('Unknown theme:', theme, 'falling back to neon');
+    return THEME_COLORS.neon[key];
+  }
+  return colors[key];
 }
 
 // ============================================
@@ -56,7 +85,17 @@ const oscilloscopeSection = document.getElementById('oscilloscopeSection');
 const timelineCanvas = document.getElementById('timelineCanvas');
 const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
 const timelineSection = document.getElementById('timelineSection');
+const heatmapSection = document.getElementById('heatmapSection');
 const channelIndicator = document.getElementById('channelIndicator');
+
+// Audio Drop Counter
+let dropCount = 0;
+let lastDropTime = 0;
+let dropCountEl = document.getElementById('dropCount');
+let audioDropsContainer = document.getElementById('audioDropsContainer');
+
+// Capture source select
+const captureSourceSelect = document.getElementById('captureSourceSelect');
 
 // Oscilloscope option buttons
 const freezeBtn = document.getElementById('freezeBtn');
@@ -92,7 +131,10 @@ let glitchHistory = [];
 let lastTimelineRecord = 0;
 let CAPTURE_START_TIME = 0;
 
-// Oscilloscope history buffers
+// Oscilloscope history buffers (ring buffer: Float32Array, HISTORY_SIZE=1024)
+// Buffers are overwritten each frame by updateOscilloscopeFromWaveform()
+// When waveform is present: set() replaces all samples
+// When waveform is not (hold frame): buffers remain unchanged
 const HISTORY_SIZE = 1024;
 let leftChannelHistory = new Float32Array(HISTORY_SIZE);
 let rightChannelHistory = new Float32Array(HISTORY_SIZE);
@@ -101,13 +143,18 @@ let rightChannelHistory = new Float32Array(HISTORY_SIZE);
 let oscFreeze = false;
 let oscZoom = false; // false = full buffer (1024), true = visible samples only
 let oscLogScale = false; // false = linear, true = logarithmic Y-axis
+let oscSplit = false; // false = single view, true = split (live + reference)
+let referenceBufferLeft = null;
+let referenceBufferRight = null;
+
+const OSC_SPLIT_KEY = 'oscSplit';
+const OSC_REF_KEY = 'oscReferenceSet';
 
 // rAF throttle for Canvas rendering
 let pendingOscDraw = null;
 let pendingTimelineDraw = false;
 let rafScheduled = false;
 
-// ============================================
 // Performance Monitoring
 // ============================================
 const PERF_KEY = 'perfMonitorActive';
@@ -117,26 +164,63 @@ let perfLastTime = 0;
 let perfDrawTimes = [];
 let PERF_MAX_DRAWS = 30;
 
+// Debug metrics state
+let lastLatency = 0;
+let lastDspTime = 0;
+let debugMetricsHandler = null;
+
+const perfMonitorHeader = document.getElementById('perfMonitorHeader');
 const perfMonitor = document.getElementById('perfMonitor');
 const perfFps = document.getElementById('perfFps');
 const perfDrawTime = document.getElementById('perfDrawTime');
 const perfQueue = document.getElementById('perfQueue');
 const togglePerfBtn = document.getElementById('togglePerfBtn');
+// Additional debug metrics
+const perfLatency = document.getElementById('perfLatency');
+const perfDsp = document.getElementById('perfDsp');
+const perfDrops = document.getElementById('perfDrops');
+const perfConnection = document.getElementById('perfConnection');
+
+// Perf monitor visibility state (separate from perfActive which tracks measurement)
+let perfVisible = false;
+
+// ============================================
+// Glitch Heatmap
+// ============================================
+const heatmapCanvas = document.getElementById('heatmapCanvas');
+const heatmapCtx = heatmapCanvas ? heatmapCanvas.getContext('2d') : null;
+
+// Heatmap state: 2D array [band][timeSlot]
+// Bands: 0=Bass, 1=Mid, 2=Treble
+// Time slots: 0..49 (50 slots = ~10 seconds at 5Hz update rate)
+const HEATMAP_BANDS = 3;
+const HEATMAP_SLOTS = 50;
+let heatmapData = [
+  new Float32Array(HEATMAP_SLOTS), // Bass
+  new Float32Array(HEATMAP_SLOTS), // Mid
+  new Float32Array(HEATMAP_SLOTS), // Treble
+];
+let heatmapTimeIndex = 0;
+let heatmapActive = false;
+
+const HEATMAP_KEY = 'ssa_heatmapEnabled';
 
 function togglePerfMonitor() {
-  perfActive = !perfActive;
-  perfFrameCount = 0;
-  perfDrawTimes = [];
+  perfVisible = !perfVisible;
+  perfActive = perfVisible; // If visible, also start measuring
+  
   if (perfMonitor) {
-    perfMonitor.style.display = perfActive ? 'block' : 'none';
+    perfMonitor.style.display = perfVisible ? 'block' : 'none';
   }
+  
   if (togglePerfBtn) {
-    togglePerfBtn.textContent = perfActive ? 'Hide' : 'Perf';
+    togglePerfBtn.textContent = perfVisible ? 'Hide' : 'Perf';
   }
-  chrome.storage.local.set({ [PERF_KEY]: perfActive });
-
+  
+  chrome.storage.local.set({ [PERF_KEY]: perfVisible });
+  
   // Start rAF loop when enabling
-  if (perfActive && !perfRunning) {
+  if (perfVisible && !perfRunning) {
     requestAnimationFrame(perfFrameLoop);
   }
 }
@@ -159,14 +243,52 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
     perfQueue.className = `label-sm ${colorClass}`;
     perfQueue.textContent = `Queue: ${queueLen}`;
   }
+  // Latency
+  if (perfLatency) {
+    const colorClass = lastLatency < 10 ? 'perf-good' : lastLatency < 30 ? 'perf-warn' : 'perf-bad';
+    perfLatency.className = `label-sm ${colorClass}`;
+    perfLatency.textContent = `Latency: ${lastLatency.toFixed(1)}ms`;
+  }
+  // DSP time
+  if (perfDsp) {
+    const colorClass = lastDspTime < 2 ? 'perf-good' : lastDspTime < 5 ? 'perf-warn' : 'perf-bad';
+    perfDsp.className = `label-sm ${colorClass}`;
+    perfDsp.textContent = `DSP: ${lastDspTime.toFixed(1)}ms`;
+  }
+  // Drops
+  if (perfDrops) {
+    const colorClass = dropCount === 0 ? 'perf-good' : dropCount <= 5 ? 'perf-warn' : 'perf-bad';
+    perfDrops.className = `label-sm ${colorClass}`;
+    perfDrops.textContent = `Drops: ${dropCount}`;
+  }
+  // Connection status
+  if (perfConnection) {
+    const colorClass = isConnected ? 'perf-good' : 'perf-bad';
+    perfConnection.className = `label-sm ${colorClass}`;
+    perfConnection.textContent = isConnected ? 'Conn: OK' : 'Conn: FAIL';
+  }
 }
 
 // Performance frame loop
-let perfLastFrameTime = performance.now();
+const perfNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let perfLastFrameTime = perfNow();
 let perfRunning = false;
+let perfLatencySampleCount = 0;
+let perfRafId = null; // Track rAF handle for cancellation
+
+// Heatmap render throttle — 2fps (500ms intervals) to reduce canvas thrashing
+let heatmapDirty = false; // Mark if heatmap data changed since last draw
+let heatmapRenderTimeout = null; // Separate timeout for heatmap rendering
+const HEATMAP_DRAW_INTERVAL_MS = 500;
+
+// Performance-aware heatmap: auto-disable when draw exceeds threshold
+const HEATMAP_PERF_MAX_AVG_MS = 15; // Auto-disable if avg draw > 15ms
+let heatmapDrawTimes = [];
+const HEATMAP_PERF_SAMPLE_SIZE = 10;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
     perfRunning = false;
+    perfRafId = null; // Clear the handle
     return;
   }
   if (!perfRunning) perfRunning = true;
@@ -185,15 +307,51 @@ function perfFrameLoop(timestamp) {
     updatePerfDisplay(fps, avgDrawMs, 0);
     perfDrawTimes = [];
   }
+  
+  // Sample latency every ~2 seconds (120 frames at 60fps)
+  perfLatencySampleCount++;
+  if (perfLatencySampleCount >= 120 && popupAudioContext) {
+    perfLatencySampleCount = 0;
+    const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
+    lastLatency = latency;
+    
+    // Also request DSP time from worklet if available
+    if (popupWorkletNode) {
+      popupWorkletNode.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+    }
+    
+    // Update perf display with latency
+    if (perfFps) {
+      const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+      const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+      updatePerfDisplay(fps, drawMs, 0);
+    }
+  }
 
-  requestAnimationFrame(perfFrameLoop);
+  if (perfActive) {
+    perfRafId = requestAnimationFrame(perfFrameLoop);
+  } else {
+    perfRafId = null;
+  }
+}
+
+// Stop perf monitor loop
+function stopPerfMonitor() {
+  perfActive = false;
+  perfVisible = false;
+  if (perfMonitor) perfMonitor.style.display = 'none';
+  if (togglePerfBtn) togglePerfBtn.textContent = 'Perf';
+  if (perfRafId) {
+    cancelAnimationFrame(perfRafId);
+    perfRafId = null;
+  }
 }
 
 // Performance-aware draw wrapper
 function perfAwareDraw(leftSamples, rightSamples) {
-  const start = performance.now();
+  const start = perfNow();
   drawOscilloscope(leftSamples, rightSamples);
-  const elapsed = performance.now() - start;
+  const elapsed = perfNow() - start;
 
   perfDrawTimes.push(elapsed);
   if (perfDrawTimes.length > PERF_MAX_DRAWS) {
@@ -204,6 +362,7 @@ function perfAwareDraw(leftSamples, rightSamples) {
 // Load perf monitor state on startup
 chrome.storage.local.get([PERF_KEY], (result) => {
   if (result[PERF_KEY]) {
+    perfVisible = true;
     perfActive = true;
     if (perfMonitor) perfMonitor.style.display = 'block';
     if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
@@ -219,11 +378,22 @@ if (togglePerfBtn) {
   });
 }
 
+// Capture source select handler
+if (captureSourceSelect) {
+  captureSourceSelect.addEventListener('change', async (e) => {
+    const captureSource = e.target.value;
+    await saveSetting('captureSource', captureSource);
+  });
+}
+
 // 30fps cap for canvas rendering (human eye can't tell 60fps on oscilloscope)
 const OSC_DRAW_INTERVAL = 33;
 let lastOscDrawTime = 0;
 
 function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
+  // Guard: never draw if canvas is hidden or page is in background
+  if (document.hidden || !oscilloscopeCanvas || canvasDisabled) return;
+  
   pendingOscDraw = { left: leftBuffer, right: rightBuffer };
   if (needsTimelineUpdate) pendingTimelineDraw = true;
   
@@ -233,32 +403,39 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
   requestAnimationFrame((timestamp) => {
     rafScheduled = false;
     
-    if (pendingOscDraw) {
-      // Throttle to ~30fps
-      const now = performance.now();
-      if (now - lastOscDrawTime < OSC_DRAW_INTERVAL && lastOscDrawTime > 0) {
-        // Skip draw but update buffer for next frame
-        // Buffer is already Float32Array — no copy overhead
-      } else {
-        lastOscDrawTime = now;
-        if (perfActive) {
-          perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+    try {
+      if (pendingOscDraw) {
+        // Throttle to ~15fps (canvas is expensive — 30fps causes hangs)
+        const now = perfNow();
+        if (now - lastOscDrawTime < 66 && lastOscDrawTime > 0) {
+          // Skip draw but update buffer for next frame
+          // Buffer is already Float32Array — no copy overhead
         } else {
-          drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+          lastOscDrawTime = now;
+          if (perfActive) {
+            perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
+          } else {
+            drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
+          }
         }
+        // CRITICAL: Release reference to prevent memory leaks
+        pendingOscDraw = null;
       }
-      pendingOscDraw = null;
-    }
-    
-    if (pendingTimelineDraw) {
-      if (perfActive) {
-        const tStart = performance.now();
-        drawTimeline();
-        perfDrawTimes.push(performance.now() - tStart);
-      } else {
-        drawTimeline();
+      
+      if (pendingTimelineDraw) {
+        if (perfActive) {
+          const tStart = perfNow();
+          drawTimeline();
+          perfDrawTimes.push(perfNow() - tStart);
+        } else {
+          drawTimeline();
+        }
+        pendingTimelineDraw = false;
       }
-      pendingTimelineDraw = false;
+    } catch (e) {
+      // One failed draw must not hang the popup
+      log.warn('Canvas draw error:', e.message);
+      rafScheduled = false;
     }
   });
 }
@@ -338,6 +515,7 @@ function updateUI(connected) {
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'block';
     if (glitchSettings) glitchSettings.style.display = 'block';
     if (timelineSection) timelineSection.style.display = 'block';
+    if (heatmapSection) heatmapSection.style.display = 'block';
     if (entropySection) entropySection.style.display = '';
     if (entropyHint) entropyHint.style.display = '';
   } else {
@@ -352,6 +530,7 @@ function updateUI(connected) {
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'none';
     if (glitchSettings) glitchSettings.style.display = 'none';
     if (timelineSection) timelineSection.style.display = 'none';
+    if (heatmapSection) heatmapSection.style.display = 'none';
     if (entropySection) entropySection.style.display = 'none';
     if (entropyHint) entropyHint.style.display = 'none';
 
@@ -387,6 +566,9 @@ function updateUI(connected) {
     // Reset oscilloscope options on stop
     oscFreeze = false;
     oscZoom = false;
+    oscSplit = false;
+    referenceBufferLeft = null;
+    referenceBufferRight = null;
     saveOscOptions();
     updateOscButtonStates();
 
@@ -401,7 +583,7 @@ function updateUI(connected) {
 
 function getLevelColor(level) {
   const colors = tc('rms');
-  return colors[level] || colors.default;
+  return colors?.[level] || colors?.default || '#ccc';
 }
 
 function updateRMSDisplay(rmsValueNum, peakRms) {
@@ -455,6 +637,12 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
 
 function drawOscilloscope(leftBuffer, rightBuffer) {
   if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+  
+  // Split-screen mode: draw live + reference
+  if (oscSplit) {
+    drawOscilloscopeSplit(leftBuffer, rightBuffer);
+    return;
+  }
 
   const canvasWidth = oscilloscopeCanvas.width;
   const canvasHeight = oscilloscopeCanvas.height;
@@ -471,21 +659,24 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
 
-  // Clamp values to [-1, 1] to prevent overflow
+  // Draw a single buffer with decimation + batched stroke
+  // Canvas is ~200px wide — no point drawing 1024 points, decimate to ~200 samples
   const clamp = (v) => v > 1 ? 1 : v < -1 ? -1 : v;
-
-  // Draw a single buffer directly (no array copy)
+  
   const drawBuffer = (buf, color) => {
     if (!buf || buf.length === 0) return;
-    oscilloscopeCtx.strokeStyle = color;
-    oscilloscopeCtx.lineWidth = 1.5;
-    oscilloscopeCtx.beginPath();
     
     const startIdx = oscZoom ? 0 : 0;
     const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
+    const decimate = Math.max(1, Math.floor((endIdx - startIdx) / canvasWidth)); // 1 sample per px
     
-    for (let i = startIdx; i < endIdx; i++) {
-      const x = (i / (endIdx - 1 || 1)) * canvasWidth;
+    oscilloscopeCtx.strokeStyle = color;
+    oscilloscopeCtx.lineWidth = 1;
+    oscilloscopeCtx.beginPath();
+    
+    for (let i = startIdx; i < endIdx; i += decimate) {
+      const px = i - startIdx;
+      const x = (px / (endIdx - startIdx)) * canvasWidth;
       const normalized = oscLogScale
         ? Math.max(-1, Math.min(1, Math.log10(Math.abs(buf[i]) + 1e-10) / Math.log10(2) / 30))
         : clamp(buf[i]);
@@ -500,12 +691,90 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
   drawBuffer(rightBuffer, colors.oscRight);
 }
 
-function updateOscilloscopeFromWaveform(waveform, hold, waveformRight) {
+/**
+ * Draw split-screen oscilloscope: top half = live, bottom half = reference
+ * Used when oscSplit mode is enabled
+ * Optimized: decimate to canvas-width samples, batch strokes
+ */
+function drawOscilloscopeSplit(leftBuffer, rightBuffer) {
+  if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
+  
+  const canvasWidth = oscilloscopeCanvas.width;
+  const canvasHeight = oscilloscopeCanvas.height;
+  const halfHeight = canvasHeight / 2;
+  const centerYTop = halfHeight / 2;
+  const centerYBottom = halfHeight + centerYTop;
+  const colors = tc('canvas');
+  
+  // Clear canvas
+  oscilloscopeCtx.fillStyle = colors.bg;
+  oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+  
+  // Draw grid lines (divider + center lines)
+  oscilloscopeCtx.strokeStyle = colors.grid;
+  oscilloscopeCtx.lineWidth = 0.5;
+  oscilloscopeCtx.beginPath();
+  oscilloscopeCtx.moveTo(0, halfHeight);
+  oscilloscopeCtx.lineTo(canvasWidth, halfHeight);
+  oscilloscopeCtx.moveTo(0, centerYTop);
+  oscilloscopeCtx.lineTo(canvasWidth, centerYTop);
+  oscilloscopeCtx.moveTo(0, centerYBottom);
+  oscilloscopeCtx.lineTo(canvasWidth, centerYBottom);
+  oscilloscopeCtx.stroke();
+  
+  // Helper: draw decimated buffer (1 sample per canvas pixel)
+  const drawDecimated = (buf, color, centerY) => {
+    if (!buf || buf.length === 0) return;
+    
+    const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
+    const decimate = Math.max(1, Math.floor(endIdx / canvasWidth));
+    
+    oscilloscopeCtx.strokeStyle = color;
+    oscilloscopeCtx.lineWidth = 1;
+    oscilloscopeCtx.beginPath();
+    
+    for (let i = 0; i < endIdx; i += decimate) {
+      const x = (i / endIdx) * canvasWidth;
+      const raw = buf[i];
+      const normalized = oscLogScale
+        ? Math.max(-1, Math.min(1, Math.log10(Math.abs(raw) + 1e-10) / Math.log10(2) / 30))
+        : (raw > 1 ? 1 : raw < -1 ? -1 : raw);
+      const y = centerY - (normalized * centerYTop);
+      if (i === 0) oscilloscopeCtx.moveTo(x, y);
+      else oscilloscopeCtx.lineTo(x, y);
+    }
+    oscilloscopeCtx.stroke();
+  };
+  
+  // Top half: live L+R (decimated ~canvasWidth samples each)
+  drawDecimated(leftBuffer, colors.oscLeft, centerYTop);
+  drawDecimated(rightBuffer, colors.oscRight, centerYTop);
+  
+  // Bottom half: reference (update less frequently, render at lower resolution)
+  if (referenceBufferLeft) {
+    drawDecimated(referenceBufferLeft, colors.oscLeft + '66', centerYBottom);
+  }
+  if (referenceBufferRight) {
+    drawDecimated(referenceBufferRight, colors.oscRight + '66', centerYBottom);
+  } else if (referenceBufferLeft) {
+    drawDecimated(referenceBufferLeft, colors.oscRight + '66', centerYBottom);
+  }
+}
+
+function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = false) {
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
   // No waveform data — skip
   if (!waveform || waveform.length === 0) return;
+  
+  if (frozen) {
+    // Freeze mode: don't update buffers, just redraw last frame
+    if (leftChannelHistory.some(v => v !== 0)) {
+      drawOscilloscope(leftChannelHistory, rightChannelHistory);
+    }
+    return;
+  }
   
   if (waveformRight && waveformRight.length > 0) {
     // Stereo: separate L/R waveforms
@@ -570,38 +839,53 @@ function drawTimeline() {
 
   if (glitchHistory.length < 2) return;
 
-  // Draw RMS line with color coding
-  timelineCtx.lineWidth = 1.5;
-  timelineCtx.beginPath();
+  // Normalize timestamps relative to oldest point in window (prevents timeline disappearing after shift)
+  const windowStart = glitchHistory[0].time;
+  const windowEnd = glitchHistory[glitchHistory.length - 1].time;
+  const windowDuration = windowEnd - windowStart;
 
+  // Group consecutive points by state for batched color drawing
+  var segments = [];
+  var currentSegment = [];
+  var currentState = null;
+  
   for (var i = 0; i < glitchHistory.length; i++) {
     var point = glitchHistory[i];
-    var x = (point.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
-    var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
-
-    var color;
-    switch (point.state) {
-      case 'GLITCH': color = tc('glitch').GLITCH; break;
-      case 'DRIFT': color = tc('glitch').DRIFT; break;
-      default: color = tc('glitch').STABLE; break;
-    }
-
-    if (i === 0) {
-      timelineCtx.strokeStyle = color;
-      timelineCtx.moveTo(x, y);
+    if (point.state !== currentState) {
+      if (currentSegment.length > 0) {
+        segments.push({ state: currentState, points: currentSegment });
+      }
+      currentState = point.state;
+      currentSegment = [point];
     } else {
-      var prevPoint = glitchHistory[i - 1];
-      var prevX = (prevPoint.time / (glitchHistory[glitchHistory.length - 1].time || 1)) * (canvasWidth - padding * 2) + padding;
-      var prevY = canvasHeight - padding - (prevPoint.rms * (canvasHeight - padding * 2));
-      timelineCtx.moveTo(prevX, prevY);
-      timelineCtx.lineTo(x, y);
-      timelineCtx.stroke();
-      timelineCtx.strokeStyle = color;
-      timelineCtx.beginPath();
-      timelineCtx.moveTo(x, y);
+      currentSegment.push(point);
     }
   }
-  timelineCtx.stroke();
+  if (currentSegment.length > 0) {
+    segments.push({ state: currentState, points: currentSegment });
+  }
+  
+  // Draw each segment with a single color (fewer stroke() calls)
+  for (var s = 0; s < segments.length; s++) {
+    var seg = segments[s];
+    timelineCtx.strokeStyle = tc('glitch')[seg.state];
+    timelineCtx.lineWidth = 1.5;
+    timelineCtx.beginPath();
+    
+    for (var i = 0; i < seg.points.length; i++) {
+      var point = seg.points[i];
+      // Normalize X: relative to window start, not absolute time
+      var x = ((point.time - windowStart) / (windowDuration || 1)) * (canvasWidth - padding * 2) + padding;
+      var y = canvasHeight - padding - (point.rms * (canvasHeight - padding * 2));
+      
+      if (i === 0) {
+        timelineCtx.moveTo(x, y);
+      } else {
+        timelineCtx.lineTo(x, y);
+      }
+    }
+    timelineCtx.stroke();
+  }
 
   // Draw 0.1 reference line
   timelineCtx.strokeStyle = colors.timelineRef;
@@ -616,66 +900,219 @@ function drawTimeline() {
 }
 
 // ============================================
+// Glitch Heatmap
+// ============================================
+
+/**
+ * Update heatmap data with current metrics
+ * Called from applyMetrics() when capture is active
+ */
+function updateHeatmapData(bass, mid, treble, isGlitch) {
+  if (!heatmapActive) return;
+  
+  // Normalize band values to 0-1 range
+  const b = Math.min(1, bass / 100);
+  const m = Math.min(1, mid / 100);
+  const t = Math.min(1, treble / 100);
+  
+  // Boost values during glitch state
+  const boost = isGlitch ? 1.5 : 1.0;
+  
+  heatmapData[0][heatmapTimeIndex] = Math.min(1, b * boost);
+  heatmapData[1][heatmapTimeIndex] = Math.min(1, m * boost);
+  heatmapData[2][heatmapTimeIndex] = Math.min(1, t * boost);
+  
+  heatmapTimeIndex = (heatmapTimeIndex + 1) % HEATMAP_SLOTS;
+  heatmapDirty = true;
+  
+  // Schedule draw at 2fps interval — don't block canvas cycle
+  if (heatmapRenderTimeout) return; // Already scheduled
+  heatmapRenderTimeout = setTimeout(() => {
+    heatmapRenderTimeout = null;
+    if (heatmapDirty) {
+      drawHeatmap();
+      heatmapDirty = false;
+    }
+  }, HEATMAP_DRAW_INTERVAL_MS);
+}
+
+/**
+ * Draw glitch heatmap
+ * X-axis: time (left=oldest, right=newest)
+ * Y-axis: bands (top=Bass, mid=Mid, bottom=Treble)
+ * Color: intensity (blue=low → red=high)
+ */
+function drawHeatmap() {
+  if (!heatmapCtx || !heatmapCanvas) return;
+  
+  const drawStart = perfNow();
+  const canvasWidth = heatmapCanvas.width;
+  const canvasHeight = heatmapCanvas.height;
+  const colors = tc('canvas');
+  
+  // Clear canvas
+  heatmapCtx.fillStyle = colors.bg;
+  heatmapCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+  
+  // Draw empty state hint
+  if (heatmapData[0].every(v => v === 0)) {
+    heatmapCtx.fillStyle = colors.grid;
+    heatmapCtx.font = '9px sans-serif';
+    heatmapCtx.textAlign = 'center';
+    heatmapCtx.fillText('Start capture to see heatmap', canvasWidth / 2, canvasHeight / 2);
+    return;
+  }
+  
+  // Draw heatmap cells
+  const cellWidth = canvasWidth / HEATMAP_SLOTS;
+  const cellHeight = canvasHeight / HEATMAP_BANDS;
+  
+  for (let band = 0; band < HEATMAP_BANDS; band++) {
+    for (let slot = 0; slot < HEATMAP_SLOTS; slot++) {
+      // Calculate actual position (account for wrap-around)
+      const displaySlot = (slot - heatmapTimeIndex + HEATMAP_SLOTS * 2) % HEATMAP_SLOTS;
+      const x = displaySlot * cellWidth;
+      const y = band * cellHeight;
+      
+      const value = heatmapData[band][slot];
+      
+      if (value > 0.01) {
+        // Color interpolation: cyan (low) → purple (mid) → magenta (high)
+        const r = Math.min(255, Math.floor(Math.max(0, 1 - value) * 2 * 255));
+        const g = Math.min(255, Math.floor(Math.max(0, 1 - Math.abs(value - 0.5) * 2) * 100));
+        const b = Math.min(255, Math.floor(value * 2 * 255));
+        
+        heatmapCtx.fillStyle = `rgb(${r},${g},${b})`;
+        heatmapCtx.fillRect(x, y, cellWidth + 0.5, cellHeight + 0.5);
+      }
+    }
+  }
+  
+  // Performance monitoring: auto-disable heatmap if drawing is too slow
+  const drawElapsed = perfNow() - drawStart;
+  heatmapDrawTimes.push(drawElapsed);
+  if (heatmapDrawTimes.length > HEATMAP_PERF_SAMPLE_SIZE) {
+    heatmapDrawTimes.shift();
+  }
+  if (heatmapDrawTimes.length === HEATMAP_PERF_SAMPLE_SIZE) {
+    const avgDrawMs = heatmapDrawTimes.reduce((a, b) => a + b, 0) / HEATMAP_PERF_SAMPLE_SIZE;
+    if (avgDrawMs > HEATMAP_PERF_MAX_AVG_MS) {
+      log.warn(`Heatmap avg draw ${avgDrawMs.toFixed(1)}ms > ${HEATMAP_PERF_MAX_AVG_MS}ms threshold — auto-disabling`);
+      heatmapActive = false;
+      chrome.storage.local.set({ [HEATMAP_KEY]: false });
+      heatmapDrawTimes = [];
+    }
+  }
+}
+
+// ============================================
 // Shared metrics rendering (extracted from initAudioProcessing + updateMetricsFromOffscreen)
 // ============================================
 
+/**
+ * Shared metrics renderer — dual path:
+ * 1. Direct: popupWorkletNode.port.onmessage → applyMetrics (popup-initiated capture)
+ * 2. Offscreen: background relay → bgPort.onMessage → applyMetrics (offscreen capture)
+ *
+ * @param {Object} data - METRICS payload from AudioWorklet
+ * @param {number} data.rms - Root mean square energy (0–1)
+ * @param {number} data.peakRMS - Peak amplitude (0–1)
+ * @param {number} data.bass - Bass band percentage (0–100)
+ * @param {number} data.mid - Mid band percentage (0–100)
+ * @param {number} data.treble - Treble band percentage (0–100)
+ * @param {number} [data.bassRight] - Right channel bass (undefined for mono)
+ * @param {number} [data.midRight] - Right channel mid
+ * @param {number} [data.trebleRight] - Right channel treble
+ * @param {number} [data.rmsRight] - Right channel RMS
+ * @param {Array} data.waveform - Left channel waveform (Float32Array, 1024 samples)
+ * @param {Array} [data.waveformRight] - Right channel waveform (undefined for mono)
+ * @param {boolean} [data.waveformHold] - True when waveform is throttled (skip draw)
+ * @param {string} data.glitchState - STABLE / DRIFT / GLITCH
+ * @param {number} data.glitchCount - Cumulative glitch counter
+ * @param {number} data.entropy - Shannon entropy across 4 spectral bands
+ * @param {number} data.flatness - Spectral flatness (geometric/arithmetic mean ratio)
+ * @param {string} data.entropyState - Entropy classification (STABLE / DRIFT / GLITCH)
+ */
 function applyMetrics(data) {
-  // Update current metrics state
-  currentMetrics = {
-    rms: data.rms,
-    bass: data.bass,
-    mid: data.mid,
-    treble: data.treble,
-    highFreqAnomaly: data.highFreqAnomaly,
-    rmsRight: data.rmsRight
-  };
-
-  // Update RMS display
-  updateRMSDisplay(data.rms, data.peakRMS);
-
-  // Stereo: combine L+R for overall bands, or use mono data
-  const isStereo = data.bassRight !== undefined;
-  const combinedBass = isStereo
-    ? (data.bass + data.bassRight) / 2
-    : data.bass;
-  const combinedMid = isStereo
-    ? (data.mid + data.midRight) / 2
-    : data.mid;
-  const combinedTreble = isStereo
-    ? (data.treble + data.trebleRight) / 2
-    : data.treble;
-
-  // Update channel indicator
-  if (channelIndicator) {
-    const chColors = tc('channel');
-    channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
-    channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
+  // Quick bail for invalid data
+  if (!data || typeof data.rms === 'undefined') {
+    log.warn('applyMetrics rejected: data=', !!data, 'rms=', typeof data.rms);
+    return;
   }
-
-  const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
-  updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+  if (applyMetrics._count === undefined) applyMetrics._count = 0;
+  applyMetrics._count++;
+  // Log every 500 metrics only
+  if (applyMetrics._count === 500) {
+    log.info('applyMetrics: processed', applyMetrics._count, 'total');
+  }
   
-  // Only update oscilloscope if not frozen
-  if (!oscFreeze) {
-    updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight);
-  }
-
-  // Glitch detection display
-  updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
-
-  // Timeline recording (throttle ~5 Hz)
-  if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
-  if (data.timestamp - lastTimelineRecord > 200) {
-    glitchHistory.push({
-      time: data.timestamp - CAPTURE_START_TIME,
+  try {
+    // Update current metrics state
+    currentMetrics = {
       rms: data.rms,
-      state: data.glitchState
-    });
-    lastTimelineRecord = data.timestamp;
-    if (glitchHistory.length > TIMELINE_MAX) {
-      glitchHistory.shift();
+      bass: data.bass,
+      mid: data.mid,
+      treble: data.treble,
+      highFreqAnomaly: data.highFreqAnomaly,
+      rmsRight: data.rmsRight
+    };
+
+    // Update RMS display
+    updateRMSDisplay(data.rms, data.peakRMS);
+
+    // Stereo: combine L+R for overall bands, or use mono data
+    const isStereo = data.bassRight !== undefined;
+    const combinedBass = isStereo
+      ? (data.bass + data.bassRight) / 2
+      : data.bass;
+    const combinedMid = isStereo
+      ? (data.mid + data.midRight) / 2
+      : data.mid;
+    const combinedTreble = isStereo
+      ? (data.treble + data.trebleRight) / 2
+      : data.treble;
+
+    // Update channel indicator
+    if (channelIndicator) {
+      const chColors = tc('channel');
+      channelIndicator.textContent = isStereo ? 'STEREO' : 'MONO';
+      channelIndicator.style.color = isStereo ? chColors.stereo : chColors.mono;
     }
-    updateTimelineWithThrottle();
+
+    const maxVal = Math.max(combinedBass, combinedMid, combinedTreble, 1);
+    updateFrequencyBands(combinedBass, combinedMid, combinedTreble, maxVal);
+    
+    // Update oscilloscope (freeze handled inside updateOscilloscopeFromWaveform)
+    // When frozen: keep drawing the last frame
+    if (!canvasDisabled) {
+      updateOscilloscopeFromWaveform(data.waveform, data.waveformHold, data.waveformRight, oscFreeze);
+
+      // Update heatmap (if enabled and capture active)
+      if (heatmapActive) {
+        updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
+      }
+
+      // Timeline recording (throttle ~5 Hz)
+      if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
+      if (data.timestamp - lastTimelineRecord > 200) {
+        glitchHistory.push({
+          time: data.timestamp - CAPTURE_START_TIME,
+          rms: data.rms,
+          state: data.glitchState
+        });
+        lastTimelineRecord = data.timestamp;
+        if (glitchHistory.length > TIMELINE_MAX) {
+          glitchHistory.shift();
+        }
+        updateTimelineWithThrottle();
+      }
+    }
+
+    // Glitch detection display
+    updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+  } catch (e) {
+    // One bad metrics frame must not hang the popup
+    log.warn('applyMetrics error:', e.message);
   }
 }
 
@@ -710,48 +1147,114 @@ async function initAudioProcessing(stream) {
     // чтобы не было глушения оригинального звука
     popupWorkletNode.connect(popupAudioContext.destination);
 
-    // Use shared applyMetrics for metrics rendering
-    popupWorkletNode.port.onmessage = (event) => {
+    // Named handler for proper cleanup — previous handlers lost on reassignment
+    const workletMetricsHandler = (event) => {
       const data = event.data;
+      if (!data) return;
+      
       if (data.type === 'METRICS') {
         applyMetrics(data);
       }
+      // Handle DSP time reports
+      if (data.type === 'DSP_TIME_REPORT') {
+        lastDspTime = data.dspTime || 0;
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
+      }
     };
+    popupWorkletNode.port.onmessage = workletMetricsHandler;
 
     updateUI(true);
   } catch (error) {
-    console.error('[Popup] Error initializing audio:', error);
+    log.error('Error initializing audio:', error);
     alert('Audio init error: ' + error.message);
     stopAudioProcessing();
   }
 }
 
 function stopAudioProcessing() {
+  gracefulStop = true;
+  
   glitchLog = [];
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
   
-  // Clear channel history buffers
+  // Reset all buffers to prevent memory leaks
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
-
+  
+  // CRITICAL: Clear all buffers to prevent memory leaks
+  leftChannelHistory.fill(0);
+  rightChannelHistory.fill(0);
+  
+  // Reset heatmap
+  heatmapData = [
+    new Float32Array(HEATMAP_SLOTS),
+    new Float32Array(HEATMAP_SLOTS),
+    new Float32Array(HEATMAP_SLOTS),
+  ];
+  heatmapTimeIndex = 0;
+  heatmapDirty = false;
+  
+  // Clear pending heatmap render
+  if (heatmapRenderTimeout) {
+    clearTimeout(heatmapRenderTimeout);
+    heatmapRenderTimeout = null;
+  }
+  
+  // Clear pending draw references
+  pendingOscDraw = null;
+  pendingTimelineDraw = false;
+  
+  // Clear channel history buffers
   if (popupMediaStreamSource) {
-    popupMediaStreamSource.disconnect();
+    try { popupMediaStreamSource.disconnect(); } catch (_) {}
     popupMediaStreamSource = null;
   }
   if (popupWorkletNode) {
-    popupWorkletNode.disconnect();
+    try { popupWorkletNode.disconnect(); } catch (_) {}
     popupWorkletNode = null;
   }
   if (popupAudioContext) {
-    popupAudioContext.close().catch(console.error);
+    if (popupAudioContext.state !== 'closed') {
+      popupAudioContext.close().catch(console.error);
+    }
     popupAudioContext = null;
   }
   if (popupCaptureStream) {
     popupCaptureStream.getTracks().forEach(track => track.stop());
     popupCaptureStream = null;
   }
+  
+  // Disconnect from background — bgPortDisconnectHandler will clean up listeners and null bgPort
+  if (bgPort) {
+    try {
+      bgPort.disconnect();
+    } catch (_) {}
+    // IMPORTANT: Do NOT null bgPort here — bgPortDisconnectHandler handles it
+    // Nullifying here causes race condition with onDisconnect callback
+  }
+  
+  isConnected = false;
+  captureActive = false;
   updateUI(false);
+  
+  // Do NOT reset dropCount here — it should be cumulative across sessions
+  // Only _AUDIO_DROP_RESET from offscreen should reset it
+  if (audioDropsContainer) {
+    audioDropsContainer.style.display = 'none';
+    audioDropsContainer.classList.remove('warning', 'critical');
+  }
+  
+  // Reset flag after a short delay to prevent race condition
+  setTimeout(() => { gracefulStop = false; }, 200);
+  
+  // Reset heatmap active flag
+  setTimeout(() => { heatmapActive = false; }, 500);
 }
 
 function addGlitchLogEntry(glitchCount) {
@@ -769,7 +1272,6 @@ function addGlitchLogEntry(glitchCount) {
   if (glitchLog.length > GLITCH_LOG_MAX) {
     glitchLog.shift();
   }
-  // Entry logged silently
 }
 
 function exportGlitchLog() {
@@ -793,7 +1295,6 @@ function exportGlitchLog() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  // Exported
 }
 
 function exportCSV() {
@@ -821,7 +1322,6 @@ function exportCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  // Exported
 }
 
 function sendSensitivityToWorklet(percentage) {
@@ -833,54 +1333,262 @@ function sendSensitivityToWorklet(percentage) {
   });
 }
 
-let captureActive = false;
-let bgPort = null;
-let bgMetricsHandler = null; // Named handler reference for removeListener
-
-function connectToBackground() {
-  // Force disconnect previous port if exists
+// Background port disconnect handler — named for proper removal
+function bgPortDisconnectHandler() {
+  bgMetricsConnected = false;
+  
+  // Remove all listeners to prevent leaks
   if (bgPort) {
-    // Remove old listener to prevent accumulation
-    if (bgMetricsHandler) {
-      try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    bgPort.onMessage.removeListener(bgMetricsHandler);
+    bgPort.onDisconnect.removeListener(bgPortDisconnectHandler);
+  }
+  
+  isConnected = false;
+  bgPort = null;
+  bgMetricsHandler = null;
+  
+  // If capture was active when port disconnected, trigger reconnect
+  if (captureActive) {
+    setTimeout(() => {
+      if (captureActive && !bgPort && !bgMetricsConnected) {
+        ensureBackgroundPort();
+      }
+    }, 500);
+  }
+  
+  // Only update UI if capture was active (spontaneous disconnect)
+  if (gracefulStop) {
+    return;
+  }
+  
+  // Port disconnected unexpectedly — stop capture gracefully
+  captureActive = false;
+  if (startBtn) {
+    startBtn.textContent = 'Start Capture';
+    startBtn.disabled = false;
+  }
+  updateUI(false);
+}
+
+// Send message to runtime with lastError suppression
+function safeSendMessage(msg, callback) {
+  chrome.runtime.sendMessage(msg, (response) => {
+    if (chrome.runtime.lastError) {
+      // SW may have terminated — ignore, will reconnect
+      if (callback) callback(null);
+      return;
     }
+    if (callback) callback(response);
+  });
+}
+
+// Send port message safely
+function safePostMessage(port, msg) {
+  try {
+    if (port && !port._disconnected) {
+      port.postMessage(msg);
+    }
+  } catch (e) {
+    // Port disconnected
+  }
+}
+
+// Background port — create ONCE at page load to prevent memory leaks
+let bgPortId = 0; // Track connection generation to reject stale messages
+let bgMetricsConnected = false; // Track if port is actually connected
+function ensureBackgroundPort() {
+  // Skip if port is already connected
+  if (bgPort && !bgPort._disconnected && bgMetricsConnected) {
+    bgPort.postMessage({ type: 'REQUEST_METRICS' });
+    return true;
+  }
+  
+  // Create a new port generation
+  bgPortId++;
+  const currentId = bgPortId;
+  
+  // Clear any stale listeners from previous port
+  if (bgPort && !bgPort._disconnected) {
+    try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandler); } catch (_) {}
     bgPort.disconnect();
     bgPort = null;
-    bgMetricsHandler = null;
   }
+  bgMetricsConnected = false;
+  
+  try {
+    bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
+    bgMetricsConnected = true;
+    isConnected = true;
+    gracefulStop = false;
+    
+    // Drop metrics queue to prevent popup hang from backlog
+    // When reconnecting, drop anything older than 500ms
+    const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
+    let lastMetricsApplyTime = 0;
+    let metricsQueueDepth = 0;
+    const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
+    let metricsRecvCount = 0;
+    let metricsDroppedThrottle = 0;
+    let metricsDroppedQueue = 0;
+    
+    // Connection gap detection — warn when metrics gap > 500ms (indicates SW freeze/drop)
+    let _lastMetricsTime = 0;
+    let _missedFrames = 0;
+    const METRICS_GAP_WARN_MS = 500;
+    
+    // Named handler function for proper removeListener
+    bgMetricsHandler = (data) => {
+      // Reject stale messages from previous connection
+      if (currentId !== bgPortId) return;
+      
+      if (!data) return;
+      
+      if (data.type === 'METRICS') {
+        metricsRecvCount++;
+        if (metricsRecvCount <= 5 || metricsRecvCount % 500 === 0) {
+          log.info('bgMetricsHandler #', metricsRecvCount, 'rms:', data.rms?.toFixed(4));
+        }
+        
+        // Discard metrics if capture is not active (prevents post-stop spam)
+        if (!captureActive) {
+          return;
+        }
+        
+        // Drop queue if too deep (backlog from suspended popup)
+        if (metricsQueueDepth > MAX_QUEUE_DEPTH) {
+          metricsDroppedQueue++;
+          if (metricsDroppedQueue % 50 === 0) {
+            log.warn(`Queue depth too high, dropped ${metricsDroppedQueue} metrics`);
+          }
+          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+          return;
+        }
+        metricsQueueDepth++;
+        
+        // Throttle: skip if called faster than 15fps
+        const now = Date.now();
+        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) {
+          metricsDroppedThrottle++;
+          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+          return;
+        }
+        lastMetricsApplyTime = now;
+        
+        // Connection gap detection
+        if (_lastMetricsTime > 0) {
+          const gap = Date.now() - _lastMetricsTime;
+          if (gap > METRICS_GAP_WARN_MS) {
+            _missedFrames++;
+            log.warn(`[POPUP] Metrics gap ${gap.toFixed(0)}ms, missed=${_missedFrames}`);
+          } else if (_missedFrames > 0) {
+            // Reset counter after gap recovery
+            _missedFrames = 0;
+          }
+        }
+        _lastMetricsTime = Date.now();
+        
+        // Log every 1000 metrics to track flow
+        if (metricsRecvCount % 1000 === 0) {
+          log.info(`Recv=${metricsRecvCount} thr=${metricsDroppedThrottle} q=${metricsDroppedQueue}`);
+        }
+        
+        applyMetrics(data);
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        
+        // Update audio drop count from metrics
+        if (data.audioDrops !== undefined) {
+          updateDropCounter(data.audioDrops);
+        }
+      }
+      // Ignore control messages from stale connections
+      if (currentId !== bgPortId) return;
+      
+      if (data.type === '_OFFSCREEN_ENDED') {
+        gracefulStop = true; // Mark as graceful to prevent disconnect warning
+        stopAudioProcessing();
+        updateUI(false);
+        captureActive = false;
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
+        setTimeout(() => { gracefulStop = false; }, 100);
+      }
+      // Handle audio drop events
+      if (data.type === '_AUDIO_DROP') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        dropCount = data.count;
+        updateDropCounter(dropCount);
+      }
+      if (data.type === '_AUDIO_DROP_RESET') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        dropCount = 0;
+        updateDropCounter(0);
+      }
+      // Handle debug metrics (latency, DSP time)
+      if (data.type === '_DEBUG_METRICS') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        if (data.latency !== undefined) {
+          lastLatency = data.latency;
+        }
+        if (data.dspTime !== undefined) {
+          lastDspTime = data.dspTime;
+        }
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
+      }
+      // Handle offscreen capture errors (user cancelled, permission denied, etc.)
+      if (data.type === '_OFFSCREEN_ERROR') {
+        if (rmsLevel) {
+          rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
+          rmsLevel.style.color = tc('rms').SILENCE;
+        }
+        captureActive = false;
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
+      }
+    };
+    
+    bgPort.onMessage.addListener(bgMetricsHandler);
+    bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
+    
+    log.info('bgPort listeners attached, id:', currentId);
+    
+    // Restore drop count from storage (in case drops occurred while popup was closed)
+    chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
+      if (result[DROP_COUNT_KEY] && result[DROP_COUNT_KEY] > 0) {
+        dropCount = result[DROP_COUNT_KEY];
+        if (captureActive) {
+          updateDropCounter(dropCount);
+        }
+        log.info('Restored dropCount:', dropCount, 'from storage');
+      }
+    });
+    
+    // Send metrics request immediately after connect (in case capture is active)
+    setTimeout(() => {
+      if (bgPort) {
+        log.info('Sending REQUEST_METRICS');
+        bgPort.postMessage({ type: 'REQUEST_METRICS' });
+      }
+    }, 100);
+    
+    return true;
+  } catch (e) {
+    log.error('Failed to create background port:', e);
+    return false;
+  }
+}
 
-  console.log('[Popup] Connecting to background...');
-  bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
-  
-  // Named handler function for proper removeListener
-  bgMetricsHandler = (data) => {
-    if (data && data.type === 'METRICS') {
-      // Discard metrics if capture is not active (prevents post-stop spam)
-      if (!captureActive) return;
-      applyMetrics(data);
-    }
-    if (data && data.type === '_OFFSCREEN_ENDED') {
-      stopAudioProcessing();
-      updateUI(false);
-      captureActive = false;
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
-    }
-  };
-  
-  bgPort.onMessage.addListener(bgMetricsHandler);
-  bgPort.onDisconnect.addListener(() => {
-    console.warn('[Popup] Port disconnected from background');
-    bgPort = null;
-    bgMetricsHandler = null;
-  });
-  
-  // Send metrics request immediately after connect (in case capture is active)
-  setTimeout(() => {
-    if (bgPort) {
-      bgPort.postMessage({ type: 'REQUEST_METRICS' });
-    }
-  }, 100);
+function connectToBackground() {
+  return ensureBackgroundPort();
 }
 
 startBtn.addEventListener('click', () => {
@@ -889,35 +1597,48 @@ startBtn.addEventListener('click', () => {
   captureActive = true;
   startBtn.textContent = 'Capturing...';
   startBtn.disabled = true;
+  
+  // Enable heatmap
+  heatmapActive = true;
+
+  const captureSource = captureSourceSelect?.value || 'tab';
+  log.info('Start capture requested, source:', captureSource);
 
   connectToBackground();
-
-  chrome.runtime.sendMessage({ type: 'START_CAPTURE' }, response => {
+  safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
     if (response?.ok) {
+      log.info('Capture started successfully');
       updateUI(true);
     } else {
-      console.error('[Popup] Capture failed:', response?.error);
+      log.error('Capture failed:', response?.error);
       alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
       captureActive = false;
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
+      heatmapActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
     }
   });
 });
 
 stopBtn.addEventListener('click', () => {
-  chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, response => {
-    stopAudioProcessing();
-    updateUI(false);
-    captureActive = false;
+  log.info('Stop capture requested');
+  // 1. Stop immediately — don't wait for SW response
+  stopAudioProcessing();
+  captureActive = false;
+  if (startBtn) {
     startBtn.textContent = 'Start Capture';
     startBtn.disabled = false;
-  });
+  }
+  
+  // 2. Notify background/offscreen (non-blocking)
+  safeSendMessage({ type: 'STOP_CAPTURE' });
 });
 
 chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
+  // Ignore lastError — SW may have terminated
   if (chrome.runtime.lastError) {
-    // В случае если background еще не готов или отдал ошибку
     updateUI(false);
     return;
   }
@@ -992,33 +1713,85 @@ if (exportBtn) {
 // Theme Management
 // ============================================
 
+// Canvas disable flag — set to true to debug non-canvas issues
+let canvasDisabled = false;
+
 const THEME_KEY = 'theme';
-const THEME_DEFAULT = 'dark';
+const THEME_CYCLE = ['neon', 'light', 'system'];
+const THEME_ICONS = {
+  neon: '\uD83D\uDD06', // sparkles
+  light: '\u263E', // light mode
+  system: '\u263C' // dark mode (sun with rays)
+};
 
 function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
+  if (theme === 'system') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', theme);
+  }
   if (themeToggle) {
-    themeToggle.textContent = theme === 'dark' ? '\u263C' : '\u263E';
+    themeToggle.textContent = THEME_ICONS[theme] || THEME_ICONS.system;
   }
 }
 
-// Load saved theme on startup
-chrome.storage.local.get([THEME_KEY], (result) => {
-  const saved = result[THEME_KEY];
-  if (saved === 'dark' || saved === 'light') {
-    applyTheme(saved);
-  } else {
-    // Detect system preference
-    const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-    applyTheme(prefersLight ? 'light' : 'dark');
+// Load saved settings on startup
+(async () => {
+  const settings = await loadSettings();
+  
+  // Apply theme
+  if (settings.theme) {
+    applyTheme(settings.theme);
   }
-});
+  
+  // Apply oscilloscope options
+  oscFreeze = settings.oscFreeze;
+  oscZoom = settings.oscZoom;
+  oscLogScale = settings.oscLogScale;
+  oscSplit = settings.oscSplit;
+  updateOscButtonStates();
+  
+  // Apply capture source
+  if (captureSourceSelect && settings.captureSource) {
+    captureSourceSelect.value = settings.captureSource;
+  }
+  
+  // Apply heatmap
+  if (heatmapSection) {
+    heatmapActive = settings.heatmapEnabled ?? true;
+  }
+  
+  // Load heatmap storage key
+  chrome.storage.local.get([HEATMAP_KEY], (result) => {
+    if (heatmapSection) {
+      heatmapActive = result[HEATMAP_KEY] ?? true;
+    }
+  });
+  
+  // Apply perf monitor
+  if (settings.perfVisible) {
+    perfVisible = true;
+    perfActive = true;
+    if (perfMonitor) perfMonitor.style.display = 'block';
+    if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
+    requestAnimationFrame(perfFrameLoop);
+  }
+})();
 
 if (themeToggle) {
   themeToggle.addEventListener('click', (e) => {
     e.stopPropagation();
-    const current = getTheme();
-    const next = current === 'dark' ? 'light' : 'dark';
+    // Read actual attribute, not resolved theme
+    const attr = document.documentElement.getAttribute('data-theme');
+    let current;
+    if (attr === null || attr === 'system') {
+      current = 'system';
+    } else {
+      current = attr;
+    }
+    const currentIndex = THEME_CYCLE.indexOf(current);
+    const nextIndex = (currentIndex + 1) % THEME_CYCLE.length;
+    const next = THEME_CYCLE[nextIndex];
     applyTheme(next);
     chrome.storage.local.set({ [THEME_KEY]: next });
   });
@@ -1053,14 +1826,18 @@ function redrawOscilloscope() {
 const OSC_OPTIONS_KEY = 'oscOptions';
 
 // Load saved oscilloscope options
-chrome.storage.local.get([OSC_OPTIONS_KEY], (result) => {
+chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
   if (result[OSC_OPTIONS_KEY] && typeof result[OSC_OPTIONS_KEY] === 'object') {
     const opts = result[OSC_OPTIONS_KEY];
     if (opts.freeze) oscFreeze = true;
     if (opts.zoom) oscZoom = true;
     if (opts.logScale) oscLogScale = true;
-    updateOscButtonStates();
   }
+  if (result[OSC_SPLIT_KEY]) oscSplit = !!result[OSC_SPLIT_KEY];
+  if (result[OSC_SPLIT_KEY] && result[OSC_REF_KEY] && referenceBufferLeft) {
+    // Reference was set, split mode was on — restore split
+  }
+  updateOscButtonStates();
 });
 
 function saveOscOptions() {
@@ -1069,8 +1846,34 @@ function saveOscOptions() {
       freeze: oscFreeze,
       zoom: oscZoom,
       logScale: oscLogScale
-    }
+    },
+    [OSC_SPLIT_KEY]: oscSplit,
+    [OSC_REF_KEY]: !!referenceBufferLeft
   });
+}
+
+function updateDropCounter(count) {
+  dropCount = count;
+  
+  if (!audioDropsContainer) return;
+  
+  // Show container when capture is active
+  if (captureActive) {
+    audioDropsContainer.style.display = 'block';
+  }
+  
+  if (dropCountEl) {
+    dropCountEl.textContent = count;
+  }
+  
+  // Update styling based on count
+  audioDropsContainer.classList.remove('warning', 'critical');
+  
+  if (count > 10) {
+    audioDropsContainer.classList.add('critical');
+  } else if (count > 5) {
+    audioDropsContainer.classList.add('warning');
+  }
 }
 
 function updateOscButtonStates() {
@@ -1089,6 +1892,10 @@ function updateOscButtonStates() {
   if (freezeLabel) {
     freezeLabel.style.display = oscFreeze ? 'block' : 'none';
   }
+  if (splitBtn) {
+    splitBtn.style.borderColor = oscSplit ? 'var(--accent-blue)' : '';
+    splitBtn.style.background = oscSplit ? 'var(--accent-blue-dark)' : '';
+  }
 }
 
 if (freezeBtn) {
@@ -1098,13 +1905,50 @@ if (freezeBtn) {
     saveOscOptions();
     updateOscButtonStates();
     
-    // If unfreezing, redraw immediately
-    if (!oscFreeze && pendingOscDraw) {
-      if (perfActive) {
-        perfAwareDraw(pendingOscDraw.left, pendingOscDraw.right);
-      } else {
-        drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
-      }
+    // When freezing: save current buffers to pendingOscDraw for redraw
+    if (oscFreeze) {
+      pendingOscDraw = {
+        left: new Float32Array(leftChannelHistory),
+        right: new Float32Array(rightChannelHistory)
+      };
+    }
+  });
+}
+
+if (splitBtn) {
+  splitBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    oscSplit = !oscSplit;
+    saveOscOptions();
+    updateOscButtonStates();
+    
+    // Redraw with new split setting if capture is active and not frozen
+    if (!oscFreeze && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
+    }
+  });
+}
+
+if (setRefBtn) {
+  setRefBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Save current buffers as reference
+    referenceBufferLeft = new Float32Array(leftChannelHistory);
+    if (rightChannelHistory.some(v => v !== 0)) {
+      referenceBufferRight = new Float32Array(rightChannelHistory);
+    }
+    saveOscOptions();
+    
+    // Visual feedback: flash the button
+    if (setRefBtn) {
+      const origText = setRefBtn.textContent;
+      setRefBtn.textContent = '✓';
+      setTimeout(() => { setRefBtn.textContent = origText; }, 500);
+    }
+    
+    // Redraw if in split mode
+    if (oscSplit && leftChannelHistory.some(v => v !== 0)) {
+      redrawOscilloscope();
     }
   });
 }
@@ -1145,6 +1989,9 @@ if (clearOscBtn) {
     rightChannelHistory.fill(0);
     // Clear freeze state
     oscFreeze = false;
+    // Clear reference
+    referenceBufferLeft = null;
+    referenceBufferRight = null;
     saveOscOptions();
     updateOscButtonStates();
     // Clear canvas
@@ -1198,6 +2045,7 @@ window.addEventListener('beforeunload', async () => {
       await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
           stopPending = true;
+          // Ignore lastError — page unloading
           resolve(response);
         });
       });
@@ -1219,4 +2067,143 @@ window.addEventListener('beforeunload', async () => {
     bgMetricsHandler = null;
   }
 });
- 
+
+// Initialize background port ONCE at page load — prevents memory leaks from multiple connections
+ensureBackgroundPort();
+
+// Global error handler — catch unhandled errors before they crash popup
+window.addEventListener('error', (e) => {
+  log.error('Unhandled error:', e.message, 'at', e.filename, ':', e.lineno);
+  e.preventDefault();
+});
+window.addEventListener('unhandledrejection', (e) => {
+  log.error('Unhandled rejection:', e.reason);
+  e.preventDefault();
+});
+
+// Reconnect port on window focus (handles Chrome suspend/resume cycle)
+window.addEventListener('focus', () => {
+  if (captureActive && !bgMetricsConnected) {
+    log.info('Focus — reconnecting port');
+    ensureBackgroundPort();
+  }
+});
+
+// ============================================
+// Logs Panel UI
+// ============================================
+const logsToggleBtn = document.getElementById('logsToggleBtn');
+const logsSection = document.getElementById('logsSection');
+const logsPanel = document.getElementById('logsPanel');
+const logsCount = document.getElementById('logsCount');
+const logsClearBtn = document.getElementById('logsClearBtn');
+const logsExportBtn = document.getElementById('logsExportBtn');
+const logsCloseBtn = document.getElementById('logsCloseBtn');
+const logsFilterRow = document.getElementById('logsFilterRow');
+
+let logsVisible = false;
+let logsFilterLevel = 'all'; // 'all' | 'error' | 'warn' | 'info' | 'debug'
+const LOGS_MAX_VISIBLE = 200; // cap DOM entries
+
+function renderLogs() {
+  if (!logsPanel) return;
+  const all = window.__logger?.getAll?.() || [];
+  const filtered = logsFilterLevel === 'all'
+    ? all
+    : all.filter(l => l.level === logsFilterLevel);
+
+  // Show/hide toggle button
+  if (logsToggleBtn) {
+    logsToggleBtn.style.display = 'block';
+  }
+
+  // Render only if changes — append new ones
+  const currentHTML = logsPanel.innerHTML;
+  const html = filtered
+    .slice(-LOGS_MAX_VISIBLE)
+    .map(l => {
+      const levelClass = 'log-level-' + l.level;
+      const ts = l.iso?.slice(11, 19) || '';
+      const mod = (l.module || '?').slice(0, 8);
+      return `<div class="log-entry ${levelClass}"><span class="log-ts">${ts}</span><span class="log-level ${levelClass}">[${l.level.toUpperCase()}]</span><span class="log-mod">[${mod}]</span> ${l.args.join(' ')}</div>`;
+    })
+    .join('');
+
+  logsPanel.innerHTML = html || '<div style="text-align:center;opacity:0.5">No logs</div>';
+
+  // Scroll to bottom
+  logsPanel.scrollTop = logsPanel.scrollHeight;
+
+  // Count
+  if (logsCount) {
+    logsCount.textContent = `${filtered.length} logs (filter: ${logsFilterLevel})`;
+  }
+}
+
+function toggleLogs() {
+  logsVisible = !logsVisible;
+  if (logsSection) {
+    logsSection.style.display = logsVisible ? 'block' : 'none';
+  }
+}
+
+// Subscribe to log changes
+if (window.__logger) {
+  window.__logger.onLogChange(() => {
+    renderLogs();
+  });
+  // Initial load
+  window.__logger.load(() => {
+    renderLogs();
+  });
+}
+
+// Toggle button
+if (logsToggleBtn) {
+  logsToggleBtn.addEventListener('click', toggleLogs);
+}
+
+// Close button
+if (logsCloseBtn) {
+  logsCloseBtn.addEventListener('click', () => {
+    logsVisible = false;
+    if (logsSection) logsSection.style.display = 'none';
+  });
+}
+
+// Clear button
+if (logsClearBtn) {
+  logsClearBtn.addEventListener('click', () => {
+    window.__logger?.clear?.();
+    renderLogs();
+  });
+}
+
+// Export all logs as JSON
+if (logsExportBtn) {
+  logsExportBtn.addEventListener('click', () => {
+    const url = window.__logger?.exportJSON?.();
+    if (url) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ssa-logs-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+  });
+}
+
+// Filter buttons
+if (logsFilterRow) {
+  logsFilterRow.addEventListener('click', (e) => {
+    const btn = e.target.closest('.logs-filter');
+    if (!btn) return;
+    // Update active state
+    logsFilterRow.querySelectorAll('.logs-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    logsFilterLevel = btn.dataset.level;
+    renderLogs();
+  });
+}

@@ -1,57 +1,68 @@
 /* ===== Theme Variables ===== */
 :root {
-  /* === Dark Theme (default) === */
-  --bg-body: #0f0f23;
-  --bg-secondary: #1a1a2e;
-  --bg-tertiary: #16162a;
-  --bg-canvas: #0f0f1a;
-  --bg-bar: #2a2a3a;
-  --bg-bar-hover: #3a3a4a;
-  --border-color: #2a2a4a;
-  --border-status-conn: #2d6a2e;
-  --border-status-disc: #6a2d2d;
-  --text-primary: #e0e0e0;
-  --text-secondary: #888888;
-  --text-tertiary: #666666;
-  --text-disabled: #555555;
-  --status-conn-bg: #1a2e1a;
-  --status-conn-text: #4CAF50;
-  --status-disc-bg: #2e1a1a;
-  --status-disc-text: #f44336;
-  --accent-green: #4CAF50;
-  --accent-green-hover: #5cd65c;
-  --accent-red: #f44336;
-  --accent-red-hover: #ff6b6b;
-  --accent-orange: #FF9800;
-  --accent-blue: #42A5F5;
-  --accent-blue-dark: #1565C0;
-  --accent-blue-border: #1976D2;
-  --accent-orange-dark: #E65100;
-  --accent-orange-border: #EF6C00;
-  --glitch-pulse-glow: rgba(244, 67, 54, 0.4);
-  --rms-bar-green: #4CAF50;
-  --rms-bar-yellow: #8BC34A;
-  --bass-start: #1565C0;
-  --bass-end: #42A5F5;
-  --mid-start: #2E7D32;
-  --mid-end: #66BB6A;
-  --treble-start: #E65100;
-  --treble-end: #FF9800;
-  --level-silence: #ff6b6b;
-  --level-low: #ffa94d;
-  --level-medium: #95df6c;
-  --level-high: #3ac7a3;
-  --level-critical: #d9363e;
-  --canvas-grid: #333333;
-  --osc-left: #2196F3;
-  --osc-right: #f44336;
-  --slider-bg: #2a2a3a;
-  --reset-bg: #3a3a4a;
-  --reset-border: #4a4a5a;
-  --reset-text: #cccccc;
-  --export-csv-bg: #1565C0;
-  --export-log-bg: #E65100;
-  --channel-bg: #2a2a3a;
+  /* === Neon Theme (default) === */
+  /* Backgrounds */
+  --bg-body: #0B0C10;
+  --bg-secondary: #1F2833;
+  --bg-tertiary: #151D26;
+  --bg-canvas: #0B0C10;
+  --bg-bar: #2C353F;
+  --bg-bar-hover: #3A4A5A;
+  /* Borders */
+  --border-color: rgba(69, 162, 158, 0.2);
+  --border-status-conn: rgba(0, 229, 255, 0.3);
+  --border-status-disc: rgba(255, 0, 127, 0.3);
+  /* Text */
+  --text-primary: #FFFFFF;
+  --text-secondary: #C5C6C7;
+  --text-tertiary: #8899AA;
+  --text-disabled: rgba(102, 252, 241, 0.3);
+  /* Status */
+  --status-conn-bg: rgba(0, 229, 255, 0.12);
+  --status-conn-text: #00E5FF;
+  --status-disc-bg: rgba(255, 0, 127, 0.12);
+  --status-disc-text: #FF007F;
+  /* Accents */
+  --accent-green: #00E5FF;
+  --accent-green-hover: #00B8D4;
+  --accent-red: #FF007F;
+  --accent-red-hover: #FF4DA6;
+  --accent-orange: #9D00FF;
+  --accent-blue: #00E5FF;
+  --accent-blue-dark: rgba(0, 229, 255, 0.15);
+  --accent-blue-border: rgba(0, 229, 255, 0.4);
+  --accent-orange-dark: rgba(157, 0, 255, 0.15);
+  --accent-orange-border: rgba(157, 0, 255, 0.4);
+  /* Glitch */
+  --glitch-pulse-glow: rgba(0, 229, 255, 0.4);
+  /* RMS */
+  --rms-bar-green: #00E5FF;
+  --rms-bar-yellow: #9D00FF;
+  /* Spectrum bands */
+  --bass-start: #00E5FF;
+  --bass-end: #00B8D4;
+  --mid-start: #9D00FF;
+  --mid-end: #B366FF;
+  --treble-start: #FF007F;
+  --treble-end: #FF4DA6;
+  /* Level indicators */
+  --level-silence: #FF007F;
+  --level-low: #9D00FF;
+  --level-medium: #00E5FF;
+  --level-high: #00B8D4;
+  --level-critical: #FF4DA6;
+  /* Canvas */
+  --canvas-grid: rgba(69, 162, 158, 0.15);
+  --osc-left: #00E5FF;
+  --osc-right: #FF007F;
+  /* Controls */
+  --slider-bg: #2C353F;
+  --reset-bg: #3A4A5A;
+  --reset-border: #4A5A6A;
+  --reset-text: #C5C6C7;
+  --export-csv-bg: #00B8D4;
+  --export-log-bg: #9D00FF;
+  --channel-bg: #2C353F;
 }
 
 /* === Light Theme === */
@@ -204,7 +215,7 @@ button {
 }
 
 #startBtn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #43a047, var(--accent-green-hover));
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-green-hover));
   box-shadow: 0 0 8px var(--glitch-pulse-glow);
 }
 
@@ -221,7 +232,7 @@ button {
 }
 
 #stopBtn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #b82020, var(--accent-red-hover));
+  background: linear-gradient(135deg, var(--accent-red), var(--accent-red-hover));
   box-shadow: 0 0 8px var(--glitch-pulse-glow);
 }
 
@@ -434,3 +445,277 @@ h3 {
 .theme-toggle:hover {
   background: var(--bg-bar-hover);
 }
+
+/* ===== Capture Source Select ===== */
+#captureSourceSelect {
+  width: 100%;
+  margin: 5px 0;
+  padding: 8px;
+  font-size: 10px;
+  background: var(--bg-bar);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: center;
+}
+
+#captureSourceSelect:hover {
+  background: var(--bg-bar-hover);
+}
+
+#captureSourceSelect option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* ===== Heatmap Canvas ===== */
+.heatmap-canvas {
+  height: 80px;
+}
+
+/* ===== Neon Theme (data-theme="neon") ===== */
+:root[data-theme="neon"] {
+  /* Backgrounds */
+  --bg-body: #0B0C10;
+  --bg-secondary: #1F2833;
+  --bg-tertiary: #151D26;
+  --bg-canvas: #0B0C10;
+  --bg-bar: #2C353F;
+  --bg-bar-hover: #3A4A5A;
+  /* Borders */
+  --border-color: rgba(69, 162, 158, 0.2);
+  --border-status-conn: rgba(0, 229, 255, 0.3);
+  --border-status-disc: rgba(255, 0, 127, 0.3);
+  /* Text */
+  --text-primary: #FFFFFF;
+  --text-secondary: #C5C6C7;
+  --text-tertiary: #8899AA;
+  --text-disabled: rgba(102, 252, 241, 0.3);
+  /* Status */
+  --status-conn-bg: rgba(0, 229, 255, 0.12);
+  --status-conn-text: #00E5FF;
+  --status-disc-bg: rgba(255, 0, 127, 0.12);
+  --status-disc-text: #FF007F;
+  /* Accents */
+  --accent-green: #00E5FF;
+  --accent-green-hover: #00B8D4;
+  --accent-red: #FF007F;
+  --accent-red-hover: #FF4DA6;
+  --accent-orange: #9D00FF;
+  --accent-blue: #00E5FF;
+  --accent-blue-dark: rgba(0, 229, 255, 0.15);
+  --accent-blue-border: rgba(0, 229, 255, 0.4);
+  --accent-orange-dark: rgba(157, 0, 255, 0.15);
+  --accent-orange-border: rgba(157, 0, 255, 0.4);
+  /* Glitch */
+  --glitch-pulse-glow: rgba(0, 229, 255, 0.4);
+  /* RMS */
+  --rms-bar-green: #00E5FF;
+  --rms-bar-yellow: #9D00FF;
+  /* Spectrum bands */
+  --bass-start: #00E5FF;
+  --bass-end: #00B8D4;
+  --mid-start: #9D00FF;
+  --mid-end: #B366FF;
+  --treble-start: #FF007F;
+  --treble-end: #FF4DA6;
+  /* Level indicators */
+  --level-silence: #FF007F;
+  --level-low: #9D00FF;
+  --level-medium: #00E5FF;
+  --level-high: #00B8D4;
+  --level-critical: #FF4DA6;
+  /* Canvas */
+  --canvas-grid: rgba(69, 162, 158, 0.15);
+  --osc-left: #00E5FF;
+  --osc-right: #FF007F;
+  /* Controls */
+  --slider-bg: #2C353F;
+  --reset-bg: #3A4A5A;
+  --reset-border: #4A5A6A;
+  --reset-text: #C5C6C7;
+  --export-csv-bg: #00B8D4;
+  --export-log-bg: #9D00FF;
+  --channel-bg: #2C353F;
+}
+
+/* ===== Glow Animations (GPU-accelerated: opacity + transform only) ===== */
+
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 18px rgba(0, 229, 255, 0.55), 0 0 30px rgba(0, 229, 255, 0.2);
+    transform: scale(1.02);
+    opacity: 0.95;
+  }
+}
+
+@keyframes waveformGlow {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px rgba(0, 229, 255, 0.5));
+    opacity: 1;
+  }
+  50% {
+    filter: drop-shadow(0 0 10px rgba(0, 229, 255, 0.8));
+    opacity: 0.9;
+  }
+}
+
+@keyframes glitchBorder {
+  0%, 100% {
+    border-color: rgba(0, 229, 255, 0.3);
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.2);
+    opacity: 1;
+  }
+  25% {
+    border-color: rgba(255, 0, 127, 0.6);
+    box-shadow: 0 0 12px rgba(255, 0, 127, 0.4);
+    opacity: 0.9;
+  }
+  50% {
+    border-color: rgba(157, 0, 255, 0.5);
+    box-shadow: 0 0 10px rgba(157, 0, 255, 0.3);
+    opacity: 0.95;
+  }
+  75% {
+    border-color: rgba(0, 229, 255, 0.4);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.25);
+    opacity: 1;
+  }
+}
+
+@keyframes statusConnectedGlow {
+  0%, 100% {
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.4), 0 0 24px rgba(0, 229, 255, 0.15);
+  }
+}
+
+/* Button glow effects */
+.btn-glow {
+  will-change: transform, box-shadow;
+  transition: box-shadow 0.3s ease, transform 0.3s ease;
+}
+
+.btn-glow:hover:not(:disabled) {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+.btn-glow.glitch-active {
+  animation: glitchBorder 1.5s ease-in-out infinite;
+}
+
+/* Status connected glow */
+.status.connected.neon-glow {
+  animation: statusConnectedGlow 3s ease-in-out infinite;
+}
+
+/* Audio drops indicator */
+.audio-drops {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--text-secondary);
+  text-align: center;
+  will-change: color, border-color;
+  transition: color 0.3s ease, border-color 0.3s ease;
+}
+
+.audio-drops.warning {
+  color: var(--accent-orange);
+  border-color: rgba(157, 0, 255, 0.4);
+}
+
+.audio-drops.critical {
+  color: var(--accent-red);
+  border-color: rgba(255, 0, 127, 0.5);
+  animation: glitchBorder 1s ease-in-out infinite;
+}
+
+/* Debug section */
+.section-debug {
+  margin-top: 10px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  border: 1px dashed rgba(0, 229, 255, 0.3);
+}
+
+.perf-metric {
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.perf-good { color: var(--accent-green); }
+.perf-warn { color: var(--accent-orange); }
+.perf-bad { color: var(--accent-red); }
+
+/* ===== Logs Panel ===== */
+.logs-filter {
+  transition: all 0.2s ease;
+}
+
+.logs-filter.active {
+  background: var(--accent-blue) !important;
+  color: white !important;
+  border-color: var(--accent-blue) !important;
+  box-shadow: 0 0 6px rgba(0, 229, 255, 0.3);
+}
+
+#logsPanel::-webkit-scrollbar {
+  width: 4px;
+}
+
+#logsPanel::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+#logsPanel::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
+}
+
+#logsPanel::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-blue);
+}
+
+.log-entry {
+  padding: 1px 3px;
+  border-radius: 2px;
+  word-break: break-all;
+}
+
+.log-entry:hover {
+  background: rgba(0, 229, 255, 0.05);
+}
+
+.log-entry .log-level {
+  font-weight: bold;
+  margin-right: 4px;
+}
+
+.log-entry .log-ts {
+  opacity: 0.5;
+  margin-right: 4px;
+}
+
+.log-entry .log-mod {
+  color: var(--accent-blue);
+  margin-right: 4px;
+}
+
+.log-level-error { color: var(--accent-red); }
+.log-level-warn { color: var(--accent-orange); }
+.log-level-info { color: var(--accent-blue); }
+.log-level-debug { color: var(--text-tertiary); }
