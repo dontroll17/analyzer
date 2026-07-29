@@ -8,8 +8,7 @@
     "scripting",
     "offscreen",
     "storage",
-    "alarms",
-    "midi"
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
