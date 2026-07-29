@@ -275,13 +275,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         log.warn('Popup disconnected — metrics not forwarded to popup');
       }
     }
-    } else {
-      // Throttle: only warn once per disconnect period, not every frame
-      if (!_noPopupWarned) {
-        _noPopupWarned = true;
-        log.warn('No popupPort — metrics forwarded only to offscreen (+ overlay)');
-      }
-    }
     
     // Forward to overlay if connected
     if (overlayPort) {
