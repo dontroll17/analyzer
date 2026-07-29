@@ -165,7 +165,9 @@ async function startCapture(source) {
     
     // Monitor AudioContext state for drops
     audioContext.addEventListener('statechange', () => {
-      const newState = audioContext.state;
+      const ctx = audioContext;
+      if (!ctx) return;
+      const newState = ctx.state;
       const now = Date.now();
       
       // Detect interrupted/suspended states (audio drops)
