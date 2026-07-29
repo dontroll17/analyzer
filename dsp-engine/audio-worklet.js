@@ -417,6 +417,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   /**
    * Обработка кадра для одного канала (L или R)
    * Вызывается из process() когда буфер канала заполнен
+   * 
+   * NOTE: checkGlitchState() is called ONLY in processFrame() with combined
+   * metrics. Calling it here would corrupt consecutiveGlitchFrames and glitchCount
+   * because this function runs 2-3× per frame (per-channel + combined).
    */
   processChannelFrame(ch) {
     const buffer = this.inputBuffers[ch];
@@ -424,10 +428,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const fft = this.calculateFFT(buffer);
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
-    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
     
     // Сохраняем данные для объединения позже
-    const frameData = { rms, peak, fft, bands, highFreqAnomaly, glitchInfo };
+    const frameData = { rms, peak, fft, bands, highFreqAnomaly };
     
     if (ch === 0) {
       this.leftFrameData = frameData;
@@ -610,6 +613,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     }
     
     this.port.postMessage(payload);
+    // Log every 1000 frames to avoid killing chrome
+    if (this.frameCount % 1000 === 0) {
+      console.log('[DSP] frame:', this.frameCount, 'rms:', combinedRMS.toFixed(4));
+    }
   }
 }
 

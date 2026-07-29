@@ -323,6 +323,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // === Keepalive from offscreen: keeps BG alive ===
+  if (message.type === '_OFFSCREEN_KEEPALIVE') {
+    // Restart keepalive alarm to extend SW lifetime
+    // Alarm system resets on each interaction
+    chrome.alarms.clear('ssa_keepalive', () => {
+      chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.4 });
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   return false;
 });
 

@@ -1,5 +1,11 @@
 // offscreen.js — persistent capture context
+const log = (self.__logger?.forModule('offscreen')) || {
+  debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn('[OFFSCREEN]', m, ...a),
+  error: (m, ...a) => console.error('[OFFSCREEN]', m, ...a),
+};
+
 let mediaStream = null;
+let _metricsCounter = 0;
 let audioContext = null;
 let cleanupScheduled = false;
 let lastMetrics = null;
@@ -10,6 +16,9 @@ let audioDropCount = 0;
 let lastContextState = 'running';
 let lastStateChangeTime = 0;
 const DROP_DEBOUNCE_MS = 500; // Minimum time between drops
+
+// Keepalive ping to prevent SW sleep (pings every 15s while capturing)
+let _keepaliveTimer = null;
 
 // Suppress runtime.lastError spam when background is unavailable
 function safeSendMessage(msg) {
@@ -50,6 +59,18 @@ async function startCapture(source) {
     if (mediaStream) return { ok: true, alreadyActive: true };
     
     let streamOptions;
+    
+    // Start offscreen→BG keepalive to prevent SW sleep
+    // SW wake threshold ~30-60s, ping every 15s to keep BG alive
+    _keepaliveTimer = setInterval(() => {
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_KEEPALIVE' }, () => {
+        if (chrome.runtime.lastError) {
+          // BG is dead — stop pinging
+          clearInterval(_keepaliveTimer);
+          _keepaliveTimer = null;
+        }
+      });
+    }, 15000); // 15s — well under SW 30s lifetime
     
     switch (source) {
       case 'mic': {
@@ -160,9 +181,14 @@ async function startCapture(source) {
     
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'METRICS') {
+        _metricsCounter++;
         lastMetrics = event.data;
         lastMetrics.audioDrops = audioDropCount;
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
+        // Log every 1000 messages to avoid killing SW
+        if (_metricsCounter % 1000 === 0) {
+          log.info('Metrics sent:', _metricsCounter);
+        }
       }
     };
     
@@ -245,6 +271,12 @@ function scheduleCleanup() {
 
 function cleanup() {
   cleanupScheduled = false;
+  
+  // Stop keepalive ping
+  if (_keepaliveTimer) {
+    clearInterval(_keepaliveTimer);
+    _keepaliveTimer = null;
+  }
   
   // Reset audio drop counter
   audioDropCount = 0;
