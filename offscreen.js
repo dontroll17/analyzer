@@ -294,11 +294,6 @@ async function startCapture(source) {
       const newState = ctx.state;
       const now = Date.now();
       
-      // Log state changes for debugging
-      if (newState !== lastContextState) {
-        log.info(`AudioContext statechange: ${lastContextState} → ${newState}`);
-      }
-      
       // Detect interrupted/suspended states (audio drops)
       if (lastContextState === 'running' && (newState === 'interrupted' || newState === 'suspended')) {
         if (now - lastStateChangeTime >= DROP_DEBOUNCE_MS) {

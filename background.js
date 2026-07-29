@@ -261,12 +261,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_METRICS') {
     const d = message.data;
     
-    // Log every 100 messages from offscreen
-    _bgMetricsRecv++;
-    if (_bgMetricsRecv <= 5 || _bgMetricsRecv % 100 === 0) {
-      log.info('Received _OFFSCREEN_METRICS #', _bgMetricsRecv, 'isCapturing:', isCapturing);
-    }
-    
     // Only queue/metrics forward if capture is active
     if (!isCapturing) {
       log.warn('Dropping metrics: isCapturing=false');

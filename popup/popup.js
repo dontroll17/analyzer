@@ -4,7 +4,6 @@ import { loadSettings, saveSetting } from './config.js';
 // Logger from logger.js (loaded via regular script tag) or fallback
 const _lf = { forModule: (mod) => ({ debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn(`[${mod}] ${m}`, ...a), error: (m, ...a) => console.error(`[${mod}] ${m}`, ...a) }) };
 const log = (window.__logger) ? window.__logger.forModule('popup') : _lf.forModule('popup');
-log.info('Popup init OK, logger:', typeof log, 'window.__logger:', !!window.__logger);
 
 // ============================================
 // Background port & capture state
@@ -180,9 +179,21 @@ const perfLatency = document.getElementById('perfLatency');
 const perfDsp = document.getElementById('perfDsp');
 const perfDrops = document.getElementById('perfDrops');
 const perfConnection = document.getElementById('perfConnection');
+const perfMemory = document.getElementById('perfMemory');
+const perfAlerts = document.getElementById('perfAlerts');
 
 // Perf monitor visibility state (separate from perfActive which tracks measurement)
 let perfVisible = false;
+
+// Memory monitoring
+let perfAlertCount = 0;
+let perfAlertsLastLogged = 0;
+const PERF_ALERT_RATE_LIMIT_MS = 5000; // Rate-limit alerts to once per 5s
+
+// Connection latency sampling
+let perfLastPingTime = 0;
+let perfConnectionLatency = 0;
+let perfLatencySampleTimer = null;
 
 // ============================================
 // Glitch Heatmap
@@ -267,6 +278,27 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
     perfConnection.className = `label-sm ${colorClass}`;
     perfConnection.textContent = isConnected ? 'Conn: OK' : 'Conn: FAIL';
   }
+  // Memory (Chrome-only API)
+  if (perfMemory) {
+    if (typeof performance !== 'undefined' && performance.memory && performance.memory.usedJSHeapSize) {
+      const memMB = (performance.memory.usedJSHeapSize / (1024 * 1024)).toFixed(1);
+      const memRatio = performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit;
+      let colorClass = 'perf-good';
+      if (memRatio > 0.8) colorClass = 'perf-bad';
+      else if (memRatio > 0.6) colorClass = 'perf-warn';
+      perfMemory.className = `label-sm ${colorClass}`;
+      perfMemory.textContent = `Mem: ${memMB}MB`;
+    } else {
+      perfMemory.className = 'label-sm';
+      perfMemory.textContent = 'Mem: n/a';
+    }
+  }
+  // Alerts counter
+  if (perfAlerts) {
+    const colorClass = perfAlertCount === 0 ? 'perf-good' : perfAlertCount <= 2 ? 'perf-warn' : 'perf-bad';
+    perfAlerts.className = `label-sm ${colorClass}`;
+    perfAlerts.textContent = `Alerts: ${perfAlertCount}`;
+  }
 }
 
 // Performance frame loop
@@ -325,6 +357,37 @@ function perfFrameLoop(timestamp) {
       const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
       const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
       updatePerfDisplay(fps, drawMs, 0);
+    }
+  }
+  
+  // Check performance alerts every ~6 seconds (360 frames)
+  if (perfFrameCount % 360 === 0 && perfActive) {
+    const now = Date.now();
+    const fps = Math.round(1000 / (delta || 16.67));
+    const avgDrawMs = perfDrawTimes.length > 0
+      ? perfDrawTimes.reduce((a, b) => a + b, 0) / perfDrawTimes.length
+      : 0;
+    
+    // FPS alert (< 15)
+    if (fps < 15 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+      log.warn(`Perf alert: FPS dropped to ${fps}`);
+      perfAlertsLastLogged = now;
+      perfAlertCount++;
+    }
+    // Draw time alert (> 30ms)
+    if (avgDrawMs > 30 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+      log.warn(`Perf alert: draw time ${avgDrawMs.toFixed(1)}ms`);
+      perfAlertsLastLogged = now;
+      perfAlertCount++;
+    }
+    // Memory alert (> 100MB, Chrome-only)
+    if (typeof performance !== 'undefined' && performance.memory) {
+      const memMB = performance.memory.usedJSHeapSize / (1024 * 1024);
+      if (memMB > 100 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+        log.warn(`Perf alert: memory ${memMB.toFixed(0)}MB`);
+        perfAlertsLastLogged = now;
+        perfAlertCount++;
+      }
     }
   }
 
@@ -1041,10 +1104,6 @@ function applyMetrics(data) {
   }
   if (applyMetrics._count === undefined) applyMetrics._count = 0;
   applyMetrics._count++;
-  // Log every 500 metrics only
-  if (applyMetrics._count === 500) {
-    log.info('applyMetrics: processed', applyMetrics._count, 'total');
-  }
   
   try {
     // Update current metrics state
@@ -1446,9 +1505,6 @@ function ensureBackgroundPort() {
       
       if (data.type === 'METRICS') {
         metricsRecvCount++;
-        if (metricsRecvCount <= 5 || metricsRecvCount % 500 === 0) {
-          log.info('bgMetricsHandler #', metricsRecvCount, 'rms:', data.rms?.toFixed(4));
-        }
         
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) {
@@ -1487,11 +1543,6 @@ function ensureBackgroundPort() {
           }
         }
         _lastMetricsTime = Date.now();
-        
-        // Log every 1000 metrics to track flow
-        if (metricsRecvCount % 1000 === 0) {
-          log.info(`Recv=${metricsRecvCount} thr=${metricsDroppedThrottle} q=${metricsDroppedQueue}`);
-        }
         
         applyMetrics(data);
         metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
@@ -1559,23 +1610,19 @@ function ensureBackgroundPort() {
     bgPort.onMessage.addListener(bgMetricsHandler);
     bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
     
-    log.info('bgPort listeners attached, id:', currentId);
-    
-    // Restore drop count from storage (in case drops occurred while popup was closed)
+    // Restore drop count from storage
     chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
       if (result[DROP_COUNT_KEY] && result[DROP_COUNT_KEY] > 0) {
         dropCount = result[DROP_COUNT_KEY];
         if (captureActive) {
           updateDropCounter(dropCount);
         }
-        log.info('Restored dropCount:', dropCount, 'from storage');
       }
     });
     
-    // Send metrics request immediately after connect (in case capture is active)
+    // Send metrics request immediately after connect
     setTimeout(() => {
       if (bgPort) {
-        log.info('Sending REQUEST_METRICS');
         bgPort.postMessage({ type: 'REQUEST_METRICS' });
       }
     }, 100);
@@ -1602,12 +1649,10 @@ startBtn.addEventListener('click', () => {
   heatmapActive = true;
 
   const captureSource = captureSourceSelect?.value || 'tab';
-  log.info('Start capture requested, source:', captureSource);
 
   connectToBackground();
   safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
     if (response?.ok) {
-      log.info('Capture started successfully');
       updateUI(true);
     } else {
       log.error('Capture failed:', response?.error);
@@ -1623,7 +1668,6 @@ startBtn.addEventListener('click', () => {
 });
 
 stopBtn.addEventListener('click', () => {
-  log.info('Stop capture requested');
   // 1. Stop immediately — don't wait for SW response
   stopAudioProcessing();
   captureActive = false;
@@ -2084,7 +2128,6 @@ window.addEventListener('unhandledrejection', (e) => {
 // Reconnect port on window focus (handles Chrome suspend/resume cycle)
 window.addEventListener('focus', () => {
   if (captureActive && !bgMetricsConnected) {
-    log.info('Focus — reconnecting port');
     ensureBackgroundPort();
   }
 });

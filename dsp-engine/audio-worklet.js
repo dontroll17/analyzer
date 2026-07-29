@@ -611,10 +611,6 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     }
     
     this.port.postMessage(payload);
-    // Log every 1000 frames to avoid killing chrome
-    if (this.frameCount % 1000 === 0) {
-      console.log('[DSP] frame:', this.frameCount, 'rms:', combinedRMS.toFixed(4));
-    }
   }
 }
 

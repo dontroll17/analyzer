@@ -369,23 +369,24 @@
 
 ## Roadmap
 
-### Sprint 1 (Настоящий план)
-- [x] Этап 0: README + Tech debt cleanup (deduplication applyMetrics, listener leak fix, beforeunload race, var→const/let)
-- [x] Этап 1: Overlay widget (content script, draggable Canvas, position persistence)
-- [x] Этап 2: Performance (rAF throttle, Array.from → Float32Array, buffer pooling)
-- [x] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale, Clear)
-- [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
+Полный список задач с деталями: [TASKS.md](TASKS.md)
+
+> **Sprint 3 (текущий):** Оптимизация логов, расширенное профилирование, единый трекинг задач
+
+### Sprint 1
+- Все задачи выполнены — см. [TASKS.md](TASKS.md)
 
 ### Sprint 2
-- [x] Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins)
-- [x] Jest unit tests for RMS module (33/33 passed)
-- [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
-- [x] Split-screen oscilloscope (live vs reference comparison)
-- [x] Glitch Heatmap (time × bands visualization)
-- [x] Multiple capture sources (Tab / Mic / Combined)
-- [x] Centralized config manager
-- [ ] Web MIDI export (popup blocked → needs background worker or standalone page)
+- Все задачи выполнены — см. [TASKS.md](TASKS.md)
+
+### Sprint 3
+- [ ] Обновить README.md Roadmap (this item)
+
+### Backlog
+- [ ] Web MIDI export (blocked — popup API limitation)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
+- [ ] Session export (JSON/WAV)
+- [ ] History viewer (replay past sessions)
 
 ---
 
@@ -398,4 +399,4 @@
 
 ---
 
-**Версия:** 1.2.0  |  **Дата:** 2026-07-29  |  **Статус:** Glitch Heatmap + Multi-Source Capture + Config Manager
+**Версия:** 1.3.0  |  **Дата:** 2026-07-29  |  **Статус:** Quiet Logs + Profiling + Task Tracking

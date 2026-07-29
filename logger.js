@@ -25,7 +25,7 @@ function _iso() {
 // ---------- singleton ----------
 const Logger = (() => {
   let _logs = [];
-  let _minLevel = 'debug';
+  let _minLevel = 'warn';
   let _filters = {};   // { module: true/false }
   let _listeners = []; // callbacks on push
 
