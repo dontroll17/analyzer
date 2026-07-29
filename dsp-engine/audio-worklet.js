@@ -304,9 +304,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // sampleRate=44100, FFT_SIZE=1024 → 1 бин ≈ 43.07 Hz
     const nyquist = this.sampleRate / 2; // 22050 Hz
 
-    const bassEnd = this._hzToBin(220);       // 0-220 Hz → бины 0..5
-    const midEnd = this._hzToBin(4400);       // 220-4400 Hz → бины 6..102
-    const trebleStart = midEnd;               // 4400-22050 Hz → бины 103..511
+    const bassEnd = this._hzToBin(250);      // 0-250 Hz
+    const midEnd = this._hzToBin(4000);      // 250-4000 Hz
+    const trebleEnd = this._hzToBin(16000);  // 4000-16000 Hz (cap at 16kHz — most content is flat above)
 
     let bassSum = 0, bassCount = 0;
     let midSum = 0, midCount = 0;
@@ -317,28 +317,26 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       if (i < bassEnd) {
         bassSum += energy;
         bassCount++;
-      } else if (i < trebleStart) {
+      } else if (i < midEnd) {
         midSum += energy;
         midCount++;
-      } else {
+      } else if (i < trebleEnd) {
         trebleSum += energy;
         trebleCount++;
       }
     }
 
-    // Усредняем энергию на один бин, чтобы treble (409 бинов) не перевешивал bass (6 бинов)
-    const bassAvg = bassCount > 0 ? bassSum / bassCount : 0;
-    const midAvg = midCount > 0 ? midSum / midCount : 0;
-    const trebleAvg = trebleCount > 0 ? trebleSum / trebleCount : 0;
+    // Use total energy per band (not average per bin) to correctly account
+    // for bandwidth differences: bass=6 bins, mid=89, treble=368 bins.
+    // Average per bin makes treble artificially low (409x dilution).
+    const totalSum = bassSum + midSum + trebleSum;
 
-    const totalAvg = bassAvg + midAvg + trebleAvg;
-
-    const normalize = (val) => totalAvg > 0 ? (val / totalAvg) * 100 : 0;
+    const normalize = (val) => totalSum > 0 ? (val / totalSum) * 100 : 0;
 
     return {
-      bass: normalize(bassAvg),
-      mid: normalize(midAvg),
-      treble: normalize(trebleAvg)
+      bass: normalize(bassSum),
+      mid: normalize(midSum),
+      treble: normalize(trebleSum)
     };
   }
 
