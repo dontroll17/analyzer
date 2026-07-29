@@ -654,21 +654,22 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
   oscilloscopeCtx.lineTo(canvasWidth, centerY);
   oscilloscopeCtx.stroke();
 
-  // Clamp values to [-1, 1] to prevent overflow
-  const clamp = (v) => v > 1 ? 1 : v < -1 ? -1 : v;
-
-  // Draw a single buffer directly (no array copy)
+  // Draw a single buffer with decimation + batched stroke
+  // Canvas is ~200px wide — no point drawing 1024 points, decimate to ~200 samples
   const drawBuffer = (buf, color) => {
     if (!buf || buf.length === 0) return;
-    oscilloscopeCtx.strokeStyle = color;
-    oscilloscopeCtx.lineWidth = 1.5;
-    oscilloscopeCtx.beginPath();
     
     const startIdx = oscZoom ? 0 : 0;
     const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
+    const decimate = Math.max(1, Math.floor((endIdx - startIdx) / canvasWidth)); // 1 sample per px
     
-    for (let i = startIdx; i < endIdx; i++) {
-      const x = (i / (endIdx - 1 || 1)) * canvasWidth;
+    oscilloscopeCtx.strokeStyle = color;
+    oscilloscopeCtx.lineWidth = 1;
+    oscilloscopeCtx.beginPath();
+    
+    for (let i = startIdx; i < endIdx; i += decimate) {
+      const px = i - startIdx;
+      const x = (px / (endIdx - startIdx)) * canvasWidth;
       const normalized = oscLogScale
         ? Math.max(-1, Math.min(1, Math.log10(Math.abs(buf[i]) + 1e-10) / Math.log10(2) / 30))
         : clamp(buf[i]);
@@ -686,6 +687,7 @@ function drawOscilloscope(leftBuffer, rightBuffer) {
 /**
  * Draw split-screen oscilloscope: top half = live, bottom half = reference
  * Used when oscSplit mode is enabled
+ * Optimized: decimate to canvas-width samples, batch strokes
  */
 function drawOscilloscopeSplit(leftBuffer, rightBuffer) {
   if (!oscilloscopeCtx || !oscilloscopeCanvas) return;
@@ -701,63 +703,54 @@ function drawOscilloscopeSplit(leftBuffer, rightBuffer) {
   oscilloscopeCtx.fillStyle = colors.bg;
   oscilloscopeCtx.fillRect(0, 0, canvasWidth, canvasHeight);
   
-  // Draw horizontal divider
+  // Draw grid lines (divider + center lines)
   oscilloscopeCtx.strokeStyle = colors.grid;
-  oscilloscopeCtx.lineWidth = 1;
+  oscilloscopeCtx.lineWidth = 0.5;
   oscilloscopeCtx.beginPath();
   oscilloscopeCtx.moveTo(0, halfHeight);
   oscilloscopeCtx.lineTo(canvasWidth, halfHeight);
-  oscilloscopeCtx.stroke();
-  
-  // Draw top half (live)
-  oscilloscopeCtx.strokeStyle = colors.grid;
-  oscilloscopeCtx.lineWidth = 1;
-  oscilloscopeCtx.beginPath();
   oscilloscopeCtx.moveTo(0, centerYTop);
   oscilloscopeCtx.lineTo(canvasWidth, centerYTop);
-  oscilloscopeCtx.stroke();
-  
-  // Draw bottom half (reference)
-  oscilloscopeCtx.beginPath();
   oscilloscopeCtx.moveTo(0, centerYBottom);
   oscilloscopeCtx.lineTo(canvasWidth, centerYBottom);
   oscilloscopeCtx.stroke();
   
-  // Helper to draw buffer in a half-canvas
-  const drawInHalf = (buf, color, cy) => {
+  // Helper: draw decimated buffer (1 sample per canvas pixel)
+  const drawDecimated = (buf, color, centerY) => {
     if (!buf || buf.length === 0) return;
+    
+    const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
+    const decimate = Math.max(1, Math.floor(endIdx / canvasWidth));
+    
     oscilloscopeCtx.strokeStyle = color;
-    oscilloscopeCtx.lineWidth = 1.5;
+    oscilloscopeCtx.lineWidth = 1;
     oscilloscopeCtx.beginPath();
     
-    const startIdx = oscZoom ? 0 : 0;
-    const endIdx = oscZoom ? Math.min(buf.length, 256) : buf.length;
-    
-    for (let i = startIdx; i < endIdx; i++) {
-      const x = (i / (endIdx - 1 || 1)) * canvasWidth;
+    for (let i = 0; i < endIdx; i += decimate) {
+      const x = (i / endIdx) * canvasWidth;
+      const raw = buf[i];
       const normalized = oscLogScale
-        ? Math.max(-1, Math.min(1, Math.log10(Math.abs(buf[i]) + 1e-10) / Math.log10(2) / 30))
-        : (buf[i] > 1 ? 1 : buf[i] < -1 ? -1 : buf[i]);
-      const y = cy - (normalized * centerYTop);
-      if (i === startIdx) oscilloscopeCtx.moveTo(x, y);
+        ? Math.max(-1, Math.min(1, Math.log10(Math.abs(raw) + 1e-10) / Math.log10(2) / 30))
+        : (raw > 1 ? 1 : raw < -1 ? -1 : raw);
+      const y = centerY - (normalized * centerYTop);
+      if (i === 0) oscilloscopeCtx.moveTo(x, y);
       else oscilloscopeCtx.lineTo(x, y);
     }
     oscilloscopeCtx.stroke();
   };
   
-  // Top: live signal
-  drawInHalf(leftBuffer, colors.oscLeft, centerYTop);
-  drawInHalf(rightBuffer, colors.oscRight, centerYTop);
+  // Top half: live L+R (decimated ~canvasWidth samples each)
+  drawDecimated(leftBuffer, colors.oscLeft, centerYTop);
+  drawDecimated(rightBuffer, colors.oscRight, centerYTop);
   
-  // Bottom: reference signal
+  // Bottom half: reference (update less frequently, render at lower resolution)
   if (referenceBufferLeft) {
-    drawInHalf(referenceBufferLeft, colors.oscLeft, centerYBottom);
+    drawDecimated(referenceBufferLeft, colors.oscLeft + '66', centerYBottom);
   }
   if (referenceBufferRight) {
-    drawInHalf(referenceBufferRight, colors.oscRight, centerYBottom);
+    drawDecimated(referenceBufferRight, colors.oscRight + '66', centerYBottom);
   } else if (referenceBufferLeft) {
-    // Mono reference: draw same for both
-    drawInHalf(referenceBufferLeft, colors.oscRight, centerYBottom);
+    drawDecimated(referenceBufferLeft, colors.oscRight + '66', centerYBottom);
   }
 }
 
@@ -1408,7 +1401,6 @@ function ensureBackgroundPort() {
     // Drop metrics queue to prevent popup hang from backlog
     // When reconnecting, drop anything older than 500ms
     const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
-    const STALE_THRESHOLD_MS = 500; // Drop frames older than 500ms (prevents stale render)
     let lastMetricsApplyTime = 0;
     let metricsQueueDepth = 0;
     const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
@@ -1431,13 +1423,6 @@ function ensureBackgroundPort() {
         
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) {
-          return;
-        }
-        
-        // Drop stale frames — if frame timestamp is too old, skip rendering
-        // This prevents "catching up" with hundreds of old frames after popup is restored
-        if (data.timestamp && (Date.now() - data.timestamp > STALE_THRESHOLD_MS)) {
-          metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
           return;
         }
         
