@@ -1,5 +1,5 @@
 import { RMS } from '../dsp-engine/rms.js';
-import { midiExporter } from '../dsp-engine/midi-export.js';
+import midiExporter from '../dsp-engine/midi-export.js';
 
 // ============================================
 // MIDI Export state
