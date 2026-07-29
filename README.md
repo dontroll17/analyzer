@@ -26,6 +26,8 @@
 | **Осциллограф: Zoom** | Масштабирование 256 сэмплов (toggle) | ✅ Реализовано |
 | **Осциллограф: Log Scale** | Логарифмическая шкала Y-axis (toggle) | ✅ Реализовано |
 | **Осциллограф: Clear** | Очистка буферов + сброс freeze | ✅ Реализовано |
+| **Glitch Heatmap** | Canvas visualisation glitch frequency over time (X=time, Y=bands) | ✅ Реализовано |
+| **Multiple capture sources** | Tab Audio / Mic Audio / Tab + Mic (combined) | ✅ Реализовано |
 | **Overlay widget** | Draggable Canvas поверх страницы (content.js), position persistence | ✅ Реализовано |
 | **Performance Monitor** | FPS, Draw time, Queue length (toggle) | ✅ Реализовано |
 
@@ -75,6 +77,8 @@
   - **Log Scale** — логарифмическая шкала
   - **Clear** — очистка буферов + сброс freeze
 - **Glitch Timeline** — график RMS и состояния глитч-детектора во времени
+- **Glitch Heatmap** — визуализация частоты глитчей по частотным полосам (X=time, Y=bands, color=intensity)
+- **Capture Source** — выбор источника: Tab Audio / Mic Audio / Tab + Mic
 - **Export CSV** — сохранение данных осциллограммы в CSV
 - **Export Log** — сохранение лога глитчей в JSON (до 500 записей)
 - **Theme Toggle** — переключение тёмной/светлой темы
@@ -272,6 +276,33 @@
 
 ## Changelog
 
+### v1.2.0 (2026-07-29) — Glitch Heatmap, Multi-Source Capture
+
+**Новые фичи:**
+- ✅ **Glitch Heatmap** — Canvas visualisation glitch frequency over time
+  - X-axis: time (last ~10 seconds, 50 slots)
+  - Y-axis: frequency bands (Bass, Mid, Treble)
+  - Color: intensity (blue=low → yellow=mid → red=high)
+  - Auto-boosts during GLITCH state
+  - Auto-reset on stop capture
+
+- ✅ **Multiple capture sources** — 3 modes via dropdown:
+  - **Tab Audio** — захват звука активной вкладки (default)
+  - **Mic Audio** — захват микрофона пользователя
+  - **Tab + Mic** — комбинация: tab audio + microphone (смешиваются)
+
+- ✅ **Centralized config manager** (popup/config.js)
+  - All settings stored in chrome.storage.local
+  - Default values with fallback
+  - API: loadSettings(), saveSetting(), getSettings(), resetSettings()
+  - Keys: theme, glitchSensitivity, oscOptions, captureSource, heatmapEnabled, perfMonitorVisible
+
+**Улучшения:**
+- ✅ Capture source persisted in storage
+- ✅ Heatmap enabled by default
+- ✅ offscreen.js supports getUserMedia + getDisplayMedia
+- ✅ background.js forwards captureSource to offscreen
+
 ### v1.1.1 (2026-07-29) — Web MIDI Export (stub)
 
 **Новые фичи:**
@@ -350,6 +381,9 @@
 - [x] Jest unit tests for RMS module (33/33 passed)
 - [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
 - [x] Split-screen oscilloscope (live vs reference comparison)
+- [x] Glitch Heatmap (time × bands visualization)
+- [x] Multiple capture sources (Tab / Mic / Combined)
+- [x] Centralized config manager
 - [ ] Web MIDI export (popup blocked → needs background worker or standalone page)
 - [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
 
@@ -364,4 +398,4 @@
 
 ---
 
-**Версия:** 1.1.1  |  **Дата:** 2026-07-29  |  **Статус:** Web MIDI Export + Radix-2 FFT
+**Версия:** 1.2.0  |  **Дата:** 2026-07-29  |  **Статус:** Glitch Heatmap + Multi-Source Capture + Config Manager

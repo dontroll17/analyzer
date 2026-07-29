@@ -10,6 +10,13 @@
   <h3>Stream Sensation Analyzer</h3>
   <button id="startBtn">Start Capture</button>
   <button id="stopBtn" disabled>Stop Capture</button>
+  <div class="flex-gap" style="margin-top: 5px;">
+    <select id="captureSourceSelect" class="btn-sm" style="flex: 1; text-align: center;">
+      <option value="tab">Tab Audio</option>
+      <option value="mic">Mic Audio</option>
+      <option value="combined">Tab + Mic</option>
+    </select>
+  </div>
   <div id="status" class="disconnected">Not Connected</div>
 
   <!-- Performance Monitor -->
@@ -144,6 +151,20 @@
       <div id="timelineSection" class="section" style="margin-top: 15px; display: none;">
         <div class="label" style="margin-bottom: 8px;">Glitch Timeline</div>
         <canvas id="timelineCanvas" width="260" height="60" class="canvas tim-canvas"></canvas>
+      </div>
+
+      <!-- Glitch Heatmap Section -->
+      <div id="heatmapSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="flex-between" style="margin-bottom: 8px;">
+          <div class="label">Glitch Heatmap</div>
+          <div class="label-xs" style="max-width: 120px;">X=time, Y=bands, color=intensity</div>
+        </div>
+        <canvas id="heatmapCanvas" width="260" height="80" class="canvas heatmap-canvas"></canvas>
+        <div class="flex-between label-xs" style="margin-top: 4px;">
+          <span class="text-blue">Bass</span>
+          <span class="text-orange">Mid</span>
+          <span class="text-red">Treble</span>
+        </div>
       </div>
     </div>
   </div>

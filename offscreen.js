@@ -3,6 +3,7 @@ let mediaStream = null;
 let audioContext = null;
 let cleanupScheduled = false;
 let lastMetrics = null;
+let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
 
 // Suppress runtime.lastError spam when background is unavailable
 function safeSendMessage(msg) {
@@ -15,7 +16,8 @@ function safeSendMessage(msg) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_START') {
-    startCapture().then(sendResponse);
+    currentCaptureSource = message.captureSource || 'tab';
+    startCapture(currentCaptureSource).then(sendResponse);
     return true;
   }
   
@@ -37,19 +39,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture() {
+async function startCapture(source) {
   try {
     if (mediaStream) return { ok: true, alreadyActive: true };
     
-    mediaStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        sampleRate: 44100
+    let streamOptions;
+    
+    switch (source) {
+      case 'mic': {
+        // Microphone only
+        streamOptions = {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100
+          },
+          video: false
+        };
+        mediaStream = await navigator.mediaDevices.getUserMedia(streamOptions);
+        break;
       }
-    });
+      
+      case 'combined': {
+        // Tab audio + microphone - need to capture both
+        const tabStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100
+          }
+        });
+        
+        // Check if tab has audio tracks
+        const tabAudioTracks = tabStream.getAudioTracks();
+        if (tabAudioTracks.length === 0) {
+          safeSendMessage({
+            type: '_OFFSCREEN_ERROR',
+            error: 'No tab audio — make sure to check "Share tab audio"'
+          });
+          cleanup();
+          return { ok: false, error: 'no_tab_audio' };
+        }
+        
+        // Get microphone
+        const micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100
+          }
+        });
+        
+        // Combine: create a new stream with both audio tracks
+        const combinedStream = new MediaStream();
+        tabAudioTracks.forEach(track => combinedStream.addTrack(track));
+        micStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+        
+        // Stop mic stream (tracks are already added)
+        micStream.getTracks().forEach(t => t.stop());
+        
+        mediaStream = combinedStream;
+        break;
+      }
+      
+      case 'tab':
+      default: {
+        // Tab audio only (default)
+        streamOptions = {
+          video: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100
+          }
+        };
+        mediaStream = await navigator.mediaDevices.getDisplayMedia(streamOptions);
+        break;
+      }
+    }
     
     const audioTracks = mediaStream.getAudioTracks();
     

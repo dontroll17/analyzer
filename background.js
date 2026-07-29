@@ -141,8 +141,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     
+    const captureSource = message.captureSource || 'tab';
+    
     if (offscreenReady) {
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START' }, response => {
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, response => {
         isCapturing = !!response?.ok;
         // Notify content script to show overlay
         if (isCapturing) {
@@ -158,7 +160,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Try to create offscreen document
       createOffscreenDocument().then((success) => {
         if (success) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START' }, (response) => {
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, (response) => {
             isCapturing = !!response?.ok;
             sendResponse(response);
           });

@@ -1,4 +1,5 @@
 import { RMS } from '../dsp-engine/rms.js';
+import { loadSettings, saveSetting } from './config.js';
 
 // ============================================
 // Background port & capture state
@@ -64,7 +65,11 @@ const oscilloscopeSection = document.getElementById('oscilloscopeSection');
 const timelineCanvas = document.getElementById('timelineCanvas');
 const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
 const timelineSection = document.getElementById('timelineSection');
+const heatmapSection = document.getElementById('heatmapSection');
 const channelIndicator = document.getElementById('channelIndicator');
+
+// Capture source select
+const captureSourceSelect = document.getElementById('captureSourceSelect');
 
 // Oscilloscope option buttons
 const freezeBtn = document.getElementById('freezeBtn');
@@ -124,7 +129,6 @@ let pendingOscDraw = null;
 let pendingTimelineDraw = false;
 let rafScheduled = false;
 
-// ============================================
 // Performance Monitoring
 // ============================================
 const PERF_KEY = 'perfMonitorActive';
@@ -143,6 +147,27 @@ const togglePerfBtn = document.getElementById('togglePerfBtn');
 
 // Perf monitor visibility state (separate from perfActive which tracks measurement)
 let perfVisible = false;
+
+// ============================================
+// Glitch Heatmap
+// ============================================
+const heatmapCanvas = document.getElementById('heatmapCanvas');
+const heatmapCtx = heatmapCanvas ? heatmapCanvas.getContext('2d') : null;
+
+// Heatmap state: 2D array [band][timeSlot]
+// Bands: 0=Bass, 1=Mid, 2=Treble
+// Time slots: 0..49 (50 slots = ~10 seconds at 5Hz update rate)
+const HEATMAP_BANDS = 3;
+const HEATMAP_SLOTS = 50;
+let heatmapData = [
+  new Float32Array(HEATMAP_SLOTS), // Bass
+  new Float32Array(HEATMAP_SLOTS), // Mid
+  new Float32Array(HEATMAP_SLOTS), // Treble
+];
+let heatmapTimeIndex = 0;
+let heatmapActive = false;
+
+const HEATMAP_KEY = 'ssa_heatmapEnabled';
 
 function togglePerfMonitor() {
   perfVisible = !perfVisible;
@@ -243,6 +268,14 @@ if (togglePerfBtn) {
   });
 }
 
+// Capture source select handler
+if (captureSourceSelect) {
+  captureSourceSelect.addEventListener('change', async (e) => {
+    const source = e.target.value;
+    await saveSetting('captureSource', source);
+  });
+}
+
 // 30fps cap for canvas rendering (human eye can't tell 60fps on oscilloscope)
 const OSC_DRAW_INTERVAL = 33;
 let lastOscDrawTime = 0;
@@ -284,6 +317,17 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
         drawTimeline();
       }
       pendingTimelineDraw = false;
+    }
+    
+    // Draw heatmap if active
+    if (heatmapActive && captureActive) {
+      if (perfActive) {
+        const hStart = performance.now();
+        drawHeatmap();
+        perfDrawTimes.push(performance.now() - hStart);
+      } else {
+        drawHeatmap();
+      }
     }
   });
 }
@@ -363,6 +407,7 @@ function updateUI(connected) {
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'block';
     if (glitchSettings) glitchSettings.style.display = 'block';
     if (timelineSection) timelineSection.style.display = 'block';
+    if (heatmapSection) heatmapSection.style.display = 'block';
     if (entropySection) entropySection.style.display = '';
     if (entropyHint) entropyHint.style.display = '';
   } else {
@@ -377,6 +422,7 @@ function updateUI(connected) {
     if (oscilloscopeSection) oscilloscopeSection.style.display = 'none';
     if (glitchSettings) glitchSettings.style.display = 'none';
     if (timelineSection) timelineSection.style.display = 'none';
+    if (heatmapSection) heatmapSection.style.display = 'none';
     if (entropySection) entropySection.style.display = 'none';
     if (entropyHint) entropyHint.style.display = 'none';
 
@@ -751,6 +797,87 @@ function drawTimeline() {
 }
 
 // ============================================
+// Glitch Heatmap
+// ============================================
+
+/**
+ * Update heatmap data with current metrics
+ * Called from applyMetrics() when capture is active
+ */
+function updateHeatmapData(bass, mid, treble, isGlitch) {
+  if (!heatmapActive) return;
+  
+  // Normalize band values to 0-1 range
+  const b = Math.min(1, bass / 100);
+  const m = Math.min(1, mid / 100);
+  const t = Math.min(1, treble / 100);
+  
+  // Boost values during glitch state
+  const boost = isGlitch ? 1.5 : 1.0;
+  
+  heatmapData[0][heatmapTimeIndex] = Math.min(1, b * boost);
+  heatmapData[1][heatmapTimeIndex] = Math.min(1, m * boost);
+  heatmapData[2][heatmapTimeIndex] = Math.min(1, t * boost);
+  
+  heatmapTimeIndex = (heatmapTimeIndex + 1) % HEATMAP_SLOTS;
+  
+  // Schedule draw
+  pendingTimelineDraw = true;
+}
+
+/**
+ * Draw glitch heatmap
+ * X-axis: time (left=oldest, right=newest)
+ * Y-axis: bands (top=Bass, mid=Mid, bottom=Treble)
+ * Color: intensity (blue=low → red=high)
+ */
+function drawHeatmap() {
+  if (!heatmapCtx || !heatmapCanvas) return;
+  
+  const canvasWidth = heatmapCanvas.width;
+  const canvasHeight = heatmapCanvas.height;
+  const colors = tc('canvas');
+  
+  // Clear canvas
+  heatmapCtx.fillStyle = colors.bg;
+  heatmapCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+  
+  // Draw empty state hint
+  if (heatmapData[0].every(v => v === 0)) {
+    heatmapCtx.fillStyle = colors.grid;
+    heatmapCtx.font = '9px sans-serif';
+    heatmapCtx.textAlign = 'center';
+    heatmapCtx.fillText('Start capture to see heatmap', canvasWidth / 2, canvasHeight / 2);
+    return;
+  }
+  
+  // Draw heatmap cells
+  const cellWidth = canvasWidth / HEATMAP_SLOTS;
+  const cellHeight = canvasHeight / HEATMAP_BANDS;
+  
+  for (let band = 0; band < HEATMAP_BANDS; band++) {
+    for (let slot = 0; slot < HEATMAP_SLOTS; slot++) {
+      // Calculate actual position (account for wrap-around)
+      const displaySlot = (slot - heatmapTimeIndex + HEATMAP_SLOTS * 2) % HEATMAP_SLOTS;
+      const x = displaySlot * cellWidth;
+      const y = band * cellHeight;
+      
+      const value = heatmapData[band][slot];
+      
+      if (value > 0.01) {
+        // Color interpolation: blue (low) → yellow (mid) → red (high)
+        const r = Math.min(255, Math.floor(value * 2 * 255));
+        const g = Math.min(255, Math.floor(Math.max(0, 1 - Math.abs(value - 0.5) * 2) * 255));
+        const b = Math.min(255, Math.floor(Math.max(0, 1 - value) * 2 * 255));
+        
+        heatmapCtx.fillStyle = `rgb(${r},${g},${b})`;
+        heatmapCtx.fillRect(x, y, cellWidth + 0.5, cellHeight + 0.5);
+      }
+    }
+  }
+}
+
+// ============================================
 // Shared metrics rendering (extracted from initAudioProcessing + updateMetricsFromOffscreen)
 // ============================================
 
@@ -820,6 +947,11 @@ function applyMetrics(data) {
 
   // Glitch detection display
   updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+
+  // Update heatmap (if enabled and capture active)
+  if (heatmapActive) {
+    updateHeatmapData(data.bass, data.mid, data.treble, data.isGlitch);
+  }
 
   // Timeline recording (throttle ~5 Hz)
   if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
@@ -892,9 +1024,21 @@ function stopAudioProcessing() {
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
   
+  // Reset all buffers to prevent memory leaks
+  leftChannelHistory.fill(0);
+  rightChannelHistory.fill(0);
+  
   // CRITICAL: Clear all buffers to prevent memory leaks
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
+  
+  // Reset heatmap
+  heatmapData = [
+    new Float32Array(HEATMAP_SLOTS),
+    new Float32Array(HEATMAP_SLOTS),
+    new Float32Array(HEATMAP_SLOTS),
+  ];
+  heatmapTimeIndex = 0;
   
   // Clear pending draw references
   pendingOscDraw = null;
@@ -935,6 +1079,9 @@ function stopAudioProcessing() {
   
   // Reset flag after a short delay to prevent race condition
   setTimeout(() => { gracefulStop = false; }, 200);
+  
+  // Reset heatmap active flag
+  setTimeout(() => { heatmapActive = false; }, 500);
 }
 
 function addGlitchLogEntry(glitchCount) {
@@ -1142,16 +1289,21 @@ startBtn.addEventListener('click', () => {
   captureActive = true;
   startBtn.textContent = 'Capturing...';
   startBtn.disabled = true;
+  
+  // Enable heatmap
+  heatmapActive = true;
 
   connectToBackground();
 
-  safeSendMessage({ type: 'START_CAPTURE' }, response => {
+  const source = captureSourceSelect?.value || 'tab';
+  safeSendMessage({ type: 'START_CAPTURE', captureSource: source }, response => {
     if (response?.ok) {
       updateUI(true);
     } else {
       console.error('[Popup] Capture failed:', response?.error);
       alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
       captureActive = false;
+      heatmapActive = false;
       if (startBtn) {
         startBtn.textContent = 'Start Capture';
         startBtn.disabled = false;
@@ -1161,14 +1313,16 @@ startBtn.addEventListener('click', () => {
 });
 
 stopBtn.addEventListener('click', () => {
-  safeSendMessage({ type: 'STOP_CAPTURE' }, response => {
-    stopAudioProcessing();
-    captureActive = false;
-    if (startBtn) {
-      startBtn.textContent = 'Start Capture';
-      startBtn.disabled = false;
-    }
-  });
+  // 1. Stop immediately — don't wait for SW response
+  stopAudioProcessing();
+  captureActive = false;
+  if (startBtn) {
+    startBtn.textContent = 'Start Capture';
+    startBtn.disabled = false;
+  }
+  
+  // 2. Notify background/offscreen (non-blocking)
+  safeSendMessage({ type: 'STOP_CAPTURE' });
 });
 
 chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
@@ -1258,17 +1412,48 @@ function applyTheme(theme) {
   }
 }
 
-// Load saved theme on startup
-chrome.storage.local.get([THEME_KEY], (result) => {
-  const saved = result[THEME_KEY];
-  if (saved === 'dark' || saved === 'light') {
-    applyTheme(saved);
-  } else {
-    // Detect system preference
-    const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-    applyTheme(prefersLight ? 'light' : 'dark');
+// Load saved settings on startup
+(async () => {
+  const settings = await loadSettings();
+  
+  // Apply theme
+  if (settings.theme) {
+    applyTheme(settings.theme);
   }
-});
+  
+  // Apply oscilloscope options
+  oscFreeze = settings.oscFreeze;
+  oscZoom = settings.oscZoom;
+  oscLogScale = settings.oscLogScale;
+  oscSplit = settings.oscSplit;
+  updateOscButtonStates();
+  
+  // Apply capture source
+  if (captureSourceSelect && settings.captureSource) {
+    captureSourceSelect.value = settings.captureSource;
+  }
+  
+  // Apply heatmap
+  if (heatmapSection) {
+    heatmapActive = settings.heatmapEnabled ?? true;
+  }
+  
+  // Load heatmap storage key
+  chrome.storage.local.get([HEATMAP_KEY], (result) => {
+    if (heatmapSection) {
+      heatmapActive = result[HEATMAP_KEY] ?? true;
+    }
+  });
+  
+  // Apply perf monitor
+  if (settings.perfVisible) {
+    perfVisible = true;
+    perfActive = true;
+    if (perfMonitor) perfMonitor.style.display = 'block';
+    if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
+    requestAnimationFrame(perfFrameLoop);
+  }
+})();
 
 if (themeToggle) {
   themeToggle.addEventListener('click', (e) => {

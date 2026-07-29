@@ -434,3 +434,31 @@ h3 {
 .theme-toggle:hover {
   background: var(--bg-bar-hover);
 }
+
+/* ===== Capture Source Select ===== */
+#captureSourceSelect {
+  width: 100%;
+  margin: 5px 0;
+  padding: 8px;
+  font-size: 10px;
+  background: var(--bg-bar);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: center;
+}
+
+#captureSourceSelect:hover {
+  background: var(--bg-bar-hover);
+}
+
+#captureSourceSelect option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* ===== Heatmap Canvas ===== */
+.heatmap-canvas {
+  height: 80px;
+}
