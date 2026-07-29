@@ -3,133 +3,148 @@
 <head>
   <meta charset="UTF-8">
   <title>Stream Sensation Analyzer</title>
-  <style>
-    body {
-      width: 280px;
-      padding: 15px;
-      font-family: Arial, sans-serif;
-      margin: 0;
-    }
-    h3 {
-      margin: 0 0 15px 0;
-      font-size: 14px;
-      text-align: center;
-      color: #333;
-    }
-    button {
-      width: 100%;
-      margin: 5px 0;
-      padding: 10px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-      transition: background-color 0.2s;
-    }
-    #startBtn { background: #4CAF50; color: white; }
-    #startBtn:hover { background: #45a049; }
-    #startBtn:disabled { background: #ccc; cursor: not-allowed; }
-    
-    #stopBtn { background: #f44336; color: white; }
-    #stopBtn:hover { background: #da190b; }
-    #stopBtn:disabled { background: #ccc; cursor: not-allowed; }
-
-    #status {
-      margin-top: 15px;
-      padding: 8px;
-      border-radius: 4px;
-      text-align: center;
-      font-size: 11px;
-      font-weight: bold;
-    }
-    .connected { background: #e8f5e9; color: #2e7d32; border: 1px solid #4CAF50; }
-    .disconnected { background: #ffebee; color: #c62828; border: 1px solid #f44336; }
-  </style>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
+  <button id="themeToggle" class="theme-toggle" title="Toggle theme">&#9790;</button>
   <h3>Stream Sensation Analyzer</h3>
   <button id="startBtn">Start Capture</button>
   <button id="stopBtn" disabled>Stop Capture</button>
   <div id="status" class="disconnected">Not Connected</div>
-  
+
   <!-- RMS Display Section -->
-  <div id="rmsSection" style="margin-top: 15px; padding: 10px; background: #f5f5f5; border-radius: 4px; display: none;">
-    <div style="font-size: 11px; color: #666; margin-bottom: 8px;">Current RMS:</div>
-    <div id="rmsValue" style="font-size: 18px; font-weight: bold; color: #333;">0.0000</div>
-    <div id="rmsLevel" style="font-size: 10px; color: #888; margin-bottom: 10px;">Level: --</div>
-    
+  <div id="rmsSection" class="section" style="display: none;">
+    <div class="label" style="margin-bottom: 8px;">Current RMS:</div>
+    <div id="rmsValue" class="text-bold" style="font-size: 18px;">0.0000</div>
+    <div id="peakValue" class="text-red" style="font-size: 11px; margin-bottom: 2px;">Peak: --</div>
+    <div id="rmsLevel" class="label" style="margin-bottom: 10px;">Level: --</div>
+
     <div style="margin-bottom: 10px;">
-      <div id="rmsBarContainer" style="width: 100%; height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden;">
-        <div id="rmsBar" style="width: 0%; height: 100%; background: #4CAF50; transition: width 0.15s ease-out, background-color 0.3s ease;"></div>
+      <div class="bar-track-lg">
+        <div id="rmsBar" class="bar-fill-lg" style="width: 0%; background: linear-gradient(90deg, var(--rms-bar-green), var(--rms-bar-yellow));"></div>
       </div>
     </div>
-    
+
     <!-- Frequency Bands Section -->
-    <div id="freqBandsSection" style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 10px; display: none;">
-      <div style="font-size: 11px; color: #666; margin-bottom: 8px;">Frequency Bands:</div>
-      
+    <div id="freqBandsSection" class="divider" style="margin-top: 10px; padding-top: 10px; display: none;">
+      <div class="flex-between" style="margin-bottom: 8px;">
+        <div class="label">Frequency Bands:</div>
+        <div id="channelIndicator" class="channel-indicator">MONO</div>
+      </div>
+
       <!-- Bass Band -->
       <div style="margin-bottom: 6px;">
-        <div style="display: flex; justify-content: space-between; font-size: 9px; color: #777;">
+        <div class="flex-between label-sm">
           <span>Bass (0-220Hz)</span>
           <span id="bassValue">0%</span>
         </div>
-        <div style="width: 100%; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden;">
-          <div id="bassBar" style="width: 0%; height: 100%; background: #2196F3; transition: width 0.05s ease-out;"></div>
-        </div>
-      </div>
-      
-      <!-- Mid Band -->
-      <div style="margin-bottom: 6px;">
-        <div style="display: flex; justify-content: space-between; font-size: 9px; color: #777;">
-          <span>Mid (220-4400Hz)</span>
-          <span id="midValue">0%</span>
-        </div>
-        <div style="width: 100%; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden;">
-          <div id="midBar" style="width: 0%; height: 100%; background: #4CAF50; transition: width 0.05s ease-out;"></div>
-        </div>
-      </div>
-      
-      <!-- Treble Band -->
-      <div style="margin-bottom: 6px;">
-        <div style="display: flex; justify-content: space-between; font-size: 9px; color: #777;">
-          <span>Treble (4.4-22kHz)</span>
-          <span id="trebleValue">0%</span>
-        </div>
-        <div style="width: 100%; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden;">
-          <div id="trebleBar" style="width: 0%; height: 100%; background: #FF9800; transition: width 0.05s ease-out;"></div>
-        </div>
-      </div>
-      
-      <!-- Glitch Detector Status Badge -->
-      <div id="glitchSection" style="margin-top: 10px; padding: 8px; border-radius: 4px; background: #1e1e1e; color: #fff; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
-        <div>
-          Status: <span id="glitchStatus" style="font-weight: bold; color: #4CAF50;">STABLE</span>
-        </div>
-        <div>
-          Glitches: <span id="glitchCount" style="font-weight: bold; color: #fff;">0</span>
+        <div class="bar-track">
+          <div id="bassBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--bass-start), var(--bass-end));"></div>
         </div>
       </div>
 
+      <!-- Mid Band -->
+      <div style="margin-bottom: 6px;">
+        <div class="flex-between label-sm">
+          <span>Mid (220-4400Hz)</span>
+          <span id="midValue">0%</span>
+        </div>
+        <div class="bar-track">
+          <div id="midBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--mid-start), var(--mid-end));"></div>
+        </div>
+      </div>
+
+      <!-- Treble Band -->
+      <div style="margin-bottom: 6px;">
+        <div class="flex-between label-sm">
+          <span>Treble (4.4-22kHz)</span>
+          <span id="trebleValue">0%</span>
+        </div>
+        <div class="bar-track">
+          <div id="trebleBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--treble-start), var(--treble-end));"></div>
+        </div>
+      </div>
+
+      <!-- Glitch Settings -->
+      <div id="glitchSettings" class="section-tertiary" style="margin-top: 10px; display: none;">
+        <div class="flex-between" style="margin-bottom: 5px;">
+          <div class="label">Glitch Sensitivity:</div>
+          <button id="resetSensitivityBtn" class="btn-sm">Reset</button>
+        </div>
+        <div class="flex-gap">
+          <input type="range" id="thresholdSlider" min="60" max="90" value="85" step="1">
+          <span id="thresholdValue" class="text-bold" style="font-size: 11px; min-width: 35px; text-align: right;">85%</span>
+        </div>
+      </div>
+
+      <!-- Glitch Detector Status Badge -->
+      <div id="glitchSection" class="section-tertiary flex-between" style="margin-top: 10px;">
+        <div>
+          State: <span id="glitchStateDot" class="text-green" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); margin-right: 5px;"></span><span id="glitchStatus" class="text-bold text-green">STABLE</span>
+        </div>
+        <div>
+          Glitches: <span id="glitchCount" class="text-bold" style="color: var(--text-primary);">0</span>
+        </div>
+      </div>
+
+      <!-- Spectral Entropy Display -->
+      <div id="entropySection" class="section-tertiary flex-between" style="margin-top: 8px; display: none;">
+        <span class="label">Entropy:</span>
+        <span id="entropyValue" class="text-bold text-green">0.00</span>
+        <span class="label">Flat:</span>
+        <span id="flatnessValue" class="text-bold text-green">0.00</span>
+        <span class="label">State:</span>
+        <span id="entropyState" class="text-bold text-green">STABLE</span>
+      </div>
+      <div id="entropyHint" class="label-xs" style="display: none;">
+        H: voice&lt;1.0 DRIFT · &gt;1.5+noise GLITCH
+      </div>
+
       <!-- Oscilloscope Section -->
-      <div id="oscilloscopeSection" style="margin-top: 15px; padding: 10px; background: #222; border-radius: 4px; display: none;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <div style="font-size: 11px; color: #aaa;">Oscilloscope (Real-time Waveform)</div>
-          <button id="exportBtn" style="width: auto; margin: 0; padding: 4px 8px; font-size: 10px; background: #2196F3; color: white;">
-            📥 Export
-          </button>
+      <div id="oscilloscopeSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="flex-between" style="margin-bottom: 8px;">
+          <div class="label">Oscilloscope</div>
+          <div class="flex-gap">
+            <button id="freezeBtn" class="btn-sm" title="Freeze oscilloscope">❄️ Freeze</button>
+            <button id="clearOscBtn" class="btn-sm btn-clear-osc" title="Clear oscilloscope">🗑️ Clear</button>
+            <button id="zoomBtn" class="btn-sm" title="Toggle zoom">🔍 Zoom</button>
+            <button id="logScaleBtn" class="btn-sm" title="Toggle log scale">log</button>
+            <button id="exportBtn" class="btn-export-csv">CSV</button>
+            <button id="exportLogBtn" class="btn-export-log">Log</button>
+            <button id="togglePerfBtn" class="btn-sm">Perf</button>
+          </div>
         </div>
-        
-        <canvas id="oscilloscopeCanvas" width="260" height="150" style="width: 100%; height: 150px; background: #1a1a1a; border-radius: 2px; border: 1px solid #444;"></canvas>
-        
-        <div style="display: flex; justify-content: space-between; font-size: 9px; color: #888; margin-top: 5px;">
-          <span>Left Channel (Blue)</span>
-          <span>Right Channel (Red)</span>
+
+        <canvas id="oscilloscopeCanvas" width="260" height="150" class="canvas osc-canvas"></canvas>
+
+        <div class="flex-between label-xs" style="margin-top: 5px;">
+          <span class="text-blue">Left</span>
+          <span class="text-red">Right</span>
         </div>
-      </div> <!-- ✅ Закрыт oscilloscopeSection -->
-    </div> <!-- ✅ Закрыт freqBandsSection -->
-  </div> <!-- ✅ Закрыт rmsSection -->
-  
+        <div id="freezeLabel" class="label-xs" style="display: none; text-align: center; color: var(--accent-blue);">FROZEN</div>
+
+        <!-- Performance Monitor -->
+        <div id="perfMonitor" class="section-tertiary" style="margin-top: 10px; display: none;">
+          <div class="flex-between" style="margin-bottom: 4px;">
+            <div class="label-sm">Performance Monitor</div>
+            <button id="togglePerfBtn" class="btn-sm">Hide</button>
+          </div>
+          <div class="flex-row" style="font-size: 10px; gap: 8px;">
+            <div id="perfFps" class="label-sm" style="min-width: 50px;">FPS: --</div>
+            <div id="perfDrawTime" class="label-sm" style="min-width: 70px;">Draw: --</div>
+            <div id="perfQueue" class="label-sm" style="min-width: 60px;">Queue: --</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Glitch Timeline Section -->
+      <div id="timelineSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="label" style="margin-bottom: 8px;">Glitch Timeline</div>
+        <canvas id="timelineCanvas" width="260" height="60" class="canvas tim-canvas"></canvas>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="popup.js"></script>
 </body>
 </html>

@@ -3,9 +3,25 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     super();
     this.fftSize = 1024;
     this.bufferSize = this.fftSize;
-    this.inputBuffer = new Float32Array(this.bufferSize);
-    this.bufferCount = 0;
+    
+    // Двойные буферы для L/R каналов (stereo-aware)
+    this.inputBuffers = [new Float32Array(this.bufferSize), new Float32Array(this.bufferSize)];
+    this.bufferCounts = [0, 0];
+    this.waveformLeft = new Float32Array(this.bufferSize);
+    this.waveformRight = new Float32Array(this.bufferSize);
+    
+    // Pre-allocate combinedFFT buffer (buffer pooling — zero GC per frame)
+    this.combinedFFT = new Float32Array(64);
+    
+    // State per channel
+    this.leftReady = false;
+    this.rightReady = false;
+    this.leftFrameData = null;
+    this.rightFrameData = null;
+    
     this.frameCount = 0;
+    this.waveformFrameCounter = 0;
+    this.WAVEFORM_THROTTLE = 1; // send waveform every frame for debugging
     
     // Используем штатную глобальную переменную sampleRate воркета
     this.sampleRate = typeof sampleRate !== 'undefined' ? sampleRate : 44100;
@@ -15,7 +31,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       highFreqThreshold: 0.85,      // Подняли с 0.75 до 0.85 (речь не перевалит за 85%)
       minTotalEnergy: 0.04,         // Игнорируем вдохи и тихий фон (RMS < 0.04)
       debounceTimeout: 800,         // Таймаут между глитчами
-      warningThreshold: 0.70,       // Предупреждение с 70%
+      driftThreshold: 0.70,         // DRIFT (бывш. WARNING) с 70%
       requiredConsecutiveFrames: 2  // Требуем 2 кадра аномалии подряд!
     };
 
@@ -24,16 +40,31 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.glitchState = 'STABLE';
     this.glitchCount = 0;
     this.lastGlitchTime = 0;
+    
+    // Обработка сообщений из main thread (настройки чувствительности)
+    this.port.onmessage = (event) => {
+      if (event.data && event.data.type === 'SET_GITCH_CONFIG') {
+        if (typeof event.data.highFreqThreshold === 'number' &&
+            event.data.highFreqThreshold >= 0.60 &&
+            event.data.highFreqThreshold <= 0.90) {
+          this.glitchConfig.highFreqThreshold = event.data.highFreqThreshold;
+          console.log('[AudioWorklet] Sensitivity updated:', event.data.highFreqThreshold);
+        }
+      }
+    };
   }
 
   calculateRMS(buffer) {
     let sum = 0;
+    let peak = 0;
     const length = buffer.length;
     for (let i = 0; i < length; i++) {
       const sample = buffer[i];
       sum += sample * sample;
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
     }
-    return Math.sqrt(sum / length);
+    return { rms: Math.sqrt(sum / length), peak };
   }
 
   /**
@@ -55,6 +86,61 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     }
     
     return bins;
+  }
+
+  calculateBandEntropy(fftData) {
+    // 4-band entropy: Bass(0-350Hz) | Voice(350-2000Hz) | Speech(2000-6000Hz) | Noise(6000-22050Hz)
+    // Bass must include bin 0 (0-344Hz) since FFT resolution is ~344Hz/bin
+    const numBins = fftData.length;
+    const nyquist = this.sampleRate / 2;
+    const binWidth = nyquist / numBins;
+    
+    const boundaries = [350, 2000, 6000, nyquist];
+    const edges = [0, ...boundaries.slice(0, -1)];
+    
+    let bandEnergies = [];
+    let totalEnergy = 0;
+    
+    for (let b = 0; b < 4; b++) {
+      const startBin = Math.floor(edges[b] / binWidth);
+      const endBin = Math.min(numBins, Math.floor(boundaries[b] / binWidth));
+      let energy = 0;
+      for (let i = startBin; i < endBin; i++) {
+        energy += fftData[i] * fftData[i];
+      }
+      bandEnergies.push(energy);
+      totalEnergy += energy;
+    }
+    
+    if (totalEnergy < 1e-10) return 0;
+    
+    let entropy = 0;
+    for (let i = 0; i < 4; i++) {
+      if (bandEnergies[i] < 1e-10) continue;
+      const p = bandEnergies[i] / totalEnergy;
+      entropy -= p * Math.log2(p);
+    }
+    return { entropy, bandEnergies, totalEnergy };
+  }
+
+  detectSpectralFlatness(fftData) {
+    // How "flat" the spectrum is — noise has flat spectrum, voice/music has peaks
+    // Returns [0..1]: 0 = tonal (peaks), 1 = flat (noise)
+    const n = fftData.length;
+    let arithmeticMean = 0;
+    let geometricMean = 0;
+    let logSum = 0;
+    
+    for (let i = 0; i < n; i++) {
+      const power = fftData[i] * fftData[i];
+      arithmeticMean += power;
+      if (power > 1e-10) logSum += Math.log(power);
+    }
+    arithmeticMean /= n;
+    geometricMean = n > 0 ? Math.exp(logSum / n) : 0;
+    
+    if (arithmeticMean < 1e-10) return 0;
+    return geometricMean / arithmeticMean;
   }
 
   calculateFrequencyBands(fftData) {
@@ -148,21 +234,58 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Сбрасываем счетчик последовательных кадров, если всплеск прекратился
     this.consecutiveGlitchFrames = 0;
 
-    // 3. Проверка на предупреждение (WARNING)
-    if (highFreqRatio >= config.warningThreshold) {
-    this.glitchState = 'WARNING';
-    return { isGlitch: false, state: 'WARNING' };
+    // 3. Проверка на DRIFT (бывш. WARNING)
+    if (highFreqRatio >= config.driftThreshold) {
+    this.glitchState = 'DRIFT';
+    return { isGlitch: false, state: 'DRIFT' };
     }
 
     this.glitchState = 'STABLE';
     return { isGlitch: false, state: 'STABLE' };
   }
 
+  /**
+   * Обработка кадра для одного канала (L или R)
+   * Вызывается из process() когда буфер канала заполнен
+   */
+  processChannelFrame(ch) {
+    const buffer = this.inputBuffers[ch];
+    const { rms, peak } = this.calculateRMS(buffer);
+    const fft = this.calculateFFT(buffer, 64);
+    const bands = this.calculateFrequencyBands(fft);
+    const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
+    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
+    
+    // Сохраняем данные для объединения позже
+    const frameData = { rms, peak, fft, bands, highFreqAnomaly, glitchInfo };
+    
+    if (ch === 0) {
+      this.leftFrameData = frameData;
+      // Копируем waveform
+      for (let i = 0; i < buffer.length; i++) {
+        this.waveformLeft[i] = buffer[i];
+      }
+      this.leftReady = true;
+    } else {
+      this.rightFrameData = frameData;
+      // Копируем waveform
+      for (let i = 0; i < buffer.length; i++) {
+        this.waveformRight[i] = buffer[i];
+      }
+      this.rightReady = true;
+    }
+  }
+
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     const output = outputs[0];
     
-    // 1. Пробрасываем звук на динамики, чтобы он не пропадал
+    // Debug: log first few frames
+    if (this.frameCount < 3) {
+      console.log('[Worklet] Frame', this.frameCount, '- input:', input ? input.length + ' channels' : 'null', '- input[0]:', input ? input[0] ? 'exists' : 'null' : 'N/A');
+    }
+    
+    // 1. Пробрасываем звук на динамики
     if (input && output && input.length > 0) {
       for (let channel = 0; channel < input.length; channel++) {
         if (output[channel]) {
@@ -171,19 +294,32 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       }
     }
 
-    // 2. Буферизуем и анализируем сэмплы
-    if (input && input.length > 0 && input[0].length > 0) {
-      const channelData = input[0];
-      const numSamples = channelData.length;
-      
-      for (let i = 0; i < numSamples; i++) {
-        this.inputBuffer[this.bufferCount] = channelData[i];
-        this.bufferCount++;
+    // 2. Буферизация по каналам
+    // inputs[0] — массив блоков: inputs[0][0] = левый, inputs[0][1] = правый
+    if (input && input.length > 0) {
+      for (let ch = 0; ch < input.length; ch++) {
+        const channelData = input[ch];
+        const numSamples = channelData.length;
         
-        if (this.bufferCount >= this.bufferSize) {
-          this.processFrame();
-          this.bufferCount = 0;
+        for (let i = 0; i < numSamples; i++) {
+          this.inputBuffers[ch][this.bufferCounts[ch]] = channelData[i];
+          this.bufferCounts[ch]++;
+          
+          if (this.bufferCounts[ch] >= this.bufferSize) {
+            this.processChannelFrame(ch);
+            this.bufferCounts[ch] = 0;
+          }
         }
+      }
+      
+      // Отправляем фрейм как только левый канал готов (он всегда есть)
+      // Правый канал — опционален (mono input даст rightReady = false)
+      if (this.leftReady) {
+        this.processFrame();
+        this.leftReady = false;
+        this.rightReady = false;
+        this.leftFrameData = null;
+        this.rightFrameData = null;
       }
     }
     
@@ -192,27 +328,114 @@ class AudioAnalyzer extends AudioWorkletProcessor {
 
   processFrame() {
     this.frameCount++;
+    this.waveformFrameCounter++;
     
-    const rms = this.calculateRMS(this.inputBuffer);
-    const fft = this.calculateFFT(this.inputBuffer, 64);
-    const bands = this.calculateFrequencyBands(fft);
-    const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
-    const glitchInfo = this.checkGlitchState(rms, highFreqAnomaly);
+    const leftData = this.leftFrameData;
+    const rightData = this.rightFrameData;
     
-    this.port.postMessage({
+    // Combined RMS: используем максимальный peak для stereo
+    const combinedRMS = leftData ? leftData.rms : (rightData ? rightData.rms : 0);
+    const leftPeak = leftData ? leftData.peak : 0;
+    const rightPeak = rightData ? rightData.peak : 0;
+    const peakRMS = Math.max(leftPeak, rightPeak);
+    
+    // Combined FFT для entropy/flatness (сумма энергий обоих каналов)
+    // Use pre-allocated buffer (buffer pooling — zero GC pressure)
+    if (leftData && rightData) {
+      for (let i = 0; i < leftData.fft.length; i++) {
+        this.combinedFFT[i] = leftData.fft[i] + rightData.fft[i];
+      }
+    } else {
+      // Copy from left or right FFT into combinedFFT
+      const src = leftData ? leftData.fft : rightData.fft;
+      for (let i = 0; i < src.length; i++) {
+        this.combinedFFT[i] = src[i];
+      }
+    }
+    
+    // Frequency bands для combo
+    let combinedBands;
+    if (leftData && rightData) {
+      combinedBands = {
+        bass: (leftData.bands.bass + rightData.bands.bass) / 2,
+        mid: (leftData.bands.mid + rightData.bands.mid) / 2,
+        treble: (leftData.bands.treble + rightData.bands.treble) / 2
+      };
+    } else {
+      combinedBands = leftData ? leftData.bands : rightData.bands;
+    }
+    
+    // Glitch detection: максимальный highFreqAnomaly из каналов
+    const leftHFA = leftData ? leftData.highFreqAnomaly : 0;
+    const rightHFA = rightData ? rightData.highFreqAnomaly : 0;
+    const combinedHighFreqAnomaly = Math.max(leftHFA, rightHFA);
+    const glitchInfo = this.checkGlitchState(combinedRMS, combinedHighFreqAnomaly);
+    
+    // Entropy/flatness на combined FFT
+    const bandEnt = this.calculateBandEntropy(this.combinedFFT);
+    const flatness = this.detectSpectralFlatness(this.combinedFFT);
+    const entropy = bandEnt.entropy;
+    
+    // Voice: concentrated in Voice+Speech bands, NOT flat → STABLE/DRIFT
+    // Noise: spread across all 4 bands + flat spectrum → GLITCH
+    // Music: Bass/Voice dominant → STABLE
+    let entropyState = 'STABLE';
+    if (entropy > 1.5 && flatness > 0.4) {
+      entropyState = 'GLITCH';
+    } else if (entropy > 1.0 || (flatness > 0.6 && entropy > 0.8)) {
+      entropyState = 'DRIFT';
+    }
+    
+    // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
+    const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
+    
+    // Use new Float32Array() instead of Array.from() — single memcpy, no boxing
+    const spectrumCopy = new Float32Array(this.combinedFFT);
+    
+    const payload = {
       type: 'METRICS',
       timestamp: Date.now(),
       frame: this.frameCount,
-      rms: rms,
-      spectrum: Array.from(fft),
-      bass: bands.bass,
-      mid: bands.mid,
-      treble: bands.treble,
-      highFreqAnomaly: highFreqAnomaly,
+      rms: combinedRMS,
+      peakRMS: peakRMS,
+      spectrum: spectrumCopy,
+      bass: combinedBands.bass,
+      mid: combinedBands.mid,
+      treble: combinedBands.treble,
+      rmsRight: rightData ? rightData.rms : undefined,
+      bassRight: rightData ? rightData.bands.bass : undefined,
+      midRight: rightData ? rightData.bands.mid : undefined,
+      trebleRight: rightData ? rightData.bands.treble : undefined,
+      highFreqAnomaly: combinedHighFreqAnomaly,
+      entropy: entropy,
+      flatness: flatness,
+      entropyState: entropyState,
       isGlitch: glitchInfo.isGlitch,
       glitchState: glitchInfo.state,
       glitchCount: this.glitchCount
-    });
+    };
+    
+    if (includeWaveform) {
+      // Debug: log first few frames to verify waveform data
+      if (this.frameCount < 5) {
+        let sum = 0;
+        for (let i = 0; i < this.waveformLeft.length; i++) {
+          sum += Math.abs(this.waveformLeft[i]);
+        }
+        console.log(`[Worklet] Frame ${this.frameCount}: waveformLeft sum of abs = ${sum.toFixed(4)}, nonZero = ${this.waveformLeft.filter(v => Math.abs(v) > 0.001).length}/${this.waveformLeft.length}`);
+      }
+      
+      // Create a copy BEFORE serialization — serialization converts Float32Array to plain object {0: val, 1: val}
+      // Object.values() correctly extracts values in order: [val0, val1, ...]
+      payload.waveform = Object.values(this.waveformLeft);
+      if (rightData) {
+        payload.waveformRight = Object.values(this.waveformRight);
+      }
+    } else {
+      payload.waveformHold = true;
+    }
+    
+    this.port.postMessage(payload);
   }
 }
 

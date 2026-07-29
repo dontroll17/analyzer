@@ -1,44 +1,244 @@
-// Background script for Stream Sensation Analyzer
-// In MV3, stream processing is handled in popup context
+// background.js — manages offscreen document and message relay
+let offscreenReady = false;
 let isCapturing = false;
-// Handle messages from popup
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('Received message from popup:', message);
-  
-  if (message.action === 'START_CAPTURE') {
-    // Получаем capture stream через tabCapture API на уровне background
-    chrome.tabCapture.getMediaStreamId({ targetTabId: sender.tab?.id }, (streamId) => {
-      if (chrome.runtime.lastError || !streamId) {
-        sendResponse({ success: false, error: chrome.runtime.lastError?.message || 'No stream ID' });
-        return;
+let popupPort = null;
+let overlayPort = null;
+let metricsQueue = []; // In-memory buffer (drained on reconnect)
+const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
+
+async function createOffscreenDocument() {
+  if (chrome.offscreen && !offscreenReady) {
+    try {
+      await chrome.offscreen.createDocument({
+        justification: 'media_capture',
+        reasons: ['USER_MEDIA'],
+        url: 'offscreen.html'
+      });
+      offscreenReady = true;
+    } catch (err) {
+      // If already created, treat as ready
+      if (err.message?.includes('single offscreen')) {
+        offscreenReady = true;
+      } else {
+        console.error('[BG] Failed to create offscreen:', err);
+        offscreenReady = false;
       }
-      
-      // Здесь инициализируем Offscreen Document для безопасной работы с AudioContext
-      isCapturing = true;
-      sendResponse({ success: true });
+    }
+  }
+}
+
+// === Popup connection (persistent, for metrics relay) ===
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'popup-metrics') {
+    popupPort = port;
+
+    port.onDisconnect.addListener(() => {
+      popupPort = null;
     });
-    return true; // Асинхронный отклик
 
-  }
-   if (message.action === 'STOP_CAPTURE') {
-    isCapturing = false;
-    sendResponse({ success: true });
-  }
+    // Handle messages from popup
+    port.onMessage.addListener((message) => {
+      if (message && message.type === 'REQUEST_METRICS') {
+        if (isCapturing) {
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, (resp) => {
+            console.log('[BG] Offscreen response to REQ_METRICS:', resp);
+          });
+        } else {
+          console.warn('[BG] Capturing not active, cannot replay metrics');
+        }
+      }
+    });
 
-  if (message.action === 'GET_STATUS') {
-    sendResponse({ isCapturing });
+    // Drain queued metrics when popupPort reconnects (both in-memory and storage-persisted)
+    if (metricsQueue.length > 0) {
+      const toDrain = [...metricsQueue];
+      metricsQueue = [];
+      toDrain.forEach((m) => {
+        try {
+          popupPort.postMessage(m);
+        } catch (e) {
+          // popup disconnected
+        }
+      });
+    }
+    
+    // Also drain storage-persisted metrics
+    chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
+      const storageQueue = result[PERSISTENT_METRICS_KEY] || [];
+      if (storageQueue.length > 0) {
+        storageQueue.forEach((m) => {
+          try {
+            popupPort.postMessage(m);
+          } catch (e) {
+            // popup disconnected
+          }
+        });
+        // Clear storage after draining
+        chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+      }
+    });
   }
+  
+  // === Overlay connection (persistent, for overlay widget metrics) ===
+  if (port.name === 'overlay-metrics') {
+    overlayPort = port;
+    console.log('[BG] overlay-metrics port connected');
+
+    port.onDisconnect.addListener(() => {
+      console.log('[BG] overlay-metrics port disconnected');
+      overlayPort = null;
+    });
+  }
+  
+  // === Overlay toggle (from popup icon click) ===
+  if (port.name === 'overlay-toggle') {
+    port.onMessage.addListener((data) => {
+      if (data && data.type === 'TOGGLE') {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0) {
+            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }).catch(() => {});
+          }
+        });
+      }
+    });
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // === From Popup ===
+  if (message.type === 'START_CAPTURE') {
+    if (offscreenReady) {
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START' }, response => {
+        isCapturing = !!response?.ok;
+        // Notify content script to show overlay
+        if (isCapturing) {
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs.length > 0) {
+              chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }).catch(() => {});
+            }
+          });
+        }
+        sendResponse(response);
+      });
+    } else {
+      sendResponse({ ok: false, error: 'Offscreen not ready' });
+    }
+    return true;
+  }
+  
+  if (message.type === 'REQUEST_STATUS') {
+    sendResponse({ isCapturing, hasMetrics: !!metricsQueue?.length });
+    return false;
+  }
+  
+  if (message.type === 'STOP_CAPTURE') {
+    if (offscreenReady) {
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_STOP' }, response => {
+        isCapturing = false;
+        popupPort = null; // Clean up popup connection on stop
+        metricsQueue = []; // Clear in-memory queue on stop
+        chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
+        // Notify content script to hide overlay
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0) {
+            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+          }
+        });
+        sendResponse(response);
+      });
+    } else {
+      isCapturing = false;
+      popupPort = null;
+      metricsQueue = []; // Clear in-memory queue on stop
+      chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
+      // Notify content script to hide overlay
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs.length > 0) {
+          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+        }
+      });
+      sendResponse({ ok: true });
+    }
+    return true;
+  }
+  
   if (message.type === 'GET_CAPTURE_STATUS') {
-    sendResponse({ isCapturing: isCapturing });
+    sendResponse({ isCapturing });
+    return false;
   }
+  
+  // === From Offscreen ===
+  if (message.type === '_OFFSCREEN_METRICS') {
+    const d = message.data;
+    
+    // Only queue/metrics forward if capture is active
+    if (!isCapturing) {
+      sendResponse({ ok: true });
+      return false;
+    }
+    
+    // Persist to chrome.storage.local for reliability across SW wake/sleep
+    chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
+      const queue = result[PERSISTENT_METRICS_KEY] || [];
+      queue.push(d);
+      if (queue.length > 100) queue.shift();
+      chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
+    });
+    
+    // Also add to in-memory queue
+    metricsQueue.push(d);
+    if (metricsQueue.length > 100) {
+      metricsQueue.shift();
+    }
+    
+    // Forward to popup if connected
+    if (popupPort) {
+      try {
+        popupPort.postMessage({ type: 'METRICS', ...d });
+      } catch (e) {
+        // popup message failed, try to reconnect
+        popupPort = null;
+      }
+    }
+    
+    // Forward to overlay if connected
+    if (overlayPort) {
+      try {
+        overlayPort.postMessage(message.data);
+      } catch (e) {
+        console.warn('[BG] Failed to forward metrics to overlay:', e.message);
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  if (message.type === '_OFFSCREEN_ENDED') {
+    isCapturing = false;
+    if (popupPort) {
+      popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
+      popupPort.disconnect();
+      popupPort = null;
+    }
+    // Notify content script to hide overlay
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs.length > 0) {
+        chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+      }
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  return false;
 });
 
-// Handle extension installation/upgrade
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('Stream Sensation Analyzer installed/updated');
+  createOffscreenDocument();
 });
 
-// Handle extension startup
 chrome.runtime.onStartup.addListener(() => {
-  console.log('Stream Sensation Analyzer started');
+  createOffscreenDocument();
 });
+
+createOffscreenDocument();

@@ -6,14 +6,15 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "tabCapture"
+    "offscreen",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "web_accessible_resources": [
     {
-      "resources": ["dsp-engine/audio-worklet.js"],
+      "resources": ["dsp-engine/audio-worklet.js", "offscreen.html"],
       "matches": ["<all_urls>"]
     }
   ],
@@ -23,5 +24,12 @@
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "Stream Sensation Analyzer"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
