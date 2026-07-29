@@ -883,7 +883,6 @@ function exportGlitchLog() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  // Exported
 }
 
 function exportCSV() {
@@ -911,7 +910,6 @@ function exportCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  // Exported
 }
 
 function sendSensitivityToWorklet(percentage) {
@@ -1387,4 +1385,4 @@ window.addEventListener('beforeunload', async () => {
 });
 
 // Initialize background port ONCE at page load — prevents memory leaks from multiple connections
-ensureBackgroundPort();
+ensureBackgroundPort(    

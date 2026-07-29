@@ -12,7 +12,8 @@ for (let i = 0; i < FFT_SIZE; i++) {
   HANNING[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / FFT_SIZE));
 }
 
-// Precomputed bit-reversal permutation table
+// Precomputed bit-reversal permutation table for Cooley-Tukey iterative FFT
+// Enables in-place butterfly operations without temporary array allocation
 const BIT_REVERSE = new Uint16Array(FFT_SIZE);
 {
   const bits = Math.log2(FFT_SIZE); // 10
