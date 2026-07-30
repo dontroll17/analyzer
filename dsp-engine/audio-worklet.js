@@ -166,6 +166,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
     this.WAVEFORM_THROTTLE = 1; // send waveform every frame for debugging
+    this.warmupFrames = 15; // skip first N frames — buffers empty
     
     // Используем штатную глобальную переменную sampleRate воркета
     this.sampleRate = typeof sampleRate !== 'undefined' ? sampleRate : 44100;
@@ -335,17 +336,20 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       }
     }
 
-    // Use total energy per band (not average per bin) to correctly account
-    // for bandwidth differences: bass=6 bins, mid=89, treble=368 bins.
-    // Average per bin makes treble artificially low (409x dilution).
-    const totalSum = bassSum + midSum + trebleSum;
+    // Use average energy per bin (not total) — equalizes bandwidth differences:
+    // bass=6 bins, mid=89 bins, treble=368 bins.
+    // Average per bin gives perceptually balanced bands.
+    const bassAvg = bassCount > 0 ? bassSum / bassCount : 0;
+    const midAvg = midCount > 0 ? midSum / midCount : 0;
+    const trebleAvg = trebleCount > 0 ? trebleSum / trebleCount : 0;
+    const totalAvg = bassAvg + midAvg + trebleAvg;
 
-    const normalize = (val) => totalSum > 0 ? (val / totalSum) * 100 : 0;
+    const normalize = (val) => totalAvg > 0 ? (val / totalAvg) * 100 : 0;
 
     return {
-      bass: normalize(bassSum),
-      mid: normalize(midSum),
-      treble: normalize(trebleSum)
+      bass: normalize(bassAvg),
+      mid: normalize(midAvg),
+      treble: normalize(trebleAvg)
     };
   }
 
@@ -669,6 +673,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   processFrame() {
     this.frameCount++;
     this.waveformFrameCounter++;
+    
+    // Skip warmup frames — buffers empty, metrics are garbage (Infinity, 0)
+    if (this.frameCount <= this.warmupFrames) return;
     
     const leftData = this.leftFrameData;
     const rightData = this.rightFrameData;

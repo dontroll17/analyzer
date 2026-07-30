@@ -1,12 +1,26 @@
 // content.js — Overlay widget for Stream Sensation Analyzer
+// Guard: don't run on chrome:// or other non-web URLs
+if (location.href.startsWith('chrome://') || location.href.startsWith('chrome-extension://')) {
+  if (self.__logger?.forModule('content')) {
+    self.__logger.forModule('content').warn('content.js not loaded on non-web page');
+  }
+  // Prevent any content script code from running
+  throw new Error('content.js not supported on this page');
+}
+
 const log = (self.__logger?.forModule('content')) || {
   debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn('[CONTENT]', m, ...a),
   error: (m, ...a) => console.error('[CONTENT]', m, ...a),
 };
 
+console.warn('[CONTENT] content.js loaded on', location.href);
+
 let overlayVisible = false;
 let overlayPort = null;
 let captureActive = false;
+let overlayShadow = null; // shadow root for querySelector
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // Overlay state
 let overlayPosition = { x: window.innerWidth - 220, y: 20 };
@@ -14,6 +28,8 @@ let overlayMode = 'expanded'; // 'expanded' | 'compact' | 'mini'
 let isDragging = false;
 let dragOffsetX = 0;
 let dragOffsetY = 0;
+
+// (No global handlers — inline handlers are created/removed in mousedown/mouseup)
 
 // Mini badge state
 let miniBadgeEl = null;
@@ -40,6 +56,14 @@ let currentEntropy = 0;
 let currentFlatness = 0;
 let currentRTT = 0;
 let currentAudioDrops = 0;
+
+// Cached metric element references (avoid innerHTML thrashing)
+let metricGlitchEl = null;
+let metricEntropyEl = null;
+let metricFlatnessEl = null;
+let metricRttEl = null;
+let metricDropsEl = null;
+let metricEntropyStateEl = null;
 
 // Waveform data (from popup metrics)
 let leftChannelHistory = new Float32Array(1024);
@@ -68,53 +92,11 @@ const OVERLAY_MINI_SIZE = 20;
 const MINI_BADGE_HIDE_MS = 30000;
 const STORAGE_KEY = 'overlayPosition';
 const MODE_STORAGE_KEY = 'overlayMode';
+const OVERLAY_CSS_GLOBAL = `
+  #ssa-overlay:hover { box-shadow: 0 0 18px rgba(0, 229, 255, 0.3), 0 4px 12px rgba(0, 0, 0, 0.5); }
+  #ssa-overlay.dragging { cursor: grabbing; opacity: 0.9; }
+`;
 const OVERLAY_CSS = `
-  #ssa-overlay {
-    position: fixed;
-    z-index: 999999;
-    background: rgba(11, 12, 16, 0.9);
-    border: 1px solid rgba(0, 229, 255, 0.25);
-    border-radius: 6px;
-    box-shadow: 0 0 12px rgba(0, 229, 255, 0.15), 0 4px 12px rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 8px;
-    font-family: system-ui, -apple-system, sans-serif;
-    font-size: 10px;
-    color: #FFFFFF;
-    user-select: none;
-    cursor: grab;
-    min-width: 200px;
-    transition: min-width 0.2s ease, box-shadow 0.3s ease, opacity 0.3s ease;
-  }
-  #ssa-overlay:hover {
-    box-shadow: 0 0 18px rgba(0, 229, 255, 0.3), 0 4px 12px rgba(0, 0, 0, 0.5);
-  }
-  #ssa-overlay.dragging {
-    cursor: grabbing;
-    opacity: 0.9;
-  }
-  #ssa-overlay.ssa-compact {
-    min-width: auto;
-    padding: 3px 6px;
-  }
-  #ssa-overlay.ssa-expanded {
-    min-width: 200px;
-  }
-  #ssa-overlay-canvas {
-    width: 200px;
-    height: 100px;
-    border-radius: 4px;
-    margin-right: 6px;
-    background: rgba(0, 0, 0, 0.4);
-    filter: drop-shadow(0 0 3px rgba(0, 229, 255, 0.3));
-    flex-shrink: 0;
-  }
-  .ssa-compact #ssa-overlay-canvas {
-    width: 100px;
-    height: 30px;
-  }
   .ssa-mini-badge {
     display: none;
     position: fixed;
@@ -341,34 +323,46 @@ function updateOverlayDisplay(data) {
     rmsMiniBarEl.style.background = getGlitchColor(currentGlitchState);
   }
   
-  // Update metrics row (expanded mode)
-  if (overlayMode === 'expanded') {
-    const metricsEl = overlayEl.querySelector('.ssa-metrics-row');
-    if (metricsEl) {
-      metricsEl.innerHTML = `
-        <span class="ssa-metric-item">
-          <span class="ssa-metric-label">GL:</span>
-          <span class="ssa-metric-value">${currentGlitchCount}</span>
-        </span>
-        <span class="ssa-metric-item">
-          <span class="ssa-metric-label">H:</span>
-          <span class="ssa-metric-value">${currentEntropy.toFixed(2)}</span>
-        </span>
-        <span class="ssa-metric-item">
-          <span class="ssa-metric-label">F:</span>
-          <span class="ssa-metric-value">${currentFlatness.toFixed(2)}</span>
-        </span>
-        ${currentRTT > 0 ? `
-        <span class="ssa-metric-item">
-          <span class="ssa-metric-label">RTT:</span>
-          <span class="ssa-metric-value">${currentRTT.toFixed(0)}ms</span>
-        </span>` : ''}
-        ${currentAudioDrops > 0 ? `
-        <span class="ssa-metric-item">
-          <span class="ssa-metric-label">Drops:</span>
-          <span class="ssa-metric-value">${currentAudioDrops}</span>
-        </span>` : ''}
-      `;
+  // Update metrics row (expanded mode) — textContent instead of innerHTML
+  if (overlayMode === 'expanded' || overlayMode === 'sidebar') {
+    if (metricGlitchEl) metricGlitchEl.textContent = currentGlitchCount;
+    if (metricEntropyEl) metricEntropyEl.textContent = currentEntropy.toFixed(2);
+    if (metricFlatnessEl) metricFlatnessEl.textContent = currentFlatness.toFixed(2);
+    
+    // RTT (dynamic)
+    if (metricRttEl) {
+      if (currentRTT > 0) {
+        // Reconstruct the element (label is static)
+        const parent = metricRttEl.parentElement;
+        if (parent) parent.style.display = '';
+        metricRttEl.textContent = currentRTT.toFixed(0) + 'ms';
+      } else {
+        const parent = metricRttEl.parentElement;
+        if (parent) parent.style.display = 'none';
+      }
+    }
+    
+    // Audio drops (dynamic)
+    if (metricDropsEl) {
+      if (currentAudioDrops > 0) {
+        const parent = metricDropsEl.parentElement;
+        if (parent) parent.style.display = '';
+        metricDropsEl.textContent = currentAudioDrops;
+      } else {
+        const parent = metricDropsEl.parentElement;
+        if (parent) parent.style.display = 'none';
+      }
+    }
+    
+    // Entropy state (sidebar mode)
+    if (metricEntropyStateEl && overlayMode === 'sidebar' && currentEntropy > 0) {
+      const parent = metricEntropyStateEl.parentElement;
+      if (parent) parent.style.display = '';
+      metricEntropyStateEl.textContent = currentGlitchState;
+      metricEntropyStateEl.style.color = getGlitchColor(currentGlitchState);
+    } else if (metricEntropyStateEl) {
+      const parent = metricEntropyStateEl.parentElement;
+      if (parent) parent.style.display = 'none';
     }
   }
   
@@ -384,11 +378,14 @@ function updateMiniBadge() {
   miniBadgeEl.style.background = color;
   miniBadgeEl.style.boxShadow = `0 0 8px ${color}80`;
   
-  // Position badge at bottom-right of overlay
+  // Position badge at bottom-right of overlay (use fixed positioning relative to viewport)
   if (overlayEl) {
     const rect = overlayEl.getBoundingClientRect();
-    miniBadgeEl.style.right = (window.innerWidth - rect.right - 5) + 'px';
+    miniBadgeEl.style.position = 'fixed';
+    miniBadgeEl.style.right = (window.innerWidth - rect.right + 5) + 'px';
     miniBadgeEl.style.bottom = (window.innerHeight - rect.bottom + 5) + 'px';
+    miniBadgeEl.style.left = '';
+    miniBadgeEl.style.top = '';
   }
 }
 
@@ -417,9 +414,23 @@ function scheduleMiniBadgeHide() {
   }, MINI_BADGE_HIDE_MS);
 }
 
+// Update mode button title
+function updateModeBtn() {
+  if (!overlayShadow) return;
+  const btn = overlayShadow.getElementById('ssa-mode-btn');
+  if (!btn) return;
+  const titles = {
+    expanded: 'Switch to Compact',
+    compact: 'Switch to Sidebar',
+    sidebar: 'Switch to Mini',
+    mini: 'Show Overlay'
+  };
+  btn.title = titles[overlayMode] || 'Toggle mode';
+}
+
 // Cycle through overlay modes
 function cycleOverlayMode() {
-  const modes = ['expanded', 'compact', 'mini'];
+  const modes = ['expanded', 'compact', 'sidebar', 'mini'];
   const currentIndex = modes.indexOf(overlayMode);
   overlayMode = modes[(currentIndex + 1) % modes.length];
   
@@ -427,6 +438,7 @@ function cycleOverlayMode() {
   chrome.storage.local.set({ [MODE_STORAGE_KEY]: overlayMode });
   
   applyOverlayMode();
+  updateModeBtn();
 }
 
 // Apply overlay mode to DOM
@@ -434,23 +446,59 @@ function applyOverlayMode() {
   if (!overlayEl) return;
   
   // Remove all mode classes
-  overlayEl.classList.remove('ssa-expanded', 'ssa-compact');
+  overlayEl.classList.remove('ssa-expanded', 'ssa-compact', 'ssa-sidebar');
   
   switch (overlayMode) {
     case 'expanded':
       overlayEl.classList.add('ssa-expanded');
       overlayEl.style.display = 'flex';
+      overlayEl.style.width = '';
+      overlayEl.style.height = '';
+      overlayEl.style.flexDirection = '';
+      overlayEl.style.minWidth = '200px';
+      overlayEl.style.top = '';
+      overlayEl.style.left = '';
+      overlayEl.style.borderRadius = '6px';
+      overlayEl.style.borderLeft = '';
+      overlayEl.style.borderRight = '';
       if (miniBadgeEl) miniBadgeEl.style.display = 'none';
       break;
       
     case 'compact':
       overlayEl.classList.add('ssa-compact');
       overlayEl.style.display = 'flex';
+      overlayEl.style.width = '';
+      overlayEl.style.height = '';
+      overlayEl.style.top = '';
+      overlayEl.style.left = '';
+      if (miniBadgeEl) miniBadgeEl.style.display = 'none';
+      break;
+      
+    case 'sidebar':
+      overlayEl.classList.add('ssa-sidebar');
+      overlayEl.style.display = 'flex';
+      overlayEl.style.flexDirection = 'column';
+      overlayEl.style.width = '240px';
+      overlayEl.style.minWidth = '240px';
+      overlayEl.style.height = 'calc(100vh - 40px)';
+      // Position sidebar on the left side
+      overlayPosition.x = 0;
+      overlayPosition.y = 20;
+      overlayEl.style.left = '0px';
+      overlayEl.style.top = '20px';
+      overlayEl.style.borderRadius = '0';
+      overlayEl.style.borderLeft = 'none';
+      overlayEl.style.borderRight = '1px solid rgba(0,229,255,0.25)';
+      savePosition();
       if (miniBadgeEl) miniBadgeEl.style.display = 'none';
       break;
       
     case 'mini':
       overlayEl.style.display = 'none';
+      overlayEl.style.width = '';
+      overlayEl.style.height = '';
+      overlayEl.style.top = '';
+      overlayEl.style.left = '';
       if (miniBadgeEl) {
         miniBadgeEl.style.display = 'block';
         updateMiniBadge();
@@ -459,41 +507,70 @@ function applyOverlayMode() {
       break;
   }
   
-  // Toggle visibility of overlay elements based on mode
-  const canvas = overlayEl.querySelector('#ssa-overlay-canvas');
-  const statusText = overlayEl.querySelector('#ssa-status-text');
-  const rmsValue = overlayEl.querySelector('#ssa-rms-value');
-  const metricsRow = overlayEl.querySelector('.ssa-metrics-row');
+  // Toggle visibility of overlay elements based on mode — shadow DOM
+  const shadow = overlayEl.shadowRoot;
+  const canvas = shadow.getElementById('ssa-overlay-canvas');
+  const statusText = shadow.getElementById('ssa-status-text');
+  const rmsValue = shadow.getElementById('ssa-rms-value');
+  const metricsRow = shadow.querySelector('.ssa-metrics-row');
   
   if (overlayMode === 'compact') {
-    if (canvas) canvas.style.width = '100px';
+    if (canvas) {
+      canvas.style.width = '100px';
+      canvas.style.height = '30px';
+    }
     if (statusText) statusText.style.display = 'none';
     if (rmsValue) rmsValue.style.display = 'none';
     if (metricsRow) metricsRow.style.display = 'none';
+  } else if (overlayMode === 'sidebar') {
+    if (canvas) {
+      canvas.style.width = '';
+      canvas.style.height = '';
+    }
+    if (statusText) statusText.style.display = '';
+    if (rmsValue) rmsValue.style.display = '';
+    if (metricsRow) metricsRow.style.display = '';
   } else {
-    if (canvas) canvas.style.width = '';
+    // expanded
+    if (canvas) {
+      canvas.style.width = '';
+      canvas.style.height = '';
+    }
     if (statusText) statusText.style.display = '';
     if (rmsValue) rmsValue.style.display = '';
     if (metricsRow) metricsRow.style.display = '';
   }
+  
+  // Apply canvas size based on mode
+  if (canvas) {
+    if (overlayMode === 'sidebar') {
+      canvas.id = 'ssa-sidebar-canvas';
+      canvas.width = 220;
+      canvas.height = 120;
+    } else if (overlayMode === 'compact') {
+      canvas.id = 'ssa-overlay-canvas';
+      canvas.width = 100;
+      canvas.height = 30;
+    } else {
+      canvas.id = 'ssa-overlay-canvas';
+      canvas.width = 120;
+      canvas.height = 30;
+    }
+    // Re-init context after resize
+    ctx = canvas.getContext('2d');
+  }
 }
 
-// Inject overlay widget into the page
+// Inject overlay widget into the page using Shadow DOM (site cannot destroy it)
 function injectOverlay() {
   if (overlayEl) return; // Already injected
   
   // Load saved mode
   chrome.storage.local.get([MODE_STORAGE_KEY], (result) => {
-    if (result[MODE_STORAGE_KEY] && ['expanded', 'compact', 'mini'].includes(result[MODE_STORAGE_KEY])) {
+    if (result[MODE_STORAGE_KEY] && ['expanded', 'compact', 'sidebar', 'mini'].includes(result[MODE_STORAGE_KEY])) {
       overlayMode = result[MODE_STORAGE_KEY];
     }
   });
-  
-  // Inject CSS
-  const styleEl = document.createElement('style');
-  styleEl.id = 'ssa-overlay-style';
-  styleEl.textContent = OVERLAY_CSS;
-  document.head.appendChild(styleEl);
   
   // Create overlay element
   overlayEl = document.createElement('div');
@@ -502,40 +579,84 @@ function injectOverlay() {
   overlayEl.style.top = overlayPosition.y + 'px';
   overlayEl.classList.add('ssa-' + overlayMode);
   
-  overlayEl.innerHTML = `
-    <canvas id="ssa-overlay-canvas" width="120" height="30"></canvas>
-    <div class="ssa-status-dot" id="ssa-status-dot"></div>
-    <span class="ssa-status-text" id="ssa-status-text">STABLE</span>
-    <span class="ssa-rms-value" id="ssa-rms-value">RMS: 0.000</span>
-    <div class="ssa-rms-mini-bar">
-      <div class="ssa-rms-mini-bar-fill" id="ssa-rms-mini-bar-fill" style="width: 0%;"></div>
-    </div>
-    <div class="ssa-metrics-row"></div>
-    <div class="ssa-controls">
-      <button class="ssa-btn" id="ssa-mode-btn" title="Toggle mode">⊞</button>
-      <button class="ssa-btn" id="ssa-pin-btn" title="Pin overlay">📌</button>
-      <button class="ssa-btn" id="ssa-close-btn" title="Close">X</button>
+  // Use Shadow DOM — site DOM manipulation cannot destroy our content
+  const shadow = overlayEl.attachShadow({ mode: 'open' });
+  overlayShadow = shadow;
+  
+  // Inject global CSS for shadow host (:hover, :dragging)
+  const globalStyle = document.createElement('style');
+  globalStyle.id = 'ssa-overlay-style';
+  globalStyle.textContent = OVERLAY_CSS_GLOBAL;
+  document.head.appendChild(globalStyle);
+  
+  // Inject shadow-internal CSS
+  const styleEl = document.createElement('style');
+  styleEl.textContent = OVERLAY_CSS;
+  shadow.appendChild(styleEl);
+  
+  // Create overlay content inside shadow root
+  shadow.innerHTML = `
+    <div id="ssa-host" style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;">
+      <canvas id="ssa-overlay-canvas" width="120" height="30"></canvas>
+      <div class="ssa-status-dot" id="ssa-status-dot"></div>
+      <span class="ssa-status-text" id="ssa-status-text">STABLE</span>
+      <span class="ssa-rms-value" id="ssa-rms-value">RMS: 0.000</span>
+      <div class="ssa-rms-mini-bar">
+        <div class="ssa-rms-mini-bar-fill" id="ssa-rms-mini-bar-fill" style="width: 0%;"></div>
+      </div>
+      <div class="ssa-metrics-row">
+        <span class="ssa-metric-item"><span class="ssa-metric-label">GL:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item"><span class="ssa-metric-label">H:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item"><span class="ssa-metric-label">F:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">RTT:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">Drops:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">State:</span><span class="ssa-metric-value"></span></span>
+      </div>
+      <div class="ssa-controls">
+        <button class="ssa-btn" id="ssa-mode-btn" title="Toggle mode">⊞</button>
+        <button class="ssa-btn" id="ssa-pin-btn" title="Pin overlay">📌</button>
+        <button class="ssa-btn" id="ssa-close-btn" title="Close">X</button>
+      </div>
     </div>
   `;
   
   document.body.appendChild(overlayEl);
   
-  // Cache element references
-  canvasEl = document.getElementById('ssa-overlay-canvas');
-  ctx = canvasEl ? canvasEl.getContext('2d') : null;
-  statusDotEl = document.getElementById('ssa-status-dot');
-  statusTextEl = document.getElementById('ssa-status-text');
-  rmsValueEl = document.getElementById('ssa-rms-value');
-  rmsMiniBarEl = document.getElementById('ssa-rms-mini-bar-fill');
-  modeToggleBtnEl = document.getElementById('ssa-mode-btn');
-  pinBtnEl = document.getElementById('ssa-pin-btn');
-  closeBtnEl = document.getElementById('ssa-close-btn');
+  // Apply shadow-host styles directly (was previously in CSS)
+  overlayEl.style.cssText = `position:fixed;z-index:999999;background:rgba(11,12,16,0.9);border:1px solid rgba(0,229,255,0.25);border-radius:6px;box-shadow:0 0 12px rgba(0,229,255,0.15),0 4px 12px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:space-between;padding:4px 8px;font-family:system-ui,-apple-system,sans-serif;font-size:10px;color:#fff;user-select:none;cursor:grab;min-width:200px;transition:min-width 0.2s ease,box-shadow 0.3s ease,opacity 0.3s ease;left:${overlayPosition.x}px;top:${overlayPosition.y}px;`;
   
-  // Create mini badge
-  miniBadgeEl = document.createElement('div');
-  miniBadgeEl.id = 'ssa-mini-badge';
-  miniBadgeEl.className = 'ssa-mini-badge';
-  document.body.appendChild(miniBadgeEl);
+  // Cache element references — they are inside shadow root!
+  const host = shadow.getElementById('ssa-host');
+  canvasEl = shadow.getElementById('ssa-overlay-canvas');
+  ctx = canvasEl ? canvasEl.getContext('2d') : null;
+  statusDotEl = shadow.getElementById('ssa-status-dot');
+  statusTextEl = shadow.getElementById('ssa-status-text');
+  rmsValueEl = shadow.getElementById('ssa-rms-value');
+  rmsMiniBarEl = shadow.getElementById('ssa-rms-mini-bar-fill');
+  modeToggleBtnEl = shadow.getElementById('ssa-mode-btn');
+  pinBtnEl = shadow.getElementById('ssa-pin-btn');
+  closeBtnEl = shadow.getElementById('ssa-close-btn');
+  
+  // Cache metric value elements for textContent updates (no innerHTML)
+  const metricsRowEl = shadow.querySelector('.ssa-metrics-row');
+  if (metricsRowEl && !metricGlitchEl) {
+    const spans = metricsRowEl.querySelectorAll('.ssa-metric-value');
+    if (spans.length >= 3) {
+      metricGlitchEl = spans[0];
+      metricEntropyEl = spans[1];
+      metricFlatnessEl = spans[2];
+      if (spans[3]) metricRttEl = spans[3];
+      if (spans[4]) metricDropsEl = spans[4];
+      if (spans[5]) metricEntropyStateEl = spans[5];
+    }
+  }
+  
+  // Create mini badge — also in shadow DOM
+  const miniBadgeShadow = document.createElement('div');
+  miniBadgeShadow.id = 'ssa-mini-badge';
+  miniBadgeShadow.className = 'ssa-mini-badge';
+  shadow.appendChild(miniBadgeShadow);
+  miniBadgeEl = miniBadgeShadow;
   
   // Mini badge click → show overlay
   miniBadgeEl.addEventListener('click', () => {
@@ -550,43 +671,51 @@ function injectOverlay() {
   // Mini badge hover → show temporarily
   miniBadgeEl.addEventListener('mouseenter', showMiniBadge);
   
-  // Drag handling
+  // Drag handling — shadow root, use composed path
   overlayEl.addEventListener('mousedown', (e) => {
-    // Don't drag when clicking controls
-    if (e.target.closest('.ssa-controls')) return;
+    // Don't drag when clicking controls or when pinned
+    const path = e.composedPath();
+    const target = path[0];
+    if (target.closest && target.closest('.ssa-controls')) return;
+    if (isPinned) return;
     
     isDragging = true;
     dragOffsetX = e.clientX - overlayPosition.x;
     dragOffsetY = e.clientY - overlayPosition.y;
     overlayEl.classList.add('dragging');
     e.preventDefault();
-  });
-  
-  document.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
     
-    overlayPosition.x = e.clientX - dragOffsetX;
-    overlayPosition.y = e.clientY - dragOffsetY;
+    // Inline handlers attached here, removed on mouseup — prevents duplicates
+    const onMouseMove = (moveEvent) => {
+      if (!isDragging) return;
+      
+      overlayPosition.x = moveEvent.clientX - dragOffsetX;
+      overlayPosition.y = moveEvent.clientY - dragOffsetY;
+      
+      // Clamp to viewport
+      overlayPosition.x = Math.max(0, Math.min(window.innerWidth - OVERLAY_WIDTH, overlayPosition.x));
+      overlayPosition.y = Math.max(0, Math.min(window.innerHeight - OVERLAY_HEIGHT, overlayPosition.y));
+      
+      overlayEl.style.left = overlayPosition.x + 'px';
+      overlayEl.style.top = overlayPosition.y + 'px';
+      
+      // Update mini badge position
+      if (overlayMode === 'mini') updateMiniBadge();
+      
+      savePositionDebounce();
+    };
     
-    // Clamp to viewport
-    overlayPosition.x = Math.max(0, Math.min(window.innerWidth - OVERLAY_WIDTH, overlayPosition.x));
-    overlayPosition.y = Math.max(0, Math.min(window.innerHeight - OVERLAY_HEIGHT, overlayPosition.y));
-    
-    overlayEl.style.left = overlayPosition.x + 'px';
-    overlayEl.style.top = overlayPosition.y + 'px';
-    
-    // Update mini badge position
-    if (overlayMode === 'mini') updateMiniBadge();
-    
-    savePositionDebounce();
-  });
-  
-  document.addEventListener('mouseup', () => {
-    if (isDragging) {
+    const onMouseUp = () => {
+      if (!isDragging) return;
       isDragging = false;
       overlayEl.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
       savePosition();
-    }
+    };
+    
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
   });
   
   // Mode toggle button
@@ -597,7 +726,7 @@ function injectOverlay() {
     });
   }
   
-  // Pin button
+  // Pin button — locks overlay position (prevents drag)
   let isPinned = false;
   if (pinBtnEl) {
     pinBtnEl.addEventListener('click', (e) => {
@@ -605,6 +734,8 @@ function injectOverlay() {
       isPinned = !isPinned;
       pinBtnEl.textContent = isPinned ? '📍' : '📌';
       pinBtnEl.style.background = isPinned ? 'rgba(0, 229, 255, 0.3)' : '';
+      overlayEl.style.cursor = isPinned ? 'default' : 'grab';
+      overlayEl.style.opacity = isPinned ? '1' : '0.9';
     });
   }
   
@@ -624,6 +755,7 @@ function savePosition() {
 
 // Show overlay
 function showOverlay() {
+  console.warn('[CONTENT] showOverlay() called');
   if (overlayVisible) return;
   
   loadPosition();
@@ -632,7 +764,11 @@ function showOverlay() {
   
   applyOverlayMode();
   
-  // Reset to saved position
+  // Apply position based on mode
+  if (overlayMode === 'sidebar') {
+    overlayPosition.x = 0;
+    overlayPosition.y = 20;
+  }
   overlayEl.style.left = overlayPosition.x + 'px';
   overlayEl.style.top = overlayPosition.y + 'px';
   
@@ -693,38 +829,63 @@ function disconnectMetrics() {
 
 // Connect to background for metrics
 function connectToMetrics() {
+  // Guard: extension context invalidated (SW restart / extension update)
+  if (!chrome.runtime?.id) {
+    hideOverlay();
+    return;
+  }
+  
   if (overlayPort) return;
   
-  overlayPort = chrome.runtime.connect({ name: 'overlay-metrics' });
+  try {
+    overlayPort = chrome.runtime.connect({ name: 'overlay-metrics' });
+  } catch (e) {
+    // Context invalidated during connect
+    hideOverlay();
+    return;
+  }
+  
+  console.warn('[CONTENT] connectToMetrics()');
+  console.warn('[CONTENT] overlayPort connected');
   
   overlayPort.onMessage.addListener((data) => {
     if (data && data.type === 'METRICS') {
+      reconnectAttempts = 0; // Reset on successful message
+      console.warn('[CONTENT] Received METRICS:', data.glitchState, data.rms?.toFixed(3));
       updateOverlayDisplay(data);
     }
   });
   
   overlayPort.onDisconnect.addListener(() => {
     overlayPort = null;
-    // Reconnect after 2s if overlay is still visible
-    if (overlayVisible) {
+    
+    if (overlayVisible && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      const delay = 2000 * reconnectAttempts; // Exponential backoff
       setTimeout(() => {
         if (overlayVisible) {
           connectToMetrics();
         }
-      }, 2000);
+      }, delay);
+    } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      log.error('Max reconnect attempts reached, hiding overlay');
+      hideOverlay();
     }
   });
 }
 
 // Listen for messages from background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.warn('[CONTENT] onMessage received:', message?.type, 'from:', sender?.id);
   if (message.type === '_SSA_SHOW_OVERLAY') {
+    console.warn('[CONTENT] _SSA_SHOW_OVERLAY received');
     captureActive = true;
     showOverlay();
     sendResponse({ ok: true });
   }
   
   if (message.type === '_SSA_HIDE_OVERLAY') {
+    console.warn('[CONTENT] _SSA_HIDE_OVERLAY received');
     captureActive = false;
     hideOverlay();
     sendResponse({ ok: true });

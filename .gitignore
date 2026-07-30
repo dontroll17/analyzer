@@ -30,3 +30,9 @@ build/
 
 # Backup files
 *~
+
+# Test files (not part of extension)
+__tests__/
+jest.config.js
+jest.setup.js
+babelrc

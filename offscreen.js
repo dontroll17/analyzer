@@ -4,6 +4,21 @@ const log = (self.__logger?.forModule('offscreen')) || {
   error: (m, ...a) => console.error('[OFFSCREEN]', m, ...a),
 };
 
+// Centralized audio chain state (replaces window._ssaX to prevent race conditions)
+const audioChain = {
+  compressor: null,
+  hpf: null,
+  lpf: null,
+  peaking: null,
+  delay: null,
+  waveShaper: null,
+  effectGain: null,
+  bypassGain: null,
+  source: null,
+  worklet: null,
+  ready: false
+};
+
 let mediaStream = null;
 let _metricsCounter = 0;
 let audioContext = null;
@@ -46,11 +61,17 @@ const MAX_SAFE_SEND_LOGS = 5; // Log first N errors, then silence
 let _safeSendErrorCount = 0;
 let _safeSendLastLogged = 0;
 
+// Track per-track ended listeners for proper cleanup (prevent memory leaks)
+const _trackEndedListeners = new Map(); // track -> listenerFn mapping
+
+// Reference to audioContext statechange listener for cleanup
+let _contextStateChangeHandler = null;
+
 // C.3.2: Update compressor settings
 function _updateCompressor(params) {
-  if (!window._ssaCompressor) return;
+  if (!audioChain.ready || !audioChain.compressor) return;
   
-  const comp = window._ssaCompressor;
+  const comp = audioChain.compressor;
   if (params.enabled !== undefined) {
     _effectsState.compressor.enabled = params.enabled;
     // Toggle: ratio=1 (bypass) vs ratio=params.ratio (active)
@@ -108,9 +129,9 @@ function createLimiterCurve(thresholdDb, oversampleRate) {
 
 // C.3.3: Update limiter settings
 function _updateLimiter(params) {
-  if (!window._ssaWaveShaper) return;
+  if (!audioChain.ready || !audioChain.waveShaper) return;
   
-  const ws = window._ssaWaveShaper;
+  const ws = audioChain.waveShaper;
   const threshold = params.threshold !== undefined ? params.threshold : _effectsState.limiter.threshold;
   
   if (params.enabled !== undefined) _effectsState.limiter.enabled = params.enabled;
@@ -133,11 +154,11 @@ function _updateLimiter(params) {
 
 // C.3.4: Parametric EQ update
 function _updateEQ(params) {
-  if (!window._ssaHPF || !window._ssaLPF || !window._ssaPeaking) return;
+  if (!audioChain.ready || !audioChain.hpf || !audioChain.lpf || !audioChain.peaking) return;
   
-  const hpf = window._ssaHPF;
-  const lpf = window._ssaLPF;
-  const peak = window._ssaPeaking;
+  const hpf = audioChain.hpf;
+  const lpf = audioChain.lpf;
+  const peak = audioChain.peaking;
   
   if (params.enabled !== undefined) {
     _effectsState.eq.enabled = params.enabled;
@@ -184,7 +205,7 @@ function _updateEQ(params) {
 
 // C.3.5: Delay update
 function _updateDelay(params) {
-  if (!window._ssaDelay) return;
+  if (!audioChain.ready || !audioChain.delay) return;
   
   if (params.enabled !== undefined) {
     _effectsState.delay.enabled = params.enabled;
@@ -192,19 +213,19 @@ function _updateDelay(params) {
   
   if (params.delayTime !== undefined) {
     // popup sends delayTime in ms (0-1000), delay-processor expects seconds
-    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', delayTime: params.delayTime / 1000 });
+    audioChain.delay.port.postMessage({ type: 'SET_DELAY', delayTime: params.delayTime / 1000 });
     _effectsState.delay.delayTime = params.delayTime;
   }
   if (params.feedback !== undefined) {
-    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', feedback: params.feedback / 100 });
+    audioChain.delay.port.postMessage({ type: 'SET_DELAY', feedback: params.feedback / 100 });
     _effectsState.delay.feedback = params.feedback;
   }
   if (params.mix !== undefined) {
-    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', mix: params.mix / 100 });
+    audioChain.delay.port.postMessage({ type: 'SET_DELAY', mix: params.mix / 100 });
     _effectsState.delay.mix = params.mix;
     // mix=0 = bypass, mix>0 = active
     const actualMix = _effectsState.delay.enabled ? params.mix / 100 : 0;
-    window._ssaDelay.port.postMessage({ type: 'SET_DELAY', mix: actualMix });
+    audioChain.delay.port.postMessage({ type: 'SET_DELAY', mix: actualMix });
   }
 }
 
@@ -225,7 +246,8 @@ function safeSendMessage(msg) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_START') {
     currentCaptureSource = message.captureSource || 'tab';
-    startCapture(currentCaptureSource).then(sendResponse);
+    const streamId = message.tabStreamId || null;
+    startCapture(currentCaptureSource, streamId).then(sendResponse);
     return true;
   }
   
@@ -270,7 +292,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture(source) {
+async function startCapture(source, tabStreamId) {
   try {
     if (mediaStream) return { ok: true, alreadyActive: true };
     
@@ -306,17 +328,28 @@ async function startCapture(source) {
       
       case 'combined': {
         // Tab audio + microphone - need to capture both
-        const tabStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
+        // For combined mode, we still need to get tab stream ID first
+        if (!tabStreamId) {
+          safeSendMessage({
+            type: '_OFFSCREEN_ERROR',
+            error: 'Tab stream ID is required for combined mode'
+          });
+          cleanup();
+          return { ok: false, error: 'missing_tab_stream_id' };
+        }
+        
+        // Check if tab has audio tracks (can't easily check without starting)
+        // Use getUserMedia with tab source
+        const tabStream = await navigator.mediaDevices.getUserMedia({
           audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 44100
-          }
+            mandatory: {
+              chromeMediaSource: 'tab',
+              chromeMediaSourceId: tabStreamId
+            }
+          },
+          video: false
         });
         
-        // Check if tab has audio tracks
         const tabAudioTracks = tabStream.getAudioTracks();
         if (tabAudioTracks.length === 0) {
           safeSendMessage({
@@ -351,17 +384,31 @@ async function startCapture(source) {
       
       case 'tab':
       default: {
-        // Tab audio only (default)
+        // Tab audio only (default) — use pre-obtained streamId from popup
+        if (!tabStreamId) {
+          safeSendMessage({
+            type: '_OFFSCREEN_ERROR',
+            error: 'Tab stream ID is required for tab capture'
+          });
+          cleanup();
+          return { ok: false, error: 'missing_tab_stream_id' };
+        }
+        
+        // Use getUserMedia with the tab source ID (no getDisplayMedia call needed)
         streamOptions = {
-          video: true,
           audio: {
+            mandatory: {
+              chromeMediaSource: 'tab',
+              chromeMediaSourceId: tabStreamId
+            },
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
             sampleRate: 44100
-          }
+          },
+          video: false
         };
-        mediaStream = await navigator.mediaDevices.getDisplayMedia(streamOptions);
+        mediaStream = await navigator.mediaDevices.getUserMedia(streamOptions);
         break;
       }
     }
@@ -435,29 +482,33 @@ async function startCapture(source) {
     const bypassGainNode = audioContext.createGain();
     bypassGainNode.gain.value = 1;
     
-    // Save effect references at module level
-    window._ssaCompressor = compressorNode;
-    window._ssaHPF = hpfNode;
-    window._ssaLPF = lpfNode;
-    window._ssaPeaking = peakingNode;
-    window._ssaDelay = delayNode;
-    window._ssaWaveShaper = waveShaperNode;
-    window._ssaEffectGainNode = effectGainNode;
-    window._ssaBypassGainNode = bypassGainNode;
-    window._ssaGainNode = bypassGainNode; // legacy: point to bypass
-    window._ssaEffectGainNode = effectGainNode;
-    window._ssaAudioSource = audioSource;
+    // Store effect references in centralized audioChain object
+    audioChain.compressor = compressorNode;
+    audioChain.hpf = hpfNode;
+    audioChain.lpf = lpfNode;
+    audioChain.peaking = peakingNode;
+    audioChain.delay = delayNode;
+    audioChain.waveShaper = waveShaperNode;
+    audioChain.effectGain = effectGainNode;
+    audioChain.bypassGain = bypassGainNode;
+    audioChain.source = audioSource;
     
-    // Effect chain (always connected internally)
-    // routing: source → compressor → hpf → lpf → peaking → delay → waveShaper → worklet
+    // Effects chain (internal node connections — all bypassed by default)
     compressorNode.connect(hpfNode);
     hpfNode.connect(lpfNode);
     lpfNode.connect(peakingNode);
     peakingNode.connect(delayNode);
     delayNode.connect(waveShaperNode);
-    waveShaperNode.connect(workletNode);
+    waveShaperNode.connect(effectGainNode);
     
-    // Default: source → compressor → ... → worklet (all bypassed via parameter defaults)
+    // Bypass path: source → bypassGain → worklet
+    bypassGainNode.connect(workletNode);
+    
+    // Effects path: waveShaper → effectGain → worklet
+    effectGainNode.connect(workletNode);
+    
+    // Source connects to both bypass and effects chain
+    audioSource.connect(bypassGainNode);
     audioSource.connect(compressorNode);
     
     // Legacy toggle (kept for backward compat)
@@ -467,15 +518,18 @@ async function startCapture(source) {
     
     // Save reference at module level so DSP timer can access it
     // (let declarations in async function are NOT visible to module-level vars)
-    window._ssaWorkletNode = workletNode;
+    audioChain.worklet = workletNode;
     
     // Save reference in closure to prevent race with cleanup()
     const savedAudioContext = audioContext;
     
+    // Mark audio chain as ready (prevents race in effect update handlers)
+    audioChain.ready = true;
+    
     // Start DSP time polling: request DSP time from worklet every 2s
     _dspTimeTimer = setInterval(() => {
-      if (!workletNode || !workletNode.port) return;
-      workletNode.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+      if (!audioChain.worklet || !audioChain.worklet.port) return;
+      audioChain.worklet.port.postMessage({ type: 'REQUEST_DSP_TIME' });
     }, 2000);
     
     // Drop detection: poll MediaStream active state (reliable in MV3)
@@ -558,7 +612,7 @@ async function startCapture(source) {
     
     // Monitor AudioContext state for drops (secondary to stream polling)
     // statechange is unreliable in offscreen docs but may still fire in some cases
-    audioContext.addEventListener('statechange', () => {
+    _contextStateChangeHandler = () => {
       const ctx = savedAudioContext;
       if (!ctx || ctx.state === 'closed') return;
       const newState = ctx.state;
@@ -592,14 +646,17 @@ async function startCapture(source) {
       }
       
       lastContextState = newState;
-    });
+    };
+    audioContext.addEventListener('statechange', _contextStateChangeHandler);
     
     // Fallback: track 'ended' events (triggers full stop)
     mediaStream.getTracks().forEach(track => {
-      track.addEventListener('ended', () => {
+      const endedHandler = () => {
         log.info(`Track ended: ${track.kind}/${track.label}`);
         scheduleCleanup();
-      });
+      };
+      _trackEndedListeners.set(track, endedHandler);
+      track.addEventListener('ended', endedHandler);
     });
     
     return { ok: true };
@@ -659,29 +716,54 @@ function cleanup() {
     _streamMonitorTimer = null;
   }
   
-  // Clear worklet reference to prevent leaks
-  window._ssaWorkletNode = null;
-  
-  // Clear effects chain references — reset to clean bypass state
-  if (window._ssaAudioSource) {
+  // Disconnect source from all nodes before cleanup
+  if (audioChain.source) {
     try {
-      window._ssaAudioSource.disconnect();
-      if (window._ssaBypassGainNode) window._ssaAudioSource.connect(window._ssaBypassGainNode);
+      audioChain.source.disconnect();
     } catch (_) {}
   }
   
+  // Clear effects chain references — reset to clean bypass state
+  audioChain.compressor = null;
+  audioChain.hpf = null;
+  audioChain.lpf = null;
+  audioChain.peaking = null;
+  if (audioChain.delay) {
+    try { audioChain.delay.disconnect(); } catch (_) {}
+    audioChain.delay = null;
+  }
+  audioChain.waveShaper = null;
+  audioChain.bypassGain = null;
+  audioChain.effectGain = null;
+  audioChain.source = null;
+  audioChain.worklet = null;
+  audioChain.ready = false;
+  
+  // Clear legacy references too (for backward compat)
+  window._ssaWorkletNode = null;
   window._ssaCompressor = null;
   window._ssaHPF = null;
   window._ssaLPF = null;
   window._ssaPeaking = null;
-  if (window._ssaDelay) {
-    try { window._ssaDelay.disconnect(); } catch (_) {}
-    window._ssaDelay = null;
-  }
+  window._ssaDelay = null;
   window._ssaWaveShaper = null;
   window._ssaBypassGainNode = null;
   window._ssaEffectGainNode = null;
   window._ssaGainNode = null;
+  // CRITICAL: Clean up _ssaSetEffectsActive (never cleaned before)
+  window._ssaSetEffectsActive = null;
+  
+  // REMOVE track.ended listeners to prevent memory leaks
+  _trackEndedListeners.forEach((listener, track) => {
+    try { track.removeEventListener('ended', listener); } catch (_) {}
+  });
+  _trackEndedListeners.clear();
+  
+  // REMOVE AudioContext statechange listener
+  if (_contextStateChangeHandler && audioContext) {
+    try { audioContext.removeEventListener('statechange', _contextStateChangeHandler); } catch (_) {}
+    _contextStateChangeHandler = null;
+  }
   
   // Reset audio drop counter
   audioDropCount = 0;

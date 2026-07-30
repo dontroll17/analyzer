@@ -8,14 +8,15 @@
     "scripting",
     "offscreen",
     "storage",
-    "alarms"
+    "alarms",
+    "tabCapture"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "web_accessible_resources": [
     {
-      "resources": ["dsp-engine/audio-worklet.js", "dsp-engine/delay-processor.js", "offscreen.html"],
+      "resources": ["dsp-engine/audio-worklet.js", "dsp-engine/delay-processor.js"],
       "matches": ["<all_urls>"]
     }
   ],

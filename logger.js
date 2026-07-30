@@ -28,6 +28,8 @@ const Logger = (() => {
   let _minLevel = 'warn';
   let _filters = {};   // { module: true/false }
   let _listeners = []; // callbacks on push
+  let _listenerIds = new WeakMap(); // fn -> unique ID mapping for removal
+  let _nextListenerId = 0;
 
   // ---- Storage ----
   function _pushStorage(entry) {
@@ -113,16 +115,36 @@ const Logger = (() => {
     getAll() { return [..._logs]; },
 
     // Subscribe to log changes
-    onLogChange(fn) { _listeners.push(fn); },
+    // Returns a cleanup function to remove the listener
+    onLogChange(fn) {
+      if (typeof fn !== 'function') return () => {};
+      const id = _nextListenerId++;
+      _listenerIds.set(fn, id);
+      _listeners.push(fn);
+      // Return cleanup function
+      return () => {
+        const idx = _listeners.indexOf(fn);
+        if (idx >= 0) {
+          _listeners.splice(idx, 1);
+          _listenerIds.delete(fn);
+        }
+      };
+    },
 
     // Load from storage (call once on startup)
     load(cb) { _loadStorage(cb); },
 
     // Export to JSON blob URL
+    // Returns { url, revoke: fn } for proper cleanup
     exportJSON() {
       const data = this.getAll();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      return URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      // Return object with revoke function for safe cleanup
+      return {
+        url,
+        revoke: () => URL.revokeObjectURL(url)
+      };
     },
   };
 })();

@@ -71,7 +71,7 @@ chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
     // Ping offscreen to keep SW alive
-    chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }).catch(() => {});
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
   }
 });
 
@@ -147,6 +147,9 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
     
+    // Reset disconnect warning flag on reconnect (allows warning on next disconnect)
+    popupDisconnectedWarned = false;
+    
     // Request fresh metrics immediately
     if (isCapturing) {
       log.info('Requesting fresh metrics from offscreen');
@@ -170,7 +173,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (data && data.type === 'TOGGLE') {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }).catch(() => {});
+            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }, () => {});
           }
         });
       }
@@ -181,36 +184,48 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {
+    log.warn('START_CAPTURE received from popup, captureSource:', message.captureSource, 'tabStreamId:', message.tabStreamId ? 'present' : 'null');
     if (!canUseOffscreen()) {
+      log.error('Offscreen API not available');
       sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
       return true;
     }
     
     const captureSource = message.captureSource || 'tab';
+    const tabStreamId = message.tabStreamId || null;
+    
+    // Helper: notify content script across ALL queryable tabs (not just active)
+    function notifyTabsToShowOverlay() {
+      chrome.tabs.query({}, (tabs) => {
+        for (const tab of tabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            chrome.tabs.sendMessage(tab.id, { type: '_SSA_SHOW_OVERLAY' }, () => {
+              if (chrome.runtime.lastError) {
+                // Content.js not loaded in this tab — OK
+              }
+            });
+          }
+        }
+      });
+    }
+    
+    function handleStartResponse(response) {
+      isCapturing = !!response?.ok;
+      persistCapturing();
+      log.info('START_CAPTURE response:', response?.ok ? 'ok' : response?.error);
+      if (isCapturing) {
+        notifyTabsToShowOverlay();
+      }
+      sendResponse(response);
+    }
     
     if (offscreenReady) {
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, response => {
-        isCapturing = !!response?.ok;
-        persistCapturing();
-        // Notify content script to show overlay
-        if (isCapturing) {
-          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs.length > 0) {
-              chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }).catch(() => {});
-            }
-          });
-        }
-        sendResponse(response);
-      });
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId }, handleStartResponse);
     } else {
-      // Try to create offscreen document
+      // Try to create offscreen document — keep SW alive with async operation
       createOffscreenDocument().then((success) => {
         if (success) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, (response) => {
-            isCapturing = !!response?.ok;
-            persistCapturing();
-            sendResponse(response);
-          });
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId }, handleStartResponse);
         } else {
           sendResponse({ ok: false, error: 'Failed to create offscreen document' });
         }
@@ -231,11 +246,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         persistCapturing();
         metricsQueue = []; // Clear in-memory queue on stop
         chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
-        // Note: popupPort is cleared by popupPortDisconnectHandler
-        // Notify content script to hide overlay
+        // Notify content script to hide overlay (silent)
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {});
           }
         });
         sendResponse(response);
@@ -246,20 +260,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       metricsQueue = []; // Clear in-memory queue on stop
       chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
       // Note: popupPort is cleared by popupPortDisconnectHandler
-      // Notify content script to hide overlay
+      // Notify content script to hide overlay (silent)
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs.length > 0) {
-          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {});
         }
       });
       sendResponse({ ok: true });
     }
     return true;
-  }
-  
-  if (message.type === 'GET_CAPTURE_STATUS') {
-    sendResponse({ isCapturing });
-    return false;
   }
   
   // === From Offscreen ===
@@ -301,12 +310,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Forward to overlay if connected
     if (overlayPort) {
       try {
-        overlayPort.postMessage(message.data);
+        overlayPort.postMessage({ type: 'METRICS', ...message.data });
       } catch (e) {
         log.warn('Failed to forward metrics to overlay:', e.message);
       }
     }
     sendResponse({ ok: true });
+    return false;
+  }
+  
+  if (message.type === 'GET_CAPTURE_STATUS') {
+    sendResponse({ isCapturing });
     return false;
   }
   
@@ -346,10 +360,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Also clear any lingering queues
     metricsQueue = [];
     chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
-    // Notify content script to hide overlay
+    // Notify content script to hide overlay (silent)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs.length > 0) {
-        chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+        chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {});
       }
     });
     sendResponse({ ok: true });

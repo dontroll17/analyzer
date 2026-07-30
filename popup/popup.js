@@ -1428,14 +1428,18 @@ function stopAudioProcessing() {
   pendingOscDraw = null;
   pendingTimelineDraw = false;
   
-  // Clear channel history buffers
+  // CRITICAL: Null worklet port.onmessage to release closures (was leaking applyMetrics, currentMetrics refs)
+  if (popupWorkletNode) {
+    try {
+      popupWorkletNode.port.onmessage = null;
+      popupWorkletNode.disconnect();
+    } catch (_) {}
+    popupWorkletNode = null;
+  }
+  
   if (popupMediaStreamSource) {
     try { popupMediaStreamSource.disconnect(); } catch (_) {}
     popupMediaStreamSource = null;
-  }
-  if (popupWorkletNode) {
-    try { popupWorkletNode.disconnect(); } catch (_) {}
-    popupWorkletNode = null;
   }
   if (popupAudioContext) {
     if (popupAudioContext.state !== 'closed') {
@@ -1552,18 +1556,21 @@ function sendSensitivityToWorklet(percentage) {
 }
 
 // Background port disconnect handler — named for proper removal
-function bgPortDisconnectHandler() {
+// Uses a module-level variable to track the handler reference for cleanup
+let bgPortDisconnectHandlerRef = null;
+function _bgPortDisconnectHandler() {
   bgMetricsConnected = false;
   
   // Remove all listeners to prevent leaks
   if (bgPort) {
     bgPort.onMessage.removeListener(bgMetricsHandler);
-    bgPort.onDisconnect.removeListener(bgPortDisconnectHandler);
+    bgPort.onDisconnect.removeListener(_bgPortDisconnectHandler);
   }
   
   isConnected = false;
   bgPort = null;
   bgMetricsHandler = null;
+  bgPortDisconnectHandlerRef = null;
   
   // If capture was active when port disconnected, trigger reconnect
   if (captureActive) {
@@ -1599,6 +1606,9 @@ function bgPortDisconnectHandler() {
   updateUI(false);
 }
 
+// Assign the named handler to module-level ref for cleanup
+bgPortDisconnectHandlerRef = _bgPortDisconnectHandler;
+
 // Send message to runtime with lastError suppression
 function safeSendMessage(msg, callback) {
   chrome.runtime.sendMessage(msg, (response) => {
@@ -1632,10 +1642,6 @@ function ensureBackgroundPort() {
     return true;
   }
   
-  // Create a new port generation
-  bgPortId++;
-  const currentId = bgPortId;
-  
   // Clear any stale listeners from previous port
   if (bgPort && !bgPort._disconnected) {
     try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
@@ -1644,6 +1650,13 @@ function ensureBackgroundPort() {
     bgPort = null;
   }
   bgMetricsConnected = false;
+  
+  // CRITICAL: Null old bgMetricsHandler to release its closure (prevents memory leak on reconnect)
+  bgMetricsHandler = null;
+  
+  // Create a new port generation
+  bgPortId++;
+  const currentId = bgPortId;
   
   try {
     bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
@@ -1790,7 +1803,7 @@ function ensureBackgroundPort() {
     };
     
     bgPort.onMessage.addListener(bgMetricsHandler);
-    bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
+    bgPort.onDisconnect.addListener(bgPortDisconnectHandlerRef);
     
     // Restore drop count from storage
     chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
@@ -1832,20 +1845,43 @@ startBtn.addEventListener('click', () => {
 
   const captureSource = captureSourceSelect?.value || 'tab';
 
-  connectToBackground();
-  safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
-    if (response?.ok) {
-      updateUI(true);
-    } else {
-      log.error('Capture failed:', response?.error);
-      alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+  // Get tab capture stream ID (requires user gesture — provided by button click)
+  chrome.tabCapture.getMediaStreamId({ targetTab: null, audio: true, video: false }, (streamId) => {
+    if (chrome.runtime.lastError) {
+      log.error('Tab capture failed:', chrome.runtime.lastError.message);
+      alert('Ошибка захвата вкладки: ' + chrome.runtime.lastError.message);
       captureActive = false;
       heatmapActive = false;
       if (startBtn) {
         startBtn.textContent = 'Start Capture';
         startBtn.disabled = false;
       }
+      return;
     }
+    
+    connectToBackground();
+    safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource, tabStreamId: streamId }, response => {
+      if (response?.ok) {
+        updateUI(true);
+        // Show overlay in active tab directly from popup (more reliable than via background)
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0 && tabs[0].url && !tabs[0].url.startsWith('chrome://')) {
+            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }, () => {
+              // Silently ignore — content.js may not be loaded
+            });
+          }
+        });
+      } else {
+        log.error('Capture failed:', response?.error);
+        alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+        captureActive = false;
+        heatmapActive = false;
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
+      }
+    });
   });
 });
 
@@ -1859,7 +1895,7 @@ stopBtn.addEventListener('click', () => {
   }
   
   // 2. Notify background/offscreen (non-blocking)
-  safeSendMessage({ type: 'STOP_CAPTURE' });
+  safeSendMessage({ type: 'STOP_CAPTURE' }, () => {});
 });
 
 chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
@@ -2712,19 +2748,30 @@ window.addEventListener('beforeunload', async () => {
     }
   }
   
+  // CRITICAL: Clean up logger listener to prevent memory leaks
+  if (_logsChangeCleanup) {
+    _logsChangeCleanup();
+    _logsChangeCleanup = null;
+  }
+  
   if (bgPort) {
-    // Remove listener before disconnecting
+    // CRITICAL: Remove ALL listeners before disconnecting to prevent memory leaks
     if (bgMetricsHandler) {
       try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    }
+    if (bgPortDisconnectHandlerRef) {
+      try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandlerRef); } catch (_) {}
     }
     bgPort.disconnect();
     bgPort = null;
     bgMetricsHandler = null;
+    bgPortDisconnectHandlerRef = null;
   }
 });
 
-// Initialize background port ONCE at page load — prevents memory leaks from multiple connections
-ensureBackgroundPort();
+// Initialize background port — moved to START_CAPTURE handler to ensure background is ready
+// (offscreen document creation takes time; connecting too early causes empty metrics)
+// ensureBackgroundPort() is now called in the START_CAPTURE handler
 
 // Global error handler — catch unhandled errors before they crash popup
 window.addEventListener('error', (e) => {
@@ -2801,9 +2848,10 @@ function toggleLogs() {
   }
 }
 
-// Subscribe to log changes
+// Subscribe to log changes (capture cleanup function for beforeunload)
+let _logsChangeCleanup = null;
 if (window.__logger) {
-  window.__logger.onLogChange(() => {
+  _logsChangeCleanup = window.__logger.onLogChange(() => {
     renderLogs();
   });
   // Initial load
@@ -2836,15 +2884,18 @@ if (logsClearBtn) {
 // Export all logs as JSON
 if (logsExportBtn) {
   logsExportBtn.addEventListener('click', () => {
-    const url = window.__logger?.exportJSON?.();
-    if (url) {
+    const result = window.__logger?.exportJSON?.();
+    if (result && result.url) {
       const a = document.createElement('a');
-      a.href = url;
+      a.href = result.url;
       a.download = `ssa-logs-${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      // CRITICAL: Always revoke Blob URL after download to prevent memory leak
+      setTimeout(() => {
+        if (result.revoke) result.revoke();
+      }, 2000);
     }
   });
 }
