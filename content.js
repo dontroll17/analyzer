@@ -565,6 +565,9 @@ function applyOverlayMode() {
 function injectOverlay() {
   if (overlayEl) return; // Already injected
   
+  // Pin state — declared at top to avoid TDZ ReferenceError
+  let isPinned = false;
+  
   // Load saved mode
   chrome.storage.local.get([MODE_STORAGE_KEY], (result) => {
     if (result[MODE_STORAGE_KEY] && ['expanded', 'compact', 'sidebar', 'mini'].includes(result[MODE_STORAGE_KEY])) {
@@ -670,10 +673,6 @@ function injectOverlay() {
   
   // Mini badge hover → show temporarily
   miniBadgeEl.addEventListener('mouseenter', showMiniBadge);
-  
-  // Pin state — declared BEFORE mousedown handler to avoid TDZ ReferenceError
-  // (mousedown handler on line ~675 uses isPinned, handler defined on line ~732)
-  let isPinned = false;
   
   // Drag handling — shadow root, use composed path
   overlayEl.addEventListener('mousedown', (e) => {

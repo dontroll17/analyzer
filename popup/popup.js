@@ -1644,7 +1644,7 @@ function ensureBackgroundPort() {
   // Clear any stale listeners from previous port
   if (bgPort && !bgPort._disconnected) {
     try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
-    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandler); } catch (_) {}
+    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandlerRef); } catch (_) {}
     bgPort.disconnect();
     bgPort = null;
   }
