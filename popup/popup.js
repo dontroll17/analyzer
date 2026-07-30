@@ -1405,10 +1405,6 @@ function stopAudioProcessing() {
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
   
-  // CRITICAL: Clear all buffers to prevent memory leaks
-  leftChannelHistory.fill(0);
-  rightChannelHistory.fill(0);
-  
   // Reset heatmap
   heatmapData = [
     new Float32Array(HEATMAP_SLOTS),
@@ -1666,7 +1662,7 @@ function ensureBackgroundPort() {
     
     // Drop metrics queue to prevent popup hang from backlog
     // When reconnecting, drop anything older than 500ms
-    const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
+    const METRICS_THROTTLE_MS = 66; // ~15fps throttle — was 0 (unthrottled at ~43fps)
     let lastMetricsApplyTime = 0;
     let metricsQueueDepth = 0;
     const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending

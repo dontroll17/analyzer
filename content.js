@@ -727,6 +727,8 @@ function injectOverlay() {
   }
   
   // Pin button — locks overlay position (prevents drag)
+  // NOTE: isPinned must be declared BEFORE the mousedown handler above
+  // to avoid TDZ ReferenceError (handler on line 675 uses isPinned on line 680)
   let isPinned = false;
   if (pinBtnEl) {
     pinBtnEl.addEventListener('click', (e) => {
@@ -796,7 +798,7 @@ function hideOverlay() {
     miniBadgeEl.classList.remove('visible', 'hidden');
     miniBadgeEl.style.display = 'none';
   }
-  
+
   // Clear hide timer
   if (miniBadgeHideTimer) {
     clearTimeout(miniBadgeHideTimer);
@@ -925,5 +927,3 @@ window.addEventListener('beforeunload', () => {
   const styleEl = document.getElementById('ssa-overlay-style');
   if (styleEl) styleEl.remove();
 });
-
-
