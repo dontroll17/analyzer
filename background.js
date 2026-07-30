@@ -194,10 +194,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const captureSource = message.captureSource || 'tab';
     const tabStreamId = message.tabStreamId || null;
     
-    // Helper: notify content script across ALL queryable tabs (not just active)
+    // Helper: notify content script on active tab only (consistent with STOP_CAPTURE)
     function notifyTabsToShowOverlay() {
-      chrome.tabs.query({}, (tabs) => {
-        for (const tab of tabs) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs.length > 0) {
+          const tab = tabs[0];
           if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
             chrome.tabs.sendMessage(tab.id, { type: '_SSA_SHOW_OVERLAY' }, () => {
               if (chrome.runtime.lastError) {

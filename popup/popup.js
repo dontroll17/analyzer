@@ -1362,8 +1362,11 @@ async function initAudioProcessing(stream) {
     // 1. Источник направляем в воркет для спектрального анализа
     popupMediaStreamSource.connect(popupWorkletNode);
 
-    // 2. Подключаем источник (не воркет!) к колонкам, чтобы не глушить оригинальный звук
-    popupMediaStreamSource.connect(popupAudioContext.destination);
+    // 2. [COMMENTED] Original audio already plays through browser's native content rendering.
+    //    Connecting to destination would cause double audio (echo) — user hears it twice:
+    //    (a) from the original page content, (b) from this popup AudioContext → speakers.
+    //    Kept for potential "monitoring" use case in future.
+    // popupMediaStreamSource.connect(popupAudioContext.destination);
 
     // Named handler for proper cleanup — previous handlers lost on reassignment
     const workletMetricsHandler = (event) => {

@@ -493,6 +493,14 @@ async function startCapture(source, tabStreamId) {
     audioChain.bypassGain = bypassGainNode;
     audioChain.source = audioSource;
     
+    // P.2: Create master normalization gain to compensate for dual-path summation
+    // When both bypassGain and effectGain carry identical signal (effects bypassed),
+    // direct connection to workletNode sums both → +6dB → potential clipping.
+    // masterGainNode with gain=0.5 normalizes the summed signal.
+    const masterGainNode = audioContext.createGain();
+    masterGainNode.gain.value = 0.5; // Compensate +6dB from dual-path summation
+    audioChain.masterGain = masterGainNode;
+    
     // Effects chain (internal node connections — all bypassed by default)
     compressorNode.connect(hpfNode);
     hpfNode.connect(lpfNode);
@@ -501,11 +509,10 @@ async function startCapture(source, tabStreamId) {
     delayNode.connect(waveShaperNode);
     waveShaperNode.connect(effectGainNode);
     
-    // Bypass path: source → bypassGain → worklet
-    bypassGainNode.connect(workletNode);
-    
-    // Effects path: waveShaper → effectGain → worklet
-    effectGainNode.connect(workletNode);
+    // P.2: Normalize dual-path summation through masterGain
+    bypassGainNode.connect(masterGainNode);
+    effectGainNode.connect(masterGainNode);
+    masterGainNode.connect(workletNode);
     
     // Source connects to both bypass and effects chain
     audioSource.connect(bypassGainNode);
@@ -735,6 +742,11 @@ function cleanup() {
   audioChain.waveShaper = null;
   audioChain.bypassGain = null;
   audioChain.effectGain = null;
+  // P.2: Clean up master normalization gain node
+  if (audioChain.masterGain) {
+    try { audioChain.masterGain.disconnect(); } catch (_) {}
+    audioChain.masterGain = null;
+  }
   audioChain.source = null;
   audioChain.worklet = null;
   audioChain.ready = false;

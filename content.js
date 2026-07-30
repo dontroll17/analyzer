@@ -13,7 +13,7 @@ const log = (self.__logger?.forModule('content')) || {
   error: (m, ...a) => console.error('[CONTENT]', m, ...a),
 };
 
-console.warn('[CONTENT] content.js loaded on', location.href);
+log.info('content.js loaded on', location.href);
 
 let overlayVisible = false;
 let overlayPort = null;
@@ -671,6 +671,10 @@ function injectOverlay() {
   // Mini badge hover → show temporarily
   miniBadgeEl.addEventListener('mouseenter', showMiniBadge);
   
+  // Pin state — declared BEFORE mousedown handler to avoid TDZ ReferenceError
+  // (mousedown handler on line ~675 uses isPinned, handler defined on line ~732)
+  let isPinned = false;
+  
   // Drag handling — shadow root, use composed path
   overlayEl.addEventListener('mousedown', (e) => {
     // Don't drag when clicking controls or when pinned
@@ -727,9 +731,6 @@ function injectOverlay() {
   }
   
   // Pin button — locks overlay position (prevents drag)
-  // NOTE: isPinned must be declared BEFORE the mousedown handler above
-  // to avoid TDZ ReferenceError (handler on line 675 uses isPinned on line 680)
-  let isPinned = false;
   if (pinBtnEl) {
     pinBtnEl.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -757,7 +758,7 @@ function savePosition() {
 
 // Show overlay
 function showOverlay() {
-  console.warn('[CONTENT] showOverlay() called');
+  log.info('showOverlay() called');
   if (overlayVisible) return;
   
   loadPosition();
@@ -847,13 +848,13 @@ function connectToMetrics() {
     return;
   }
   
-  console.warn('[CONTENT] connectToMetrics()');
-  console.warn('[CONTENT] overlayPort connected');
+  log.info('connectToMetrics()');
+  log.info('overlayPort connected');
   
   overlayPort.onMessage.addListener((data) => {
     if (data && data.type === 'METRICS') {
       reconnectAttempts = 0; // Reset on successful message
-      console.warn('[CONTENT] Received METRICS:', data.glitchState, data.rms?.toFixed(3));
+      log.debug('Received METRICS:', data.glitchState, data.rms?.toFixed(3));
       updateOverlayDisplay(data);
     }
   });
@@ -878,16 +879,16 @@ function connectToMetrics() {
 
 // Listen for messages from background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.warn('[CONTENT] onMessage received:', message?.type, 'from:', sender?.id);
+  log.debug('onMessage received:', message?.type, 'from:', sender?.id);
   if (message.type === '_SSA_SHOW_OVERLAY') {
-    console.warn('[CONTENT] _SSA_SHOW_OVERLAY received');
+    log.info('_SSA_SHOW_OVERLAY received');
     captureActive = true;
     showOverlay();
     sendResponse({ ok: true });
   }
   
   if (message.type === '_SSA_HIDE_OVERLAY') {
-    console.warn('[CONTENT] _SSA_HIDE_OVERLAY received');
+    log.info('_SSA_HIDE_OVERLAY received');
     captureActive = false;
     hideOverlay();
     sendResponse({ ok: true });

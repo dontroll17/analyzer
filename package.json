@@ -3,7 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js --coverage",
+    "validate": "node scripts/validate.js",
+    "lint:logs": "node scripts/lint-logs.js",
+    "check:syntax": "node --check background.js content.js offscreen.js logger.js dsp-engine/audio-worklet.js dsp-engine/delay-processor.js dsp-engine/rms.js popup/popup.js popup/config.js"
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",
