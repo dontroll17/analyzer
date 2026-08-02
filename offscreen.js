@@ -511,6 +511,7 @@ async function startCapture(source, tabStreamId) {
     
     // NOTE: Since Sample Rate Sync (Step 3), audioContext.sampleRate === track.sampleRate
     // No SRC → no gain shift → no compensation needed. effectGainNode = unity gain.
+    // masterGain corrected from 0.5 to 1.0 — bypass effects now report correct RMS/bands
     const effectGainNode = audioContext.createGain();
     effectGainNode.gain.value = 1.0; // Unity gain — no SRC compensation needed
     
@@ -573,10 +574,9 @@ async function startCapture(source, tabStreamId) {
     waveShaperNode.oversample = 'none';
     
     // Master gain for graceful shutdown (ramp to 0 before close)
-    // Safety margin: 0.5 prevents cumulative gain from multiple Wet/Dry crossfades
-    // All Wet/Dry pairs sum to 1.0 mathematically, but 0.5 provides headroom
+    // Unity gain (1.0): Wet/Dry crossfades sum to 1.0 mathematically
     const masterGainNode = audioContext.createGain();
-    masterGainNode.gain.value = 0.5; // Unity gain with safety margin
+    masterGainNode.gain.value = 1.0; // Unity gain — correct reference level
     
     // Store effect references in centralized audioChain object
     audioChain.compressor = compressorNode;
@@ -615,14 +615,15 @@ async function startCapture(source, tabStreamId) {
     peakingWetGain.connect(delayNode);
     peakingDryGain.connect(delayNode);
     
-    // Delay Wet/Dry → waveShaper → master → worklet
+    // Delay Wet/Dry → workletNode(analysis, pre-limiter) AND → waveShaper(limiter) → master → output
+    // Metrics are captured BEFORE limiter so effects don't corrupt the measurements
     delayNode.connect(delayWetGain);
     delayNode.connect(delayDryGain);
+    delayDryGain.connect(workletNode); // Analysis tap: clean signal before any processing
     delayWetGain.connect(waveShaperNode);
     delayDryGain.connect(waveShaperNode);
     waveShaperNode.connect(effectGainNode);
     effectGainNode.connect(masterGainNode);
-    masterGainNode.connect(workletNode);
     
     // Legacy toggle (kept for backward compat)
     window._ssaSetEffectsActive = function(active) {
@@ -660,9 +661,9 @@ async function startCapture(source, tabStreamId) {
     // Enable METRICS (end Silent Masking)
     isSilentMaskingActive = false;
     
-    // Master gain: 0→0.5 with exponential smoothing (starts audio signal)
+    // Master gain: 0→1.0 with exponential smoothing (starts audio signal)
     // Target matches initial masterGainNode.gain.value for consistency
-    audioChain.masterGain.gain.setTargetAtTime(0.5, t, CROSSFADE_TAU);
+    audioChain.masterGain.gain.setTargetAtTime(1.0, t, CROSSFADE_TAU);
     
     // Start DSP time polling: request DSP time from worklet every 2s
     _dspTimeTimer = setInterval(() => {

@@ -49,8 +49,12 @@ describe('DC Offset Silence Detection (offscreen.js:612-654)', () => {
   });
 
   it('returns false for slight noise (variance > 1e-8)', () => {
-    const noise = [0.004215, 0.004216, 0.004214, 0.004215, 0.004215,
-                   0.004215, 0.004215, 0.004216, 0.004214, 0.004215];
+    // Variance must be > 1e-8 — use values with enough spread
+    const noise = [0.004, 0.005, 0.003, 0.0045, 0.0042,
+                   0.0048, 0.0039, 0.0046, 0.0041, 0.0044];
+    const mean = noise.reduce((s, v) => s + v, 0) / 10;
+    const variance = noise.reduce((s, v) => s + (v - mean) ** 2, 0) / 10;
+    expect(variance).toBeGreaterThan(1e-8);
     expect(detectSilenceDCOffset(noise)).toBe(false);
   });
 
@@ -139,12 +143,12 @@ describe('Compressor Bypass (offscreen.js:3.2)', () => {
   });
 
   it('active compression with ratio=20 reduces peaks', () => {
-    const signal = new Float32Array([1.0, 0.8, 0.5, 0.3, 0.1]);
-    // threshold=-1dB ≈ 0.89 linear, knee=0
-    const result = simulateCompressorBypass(signal, true, -1, 0, 20);
-    // Peak at 1.0 should be reduced
+    const signal = new Float32Array([1.0, 0.8, 0.5, 0.3, 0.05]);
+    // threshold=4 linear → effectiveThreshold=0.2; only samples > 0.2 get compressed
+    const result = simulateCompressorBypass(signal, true, 4, 0, 20);
+    // Peak at 1.0 should be reduced (|1.0| > 0.2 → compresses to 0.05)
     expect(result[0]).toBeLessThan(1.0);
-    // Low signal at 0.1 should pass unchanged
-    expect(result[4]).toBeCloseTo(0.1, 5);
+    // Low signal at 0.05 should pass unchanged (|0.05| is NOT > 0.2)
+    expect(result[4]).toBeCloseTo(0.05, 5);
   });
 });

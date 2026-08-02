@@ -7,6 +7,17 @@
 
 const { fftReal1024 } = require('./dsp-engine-testable');
 
+// Seeded PRNG for deterministic tests (mulberry32)
+function createRng(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
 function hzToBin(hz, sampleRate) {
   return Math.floor(hz * 1024 / (sampleRate || 44100));
 }
@@ -102,17 +113,16 @@ describe('calculateFrequencyBands - Integration with FFT', () => {
     });
 
     test('Hi-hat percussion simulation high frequency dominant', () => {
+      const rng = createRng(42);
       const input = new Float32Array(1024);
       for (let i = 0; i < 1024; i++) {
-        input[i] = (Math.random() - 0.5) *
+        input[i] = (rng() - 0.5) *
           Math.exp(-i / 200) *
           Math.sin(2 * Math.PI * 8000 * i / 44100);
       }
       const fft = fftReal1024(input);
       const fixed = calculateFrequencyBandsFixed(fft, 44100);
       // Hi-hat at 8kHz: treble should be dominant (or at least > bass)
-      // Due to FFT bin distribution, the envelope may shift energy,
-      // but treble should still be significant
       expect(fixed.treble).toBeGreaterThan(10);
       expect(fixed.treble).toBeGreaterThan(fixed.mid);
     });
@@ -164,9 +174,10 @@ describe('calculateFrequencyBands - Integration with FFT', () => {
     });
 
     test('Buggy version over-represents treble for broadband', () => {
+      const rng = createRng(1);
       const input = new Float32Array(1024);
       for (let i = 0; i < 1024; i++) {
-        input[i] = (Math.random() - 0.5) * 2.0;
+        input[i] = (rng() - 0.5) * 2.0;
       }
       const fft = fftReal1024(input);
       const buggy = calculateFrequencyBandsBuggy(fft, 44100);
