@@ -1,4 +1,8 @@
 // offscreen.js — persistent capture context
+// Guard: skip real audio capture setup in non-browser environments (Jest, Node.js)
+// This prevents Windows Defender false positives when running tests
+const isBrowserEnv = typeof window !== 'undefined' || typeof chrome?.runtime?.id !== 'undefined';
+
 const log = (self.__logger?.forModule('offscreen')) || {
   debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn('[OFFSCREEN]', m, ...a),
   error: (m, ...a) => console.error('[OFFSCREEN]', m, ...a),
@@ -57,15 +61,25 @@ let _dspTimeTimer = null;
 let _lastWorkletTimestamp = 0;
 
 // Suppress runtime.lastError spam when background is unavailable
-const MAX_SAFE_SEND_LOGS = 5; // Log first N errors, then silence
-let _safeSendErrorCount = 0;
-let _safeSendLastLogged = 0;
+// Chrome throws on sendMessage when SW/background is dead — suppress silently
+function safeSendMessage(msg) {
+  chrome.runtime.sendMessage(msg, () => {
+    // Silently ignore — background may be dead during SW restart, popup disconnected, etc.
+    // These are expected and non-critical.
+  });
+}
 
-// Track per-track ended listeners for proper cleanup (prevent memory leaks)
+// Track per-track ended listeners for cleanup (prevent memory leaks)
 const _trackEndedListeners = new Map(); // track -> listenerFn mapping
 
 // Reference to audioContext statechange listener for cleanup
 let _contextStateChangeHandler = null;
+
+// RMS variance tracking for silence detection (DC offset from resampling)
+const _rmsHistory = [];
+
+// Silence log counter (throttle logs)
+let _silenceLogCounter = 0;
 
 // C.3.2: Update compressor settings
 function _updateCompressor(params) {
@@ -74,21 +88,27 @@ function _updateCompressor(params) {
   const comp = audioChain.compressor;
   if (params.enabled !== undefined) {
     _effectsState.compressor.enabled = params.enabled;
-    // Toggle: ratio=1 (bypass) vs ratio=params.ratio (active)
+    // Toggle: ratio=1 + threshold=-100dB (bypass) vs ratio=params.ratio (active)
     if (params.enabled) {
       comp.ratio.value = params.ratio !== undefined ? params.ratio : 12;
+      comp.threshold.value = params.threshold !== undefined ? params.threshold : -24;
+      comp.knee.value = params.knee !== undefined ? params.knee : 30;
     } else {
-      comp.ratio.value = 1; // bypass
+      comp.ratio.value = 1;
+      comp.threshold.value = -100; // FULL bypass — no signal will exceed this
+      comp.knee.value = 0;
+      comp.attack.value = 0;
+      comp.release.value = 0;
     }
   }
-  if (params.threshold !== undefined) comp.threshold.value = params.threshold;
-  if (params.knee !== undefined) comp.knee.value = params.knee;
+  if (params.threshold !== undefined && _effectsState.compressor.enabled) comp.threshold.value = params.threshold;
+  if (params.knee !== undefined && _effectsState.compressor.enabled) comp.knee.value = params.knee;
   if (params.ratio !== undefined && _effectsState.compressor.enabled) {
     comp.ratio.value = params.ratio;
   }
   // attack/release are in ms from UI, but AudioParam expects seconds [0, 1]
-  if (params.attack !== undefined) comp.attack.value = params.attack / 1000;
-  if (params.release !== undefined) comp.release.value = params.release / 1000;
+  if (params.attack !== undefined && _effectsState.compressor.enabled) comp.attack.value = params.attack / 1000;
+  if (params.release !== undefined && _effectsState.compressor.enabled) comp.release.value = params.release / 1000;
 }
 
 // C.3.3: Soft-clipping limiter curve (4x oversample)
@@ -231,15 +251,7 @@ function _updateDelay(params) {
 
 function safeSendMessage(msg) {
   chrome.runtime.sendMessage(msg, () => {
-    if (chrome.runtime.lastError) {
-      // Log first N errors then throttle to prevent log spam during SW cycles
-      const now = Date.now();
-      if (_safeSendErrorCount < MAX_SAFE_SEND_LOGS && (now - _safeSendLastLogged > 5000)) {
-        _safeSendLastLogged = now;
-        _safeSendErrorCount++;
-        log.warn(`safeSendMessage error #${_safeSendErrorCount}:`, chrome.runtime.lastError.message);
-      }
-    }
+    // Silently ignore — background may be dead during SW restart, popup disconnected, etc.
   });
 }
 
@@ -413,7 +425,23 @@ async function startCapture(source, tabStreamId) {
       return { ok: false, error: 'no_audio_tracks' };
     }
     
-    audioContext = new AudioContext({ sampleRate: 44100 });
+    // Use the actual stream sampleRate to avoid resampling artifacts
+    // getDisplayMedia returns 48kHz by default — matching prevents DC offset
+    let streamSampleRate = 44100;
+    try {
+      // Get the actual sample rate from the underlying audio track
+      const audioTrack = audioTracks[0];
+      if (audioTrack.getSettings) {
+        const settings = audioTrack.getSettings();
+        if (settings.sampleRate) {
+          streamSampleRate = settings.sampleRate;
+        }
+      }
+    } catch (e) {
+      // Settings may not be available in all browsers
+    }
+    
+    audioContext = new AudioContext({ sampleRate: streamSampleRate });
     const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
@@ -427,15 +455,24 @@ async function startCapture(source, tabStreamId) {
       channelInterpretation: 'discrete'
     });
     
-    // C.3.1: Create effects chain
-    // Default: source → bypassGain → worklet
-    // Active: source → compressor → hpf → lpf → peaking → delay → waveShaper → effectGain → worklet
-    const effectGainNode = audioContext.createGain(); // gain after effects chain
+    // C.3.1: Effects chain — simple series routing
+    // source → compressor → hpf → lpf → peaking → delay → waveShaper → worklet
+    // All effects bypass to unity gain by default (no dual-path needed)
+    // 
+    // NOTE: audioContext(sampleRate) vs capture stream(sampleRate) may differ.
+    // getDisplayMedia often returns 48kHz while we create context at 44100.
+    // AudioContext resampling can shift gain by ~+6dB. Compensate with attenuation.
+    const effectGainNode = audioContext.createGain();
+    effectGainNode.gain.value = 0.5; // Compensate resampling + internal node gain
     
     // Create effect nodes (all bypassed by default via parameters)
     const compressorNode = audioContext.createDynamicsCompressor();
-    // Compressor: set ratio=1 to effectively bypass
+    // FULL bypass: ratio=1 + threshold=-100dB (so signal never exceeds threshold)
     compressorNode.ratio.value = 1;
+    compressorNode.threshold.value = -100; // No compression at any realistic input level
+    compressorNode.knee.value = 0;
+    compressorNode.attack.value = 0;
+    compressorNode.release.value = 0;
     
     const hpfNode = audioContext.createBiquadFilter();
     hpfNode.type = 'highpass';
@@ -448,7 +485,7 @@ async function startCapture(source, tabStreamId) {
     const peakingNode = audioContext.createBiquadFilter();
     peakingNode.type = 'peaking';
     peakingNode.frequency.value = 1000; // 1kHz center
-    peakingNode.gain.value = 0; // 0dB — bypassed
+    peakingNode.gain.value = 0; // 0dB — bypassed (unity gain)
     peakingNode.Q.value = 1;
     
     // C.3.5: Custom delay effect via AudioWorkletProcessor
@@ -467,10 +504,6 @@ async function startCapture(source, tabStreamId) {
     waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
     waveShaperNode.oversample = 'none';
     
-    // Bypass gain (always connected)
-    const bypassGainNode = audioContext.createGain();
-    bypassGainNode.gain.value = 1;
-    
     // Store effect references in centralized audioChain object
     audioChain.compressor = compressorNode;
     audioChain.hpf = hpfNode;
@@ -479,32 +512,20 @@ async function startCapture(source, tabStreamId) {
     audioChain.delay = delayNode;
     audioChain.waveShaper = waveShaperNode;
     audioChain.effectGain = effectGainNode;
-    audioChain.bypassGain = bypassGainNode;
+    audioChain.bypassGain = null; // No longer used — simple series routing
     audioChain.source = audioSource;
+    audioChain.masterGain = null; // Removed — no longer needed
     
-    // P.2: Create master normalization gain to compensate for dual-path summation
-    // When both bypassGain and effectGain carry identical signal (effects bypassed),
-    // direct connection to workletNode sums both → +6dB → potential clipping.
-    // masterGainNode with gain=0.5 normalizes the summed signal.
-    const masterGainNode = audioContext.createGain();
-    masterGainNode.gain.value = 0.5; // Compensate +6dB from dual-path summation
-    audioChain.masterGain = masterGainNode;
-    
-    // Effects chain (internal node connections — all bypassed by default)
+    // Series chain: source → compressor → hpf → lpf → peaking → delay → waveShaper → effectGain → worklet
     compressorNode.connect(hpfNode);
     hpfNode.connect(lpfNode);
     lpfNode.connect(peakingNode);
     peakingNode.connect(delayNode);
     delayNode.connect(waveShaperNode);
     waveShaperNode.connect(effectGainNode);
+    effectGainNode.connect(workletNode);
     
-    // P.2: Normalize dual-path summation through masterGain
-    bypassGainNode.connect(masterGainNode);
-    effectGainNode.connect(masterGainNode);
-    masterGainNode.connect(workletNode);
-    
-    // Source connects to both bypass and effects chain
-    audioSource.connect(bypassGainNode);
+    // Source connects directly to compressor (single path, no bypass)
     audioSource.connect(compressorNode);
     
     // Legacy toggle (kept for backward compat)
@@ -583,6 +604,64 @@ async function startCapture(source, tabStreamId) {
         lastMetrics = event.data;
         lastMetrics.audioDrops = audioDropCount;
         _lastWorkletTimestamp = event.data.timestamp || Date.now();
+        
+        // Detect silence: constant RMS = DC offset from audioContext resampling
+        // Track RMS variance over last 10 frames (~230ms at 43fps)
+        _rmsHistory.push(event.data.rms);
+        if (_rmsHistory.length > 10) _rmsHistory.shift();
+        
+        let rmsVar = 0;
+        if (_rmsHistory.length === 10) {
+          const mean = _rmsHistory.reduce((s, v) => s + v, 0) / 10;
+          rmsVar = _rmsHistory.reduce((s, v) => s + (v - mean) ** 2, 0) / 10;
+        }
+        
+        // Constant RMS (variance ≈ 0) = DC offset from audioContext resampling
+        // 48kHz→44100 resampling creates near-constant signal (DC offset)
+        // Detection: if RMS variance < 1e-8, signal is constant → DC noise
+        if (rmsVar < 1e-8) {
+          // Log every 50 frames (~1.2s)
+          _silenceLogCounter++;
+          if (_silenceLogCounter % 50 === 0) {
+            log.info('SILENCE DC noise: RMS:', event.data.rms.toFixed(4), 'var:', rmsVar.toFixed(10), 'Bass:', event.data.bass.toFixed(1), '%');
+          }
+          event.data.rms = 0;
+          event.data.peakRMS = 0;
+          event.data.glitchState = 'SILENT';
+          // ALWAYS nullify bands — DC noise can show any bass percentage
+          event.data.bass = 0;
+          event.data.mid = 0;
+          event.data.treble = 0;
+          event.data.rmsRight = undefined;
+          event.data.bassRight = undefined;
+          event.data.midRight = undefined;
+          event.data.trebleRight = undefined;
+          event.data.highFreqAnomaly = 0;
+          event.data.entropy = 0;
+          event.data.flatness = 0;
+          event.data.entropyState = 'SILENT';
+          event.data.isGlitch = false;
+          event.data.glitchCount = 0;
+          event.data.hnr = 0;
+          event.data.zcr = 0;
+          event.data.spectralCentroid = 0;
+          event.data.spectralRolloff = 0;
+          event.data.onsetDetected = false;
+          event.data.dynamicRange = 0;
+          event.data.bassMidRatio = 0;
+          event.data.midTrebleRatio = 0;
+          event.data.glitchRate = 0;
+        } else {
+          // Log first 5 frames for debugging (RMS + bands)
+          if (_metricsCounter <= 5) {
+            log.info('Frame', _metricsCounter, 'RMS:', event.data.rms.toFixed(4), 'Peak:', event.data.peakRMS.toFixed(4), 'Bands[B/M/T]:', event.data.bass.toFixed(1), event.data.mid.toFixed(1), event.data.treble.toFixed(1), 'var:', rmsVar.toFixed(8));
+          }
+        }
+        // Log frequency bands every 100 messages for debugging
+        if (_metricsCounter === 100 || _metricsCounter % 1000 === 0) {
+          log.warn('Freq bands [B/M/T]:', event.data.bass, event.data.mid, event.data.treble);
+        }
+        
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
         // Log every 1000 messages to avoid killing SW
         if (_metricsCounter % 1000 === 0) {

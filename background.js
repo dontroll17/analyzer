@@ -7,6 +7,7 @@ const log = (self.__logger?.forModule('bg')) || {
 let offscreenReady = false;
 let isCapturing = false;
 let popupPort = null;
+let _lastMetricsSnapshot = null; // Cache latest metrics for instant replay on reconnect
 let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
@@ -114,13 +115,32 @@ let popupPortMessageHandler = null;
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'popup-metrics') {
     popupPort = port;
+    log.info('Popup connected');
 
-    // Clear queues on disconnect to prevent memory leak
+    // Defer disconnect handling — popup may reconnect quickly
+    let _pendingDisconnect = null;
+    let _disconnectPending = false;
+    
     popupPortDisconnectHandler = () => {
-      log.info('Popup port disconnected, queues cleared');
-      popupPort = null;
-      metricsQueue = [];
-      chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+      if (_pendingDisconnect) {
+        clearTimeout(_pendingDisconnect);
+        _pendingDisconnect = null;
+      }
+      
+      // Delay cleanup to allow rapid reconnect (popup SW restart)
+      _disconnectPending = true;
+      _pendingDisconnect = setTimeout(() => {
+        _disconnectPending = false;
+        if (!popupPort || popupPort._disconnected) {
+          log.info('Popup port disconnected, queues cleared');
+          popupPort = null;
+          metricsQueue = [];
+          chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+        } else {
+          log.info('Popup port reconnected, ignoring stale disconnect');
+        }
+        _pendingDisconnect = null;
+      }, 500); // 500ms grace period for reconnect
     };
     port.onDisconnect.addListener(popupPortDisconnectHandler);
 
@@ -146,6 +166,7 @@ chrome.runtime.onConnect.addListener((port) => {
       metricsQueue = [];
     }
     chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+    log.info('Popup reconnected, queues cleared');
     
     // Reset disconnect warning flag on reconnect (allows warning on next disconnect)
     popupDisconnectedWarned = false;
@@ -276,6 +297,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_METRICS') {
     const d = message.data;
     
+    // Cache latest metrics for instant replay on popup reconnect
+    _lastMetricsSnapshot = d;
+    
     // Only queue/metrics forward if capture is active
     if (!isCapturing) {
       log.warn('Dropping metrics: isCapturing=false');
@@ -300,6 +324,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         log.error('Failed to forward to popup:', e.message);
         popupPort = null;
       }
+    }
+    // Send instant replay if popup just reconnected (cached metrics)
+    else if (_lastMetricsSnapshot && !popupDisconnectedWarned) {
+      popupDisconnectedWarned = true;
+      log.warn('Popup disconnected — cached metrics not forwarded');
     } else {
       // Throttle: warn only once at disconnect, not every frame
       if (!popupDisconnectedWarned) {
@@ -353,10 +382,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_ENDED') {
     isCapturing = false;
     persistCapturing();
-    if (popupPort) {
-      popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
-      popupPort.disconnect();
-      // popupPort will be nullified by popupPortDisconnectHandler
+    if (popupPort && !popupPort._disconnected) {
+      try {
+        popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
+      } catch (e) {
+        // port may be disconnected
+      }
+      try { popupPort.disconnect(); } catch (e) {}
     }
     // Also clear any lingering queues
     metricsQueue = [];

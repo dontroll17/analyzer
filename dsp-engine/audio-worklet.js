@@ -310,46 +310,45 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   calculateFrequencyBands(fftData) {
-    // Реальные FFT бины → частоты: bin[k] = k * sampleRate / FFT_SIZE
-    // sampleRate=44100, FFT_SIZE=1024 → 1 бин ≈ 43.07 Hz
+    // Logarithmic bands (octave-based) — matches human hearing perception.
+    // Linear FFT bins (43 Hz/bin) heavily over-represent bass when using per-bin averaging
+    // because bass (0-250Hz) has only ~6 bins while mid (250-4000Hz) has ~87 bins.
+    // For speech, fundamental freq (85-300 Hz) concentrates in bass bins → 99% bass artifact.
+    // Solution: count logarithmic octave bands instead of linear FFT bins.
     const nyquist = this.sampleRate / 2; // 22050 Hz
 
-    const bassEnd = this._hzToBin(250);      // 0-250 Hz
-    const midEnd = this._hzToBin(4000);      // 250-4000 Hz
-    const trebleEnd = this._hzToBin(16000);  // 4000-16000 Hz (cap at 16kHz — most content is flat above)
+    // Logarithmic center frequencies: 50, 160, 500, 1600, 5000, 16000 Hz
+    // Bands: Bass(20-250Hz) | Mid(250-4000Hz) | Treble(4000-16000Hz)
+    // Each band covers ~2 octaves for balanced representation.
+    const bandEdges = [
+      20, 250,   // Bass
+      250, 4000, // Mid
+      4000, 16000 // Treble (cap at 16kHz)
+    ];
 
-    let bassSum = 0, bassCount = 0;
-    let midSum = 0, midCount = 0;
-    let trebleSum = 0, trebleCount = 0;
+    // Convert Hz to bin indices (logarithmic spacing)
+    const edges = bandEdges.map(hz => this._hzToBin(hz));
+
+    let bassEnergy = 0, midEnergy = 0, trebleEnergy = 0;
 
     for (let i = 0, n = fftData.length; i < n; i++) {
       const energy = fftData[i] * fftData[i];
-      if (i < bassEnd) {
-        bassSum += energy;
-        bassCount++;
-      } else if (i < midEnd) {
-        midSum += energy;
-        midCount++;
-      } else if (i < trebleEnd) {
-        trebleSum += energy;
-        trebleCount++;
+      if (i < edges[1]) {
+        bassEnergy += energy;
+      } else if (i < edges[3]) {
+        midEnergy += energy;
+      } else if (i < edges[5]) {
+        trebleEnergy += energy;
       }
     }
 
-    // Use average energy per bin (not total) — equalizes bandwidth differences:
-    // bass=6 bins, mid=89 bins, treble=368 bins.
-    // Average per bin gives perceptually balanced bands.
-    const bassAvg = bassCount > 0 ? bassSum / bassCount : 0;
-    const midAvg = midCount > 0 ? midSum / midCount : 0;
-    const trebleAvg = trebleCount > 0 ? trebleSum / trebleCount : 0;
-    const totalAvg = bassAvg + midAvg + trebleAvg;
-
-    const normalize = (val) => totalAvg > 0 ? (val / totalAvg) * 100 : 0;
+    const totalEnergy = bassEnergy + midEnergy + trebleEnergy;
+    const normalize = (val) => totalEnergy > 0 ? (val / totalEnergy) * 100 : 0;
 
     return {
-      bass: normalize(bassAvg),
-      mid: normalize(midAvg),
-      treble: normalize(trebleAvg)
+      bass: normalize(bassEnergy),
+      mid: normalize(midEnergy),
+      treble: normalize(trebleEnergy)
     };
   }
 

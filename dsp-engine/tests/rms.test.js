@@ -1,4 +1,11 @@
-import RMS from '../rms.js';
+/**
+ * RMS (Root Mean Square) Calculator Tests
+ *
+ * Tests for the RMS class: calculate, calculateSliding, calculateDBFS,
+ * rmsToPercentage, classifyLevel, and static methods.
+ */
+
+const RMS = require('../rms.js').default || require('../rms.js');
 
 describe('RMS', () => {
   describe('calculate()', () => {
@@ -27,14 +34,14 @@ describe('RMS', () => {
       expect(rms).toBeCloseTo(0.707, 3);
     });
 
-    test('returns correct RMS for sine wave (theoretical = 1/sqrt(2) ≈ 0.7071)', () => {
+    test('returns correct RMS for sine wave (theoretical = 1/sqrt(2) ~ 0.7071)', () => {
       const samples = 1024;
       const buffer = new Float32Array(samples);
       for (let i = 0; i < samples; i++) {
         buffer[i] = Math.sin(2 * Math.PI * i / samples);
       }
       const rms = new RMS().calculate(buffer);
-      // Full sine wave RMS = 1/sqrt(2) ≈ 0.7071
+      // Full sine wave RMS = 1/sqrt(2) ~ 0.7071
       expect(rms).toBeCloseTo(0.7071, 3);
     });
 
@@ -56,7 +63,7 @@ describe('RMS', () => {
     test('handles array (not Float32Array)', () => {
       const buffer = [0.3, 0.4, 0.5];
       const rms = new RMS().calculate(buffer);
-      // sqrt((0.09 + 0.16 + 0.25) / 3) = sqrt(0.5/3) = sqrt(0.1667) ≈ 0.4082
+      // sqrt((0.09 + 0.16 + 0.25) / 3) = sqrt(0.5/3) = sqrt(0.1667) ~ 0.4082
       expect(rms).toBeCloseTo(0.4082, 3);
     });
   });
@@ -71,7 +78,7 @@ describe('RMS', () => {
       // First half: silent, second half: loud
       buffer.fill(0, 0, 1024);
       buffer.fill(1, 1024, 2048);
-      
+
       const rms = new RMS();
       // Sliding window should see only the last 1024 samples (all 1s)
       const slidingRms = rms.calculateSliding(buffer, 1024);
@@ -101,7 +108,7 @@ describe('RMS', () => {
     test('returns negative values for sub-max signals', () => {
       const buffer = new Float32Array(1024).fill(0.5);
       const dbfs = new RMS().calculateDBFS(buffer);
-      // 20 * log10(0.5) ≈ -6.02 dBFS
+      // 20 * log10(0.5) ~ -6.02 dBFS
       expect(dbfs).toBeCloseTo(-6.02, 1);
       expect(dbfs).toBeLessThan(0);
     });
@@ -113,7 +120,7 @@ describe('RMS', () => {
         buffer[i] = 0.5 * Math.sin(2 * Math.PI * i / samples);
       }
       const dbfs = new RMS().calculateDBFS(buffer);
-      // RMS = 0.5/sqrt(2), 20*log10(0.5/sqrt(2)) ≈ -9.03 dBFS
+      // RMS = 0.5/sqrt(2), 20*log10(0.5/sqrt(2)) ~ -9.03 dBFS
       expect(dbfs).toBeCloseTo(-9.03, 1);
     });
   });
@@ -191,7 +198,7 @@ describe('RMS', () => {
     test('provides one-time calculation', () => {
       const buffer = new Float32Array([0.6, 0.8]);
       const rms = RMS.calculateStatic(buffer);
-      // sqrt((0.36 + 0.64) / 2) = sqrt(0.5) ≈ 0.7071
+      // sqrt((0.36 + 0.64) / 2) = sqrt(0.5) ~ 0.7071
       expect(rms).toBeCloseTo(0.7071, 3);
     });
 
@@ -217,7 +224,7 @@ describe('RMS', () => {
       const buffer = new Float32Array(1024).fill(0.5);
       rms.calculate(buffer);
       expect(rms.getCumulativeRMS()).toBeCloseTo(0.5, 5);
-      
+
       rms.reset();
       expect(rms.getCumulativeRMS()).toBe(0);
       expect(rms.sampleCount).toBe(0);

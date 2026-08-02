@@ -39,7 +39,7 @@ describe('MIDI Export Module', () => {
     it('creates instance with correct initial state', () => {
       const { MIDIExporter } = require('../midi-export.js');
       const exporter = new MIDIExporter();
-      
+
       expect(exporter.isConnected).toBe(false);
       expect(exporter.output).toBeNull();
       expect(exporter.midi).toBeNull();
@@ -92,7 +92,7 @@ describe('MIDI Export Module', () => {
     });
 
     it('uses custom range min/max', () => {
-      // rms = 0.5, range [0, 1] → should map to ~64
+      // rms = 0.5, range [0, 1] -> should map to ~64
       expect(exporter._toMIDI(0.5, 0, 1)).toBe(64);
     });
 
@@ -107,18 +107,18 @@ describe('MIDI Export Module', () => {
     beforeEach(() => {
       const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
-      
+
       // Mock MIDI output
       exporter.output = new MockMIDIOutput('test', 'Test MIDI');
       exporter.isConnected = true;
       exporter.midi = { outputs: new Map(), close: () => {} };
-      
+
       sentMessages = [];
     });
 
     it('sends a CC message when connected', () => {
       exporter.sendCC(1, 64);
-      
+
       expect(sentMessages.length).toBe(1);
       // MIDI CC on channel 1: 0xB0 | 0 = 0xB0
       expect(sentMessages[0]).toEqual([0xB0, 1, 64]);
@@ -136,9 +136,9 @@ describe('MIDI Export Module', () => {
     it('does nothing when not connected', () => {
       exporter.isConnected = false;
       exporter.output = null;
-      
+
       exporter.sendCC(1, 64);
-      
+
       expect(sentMessages.length).toBe(0);
     });
   });
@@ -148,11 +148,11 @@ describe('MIDI Export Module', () => {
     beforeEach(() => {
       const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
-      
+
       exporter.output = new MockMIDIOutput('test', 'Test MIDI');
       exporter.isConnected = true;
       exporter.midi = { outputs: new Map(), close: () => {} };
-      
+
       sentMessages = [];
     });
 
@@ -167,7 +167,7 @@ describe('MIDI Export Module', () => {
         glitchState: 'STABLE',
         glitchCount: 5
       });
-      
+
       // Should send 7 CC messages (RMS, Bass, Mid, Treble, Glitch State, Entropy, Flatness, Count)
       // Note: 8 messages total
       expect(sentMessages.length).toBe(8);
@@ -175,19 +175,19 @@ describe('MIDI Export Module', () => {
 
     it('maps RMS to CC1 (Modulation)', () => {
       exporter.sendMetrics({ rms: 1.0, bass: 0, mid: 0, treble: 0 });
-      
-      // RMS 1.0 → CC1 → value 127
+
+      // RMS 1.0 -> CC1 -> value 127
       expect(sentMessages[0]).toEqual([0xB0, 1, 127]);
     });
 
     it('maps frequency bands correctly', () => {
       exporter.sendMetrics({ rms: 0, bass: 100, mid: 85, treble: 50 });
-      
-      // CC7 (Balance) = bass 100 → 127
+
+      // CC7 (Balance) = bass 100 -> 127
       expect(sentMessages[1]).toEqual([0xB0, 7, 127]);
-      // CC10 (Pan) = mid 85 → ~108
+      // CC10 (Pan) = mid 85 -> ~108
       expect(sentMessages[2]).toEqual([0xB0, 10, 108]);
-      // CC11 (Expression) = treble 50 → 64
+      // CC11 (Expression) = treble 50 -> 64
       expect(sentMessages[3]).toEqual([0xB0, 11, 64]);
     });
 
@@ -209,24 +209,24 @@ describe('MIDI Export Module', () => {
     });
 
     it('maps entropy to CC12 (Input Gain)', () => {
-      // entropy = 1.0, range [0, 2] → 64
+      // entropy = 1.0, range [0, 2] -> 64
       exporter.sendMetrics({ entropy: 1.0 });
-      
+
       const entropyMsg = sentMessages.find(m => m[1] === 12);
       expect(entropyMsg).toEqual([0xB0, 12, 64]);
     });
 
     it('maps flatness to CC91 (Reverb Depth)', () => {
-      // flatness = 0.5, range [0, 1] → 64
+      // flatness = 0.5, range [0, 1] -> 64
       exporter.sendMetrics({ flatness: 0.5 });
-      
+
       const flatnessMsg = sentMessages.find(m => m[1] === 91);
       expect(flatnessMsg).toEqual([0xB0, 91, 64]);
     });
 
     it('maps glitch count to CC19 (Capture Hold)', () => {
       exporter.sendMetrics({ glitchCount: 10 });
-      
+
       const countMsg = sentMessages.find(m => m[1] === 19);
       expect(countMsg).toEqual([0xB0, 19, 10]);
 
@@ -248,7 +248,7 @@ describe('MIDI Export Module', () => {
         glitchState: 'STABLE',
         glitchCount: 0
       });
-      
+
       expect(sentMessages.length).toBe(8);
       sentMessages.forEach(msg => {
         expect(msg[2]).toBeGreaterThanOrEqual(0);
@@ -259,14 +259,14 @@ describe('MIDI Export Module', () => {
     it('does nothing when not connected', () => {
       exporter.isConnected = false;
       exporter.output = null;
-      
+
       exporter.sendMetrics({
         rms: 0.5,
         bass: 30,
         mid: 40,
         treble: 30
       });
-      
+
       expect(sentMessages.length).toBe(0);
     });
   });
@@ -288,9 +288,9 @@ describe('MIDI Export Module', () => {
       outputs.set('out-1', new MockMIDIOutput('out-1', 'USB MIDI'));
       outputs.set('out-2', new MockMIDIOutput('out-2', 'MIDI Controller'));
       exporter.midi = { outputs, close: () => {} };
-      
+
       const result = exporter.getOutputs();
-      
+
       expect(result.length).toBe(2);
       expect(result[0]).toHaveProperty('id');
       expect(result[0]).toHaveProperty('name');
@@ -302,7 +302,7 @@ describe('MIDI Export Module', () => {
     beforeEach(() => {
       const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
-      
+
       const outputs = new Map();
       outputs.set('out-1', new MockMIDIOutput('out-1', 'USB MIDI'));
       outputs.set('out-2', new MockMIDIOutput('out-2', 'MIDI Controller'));
@@ -311,7 +311,7 @@ describe('MIDI Export Module', () => {
 
     it('sets specific MIDI output by ID', () => {
       exporter.setOutput('out-2');
-      
+
       expect(exporter.output.id).toBe('out-2');
       expect(exporter.output.name).toBe('MIDI Controller');
       expect(exporter.isConnected).toBe(true);
@@ -319,7 +319,7 @@ describe('MIDI Export Module', () => {
 
     it('sets isConnected to false for non-existent ID', () => {
       exporter.setOutput('non-existent');
-      
+
       expect(exporter.output).toBeNull();
       expect(exporter.isConnected).toBe(false);
     });
@@ -330,7 +330,7 @@ describe('MIDI Export Module', () => {
     beforeEach(() => {
       const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
-      
+
       const mockClose = jest.fn();
       const outputs = new Map();
       outputs.set('out-1', new MockMIDIOutput('out-1', 'Test'));
@@ -342,7 +342,7 @@ describe('MIDI Export Module', () => {
 
     it('disconnects and resets state', () => {
       exporter.close();
-      
+
       expect(exporter.isConnected).toBe(false);
       expect(exporter.output).toBeNull();
       expect(exporter.midi).toBeNull();
@@ -360,21 +360,8 @@ describe('MIDI Export Module', () => {
     it('registers a callback', () => {
       const callback = jest.fn();
       exporter.onMetrics(callback);
-      
-      expect(exporter.metricsListener).toBe(callback);
-    });
-  });
 
-  describe('Default export', () => {
-    it('exports default singleton in browser-like env', async () => {
-      // Re-import to test module loading
-      const modulePath = '../midi-export.js';
-      const defaultExport = require(modulePath).default;
-      
-      // In Node.js environment, default export is null (window check)
-      // This is expected behavior
-      // const { default: midiExporter } = await import(modulePath);
-      // expect(midiExporter).toBeNull();
+      expect(exporter.metricsListener).toBe(callback);
     });
   });
 });

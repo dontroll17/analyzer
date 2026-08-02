@@ -13,6 +13,7 @@ let bgMetricsHandler = null;
 let captureActive = false;
 let gracefulStop = false;
 let isConnected = false;
+let bgPortReconnectTimer = null; // Debounce timer for reconnect
 
 // Storage key for persisting drop count across popup reconnects
 const DROP_COUNT_KEY = 'ssa_audio_drop_count';
@@ -780,11 +781,19 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   const rawMid = isValid(mid) ? mid : 0;
   const rawTreble = isValid(treble) ? treble : 0;
 
-  // Формула сглаживания LERP (Linear Interpolation):
-  // Current = Current + (Target - Current) * Factor
-  smoothedBass += (rawBass - smoothedBass) * SMOOTHING_FACTOR;
-  smoothedMid += (rawMid - smoothedMid) * SMOOTHING_FACTOR;
-  smoothedTreble += (rawTreble - smoothedTreble) * SMOOTHING_FACTOR;
+  // Check for DC silence detection: all bands zero AND RMS zero
+  // Reset smoothing immediately to avoid ghost 100% bass
+  if (rawBass === 0 && rawMid === 0 && rawTreble === 0) {
+    smoothedBass = 0;
+    smoothedMid = 0;
+    smoothedTreble = 0;
+  } else {
+    // Формула сглаживания LERP (Linear Interpolation):
+    // Current = Current + (Target - Current) * Factor
+    smoothedBass += (rawBass - smoothedBass) * SMOOTHING_FACTOR;
+    smoothedMid += (rawMid - smoothedMid) * SMOOTHING_FACTOR;
+    smoothedTreble += (rawTreble - smoothedTreble) * SMOOTHING_FACTOR;
+  }
 
   const bassPercent = Math.min(100, Math.max(0, smoothedBass));
   const midPercent = Math.min(100, Math.max(0, smoothedMid));
@@ -1572,23 +1581,26 @@ function _bgPortDisconnectHandler() {
   bgPortDisconnectHandlerRef = null;
   
   // If capture was active when port disconnected, trigger reconnect
-  if (captureActive) {
-    // Retry up to 3 times with increasing delays
-    let retries = 0;
-    const maxRetries = 3;
-    
-    function tryReconnect() {
-      retries++;
-      if (retries > maxRetries) return;
-      
-      setTimeout(() => {
-        if (captureActive && !bgPort && !bgMetricsConnected) {
-          ensureBackgroundPort();
-        }
-      }, 500 * retries); // Exponential backoff: 500ms, 1000ms, 1500ms
+  if (captureActive && !gracefulStop) {
+    // Debounce reconnect — prevent rapid disconnect/reconnect cycle
+    if (bgPortReconnectTimer) {
+      clearTimeout(bgPortReconnectTimer);
+      bgPortReconnectTimer = null;
     }
     
-    tryReconnect();
+    // Check if we're still receiving metrics (connected recently)
+    // If yes, skip reconnect — port may be temporarily paused
+    const lastMetrics = performance.now();
+    const maxDelay = 3000; // Only reconnect if no data for 3s
+    
+    // Schedule reconnect after 2s (give time for background SW to stabilize)
+    bgPortReconnectTimer = setTimeout(() => {
+      if (captureActive && !bgPort && !bgMetricsConnected) {
+        log.warn('Reconnecting to background (no metrics for >2s)');
+        ensureBackgroundPort();
+      }
+      bgPortReconnectTimer = null;
+    }, 2000);
   }
   
   // Only update UI if capture was active (spontaneous disconnect)
@@ -1673,10 +1685,10 @@ function ensureBackgroundPort() {
     let metricsDroppedThrottle = 0;
     let metricsDroppedQueue = 0;
     
-    // Connection gap detection — warn when metrics gap > 500ms (indicates SW freeze/drop)
+    // Connection gap detection — warn when metrics gap > 1000ms (SW freeze/drop)
     let _lastMetricsTime = 0;
     let _missedFrames = 0;
-    const METRICS_GAP_WARN_MS = 500;
+    const METRICS_GAP_WARN_MS = 1000;
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {

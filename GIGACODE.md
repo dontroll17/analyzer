@@ -103,6 +103,22 @@ Bypass patterns: ratio=1 (compressor), 20/22050Hz (filters), gain=0dB, mix=0 (de
 - Port reconnect with exponential backoff
 - Logger system: `logger.js` with levels debug/info/warn/error
 
+## Test Directory Conventions — IMPORTANT
+
+**USE ONLY these directories for tests:**
+- `tests/` — General integration tests (popup, content, background, logger)
+- `dsp-engine/tests/` — DSP unit tests (FFT, bands, metrics)
+
+**NEVER use `__tests__/` directory.** Jest is NOT configured to run tests from there.
+Any tests placed in `__tests__/` will:
+1. NOT run during CI
+2. NOT count toward coverage
+3. Create false sense of test coverage
+4. Create maintenance burden (stale/temp files)
+
+If you need to add a test for `audio-worklet.js` → use `dsp-engine/tests/`.
+If you need to test popup, content, background, logger → use `tests/`.
+
 ## Running Tests
 
 ```bash

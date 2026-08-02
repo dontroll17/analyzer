@@ -75,7 +75,95 @@ if (typeof console.debug === 'undefined') {
   console.debug = console.log;
 }
 
-// Polyfill AudioContext (AudioWorklet unavailable in Jest)
+// ============================================
+// navigator.mediaDevices mocks (getDisplayMedia, getUserMedia)
+// ============================================
+// Critical: without these, real audio capture APIs may be called
+// during tests, triggering Windows Defender false positives (!#SLF:CMD_HSTR)
+
+if (typeof global.navigator === 'undefined') {
+  global.navigator = {};
+}
+
+// MediaStream mock factory
+function createMockMediaStream(audioTracks = 2, audioReadyState = 'live') {
+  const tracks = [];
+  for (let i = 0; i < audioTracks; i++) {
+    tracks.push({
+      stop: jest.fn(),
+      readyState: audioReadyState,
+      kind: 'audio',
+      enabled: true,
+      muted: false,
+    });
+  }
+  return {
+    getAudioTracks: jest.fn().mockReturnValue(tracks),
+    getVideoTracks: jest.fn().mockReturnValue([]),
+    getTracks: jest.fn().mockReturnValue(tracks),
+    addTrack: jest.fn((track) => tracks.push(track)),
+    removeTrack: jest.fn((track) => {
+      const idx = tracks.indexOf(track);
+      if (idx >= 0) tracks.splice(idx, 1);
+    }),
+    active: true,
+    id: 'mock-stream-' + Math.random().toString(36).substr(2, 9),
+    onaddtrack: null,
+    onremovetrack: null,
+  };
+}
+
+// Mock getDisplayMedia (tab capture)
+const mockGetDisplayMedia = jest.fn().mockImplementation((constraints) => {
+  // Return stream with audio tracks by default
+  return Promise.resolve(createMockMediaStream(2, 'live'));
+});
+
+// Mock getUserMedia (microphone)
+const mockGetUserMedia = jest.fn().mockImplementation((constraints) => {
+  return Promise.resolve(createMockMediaStream(1, 'live'));
+});
+
+// Set up navigator.mediaDevices
+global.navigator.mediaDevices = {
+  getUserMedia: mockGetUserMedia,
+  getDisplayMedia: mockGetDisplayMedia,
+  enumerateDevices: jest.fn().mockResolvedValue([]),
+  ondevicechange: null,
+};
+
+// Mock MediaStream class (if not already mocked by test)
+if (typeof global.MediaStream === 'undefined') {
+  global.MediaStream = class MediaStream {
+    constructor(tracks = []) {
+      this._tracks = tracks;
+      this.active = true;
+      this.id = 'mock-' + Math.random().toString(36).substr(2, 9);
+    }
+    getAudioTracks() { return this._tracks.filter(t => t.kind === 'audio'); }
+    getVideoTracks() { return this._tracks.filter(t => t.kind === 'video'); }
+    getTracks() { return this._tracks; }
+    addTrack(track) { this._tracks.push(track); }
+    removeTrack(track) {
+      const idx = this._tracks.indexOf(track);
+      if (idx >= 0) this._tracks.splice(idx, 1);
+    }
+    onaddtrack = null;
+    onremovetrack = null;
+  };
+}
+
+// Mock AudioBuffer
+if (typeof global.AudioBuffer === 'undefined') {
+  global.AudioBuffer = class AudioBuffer {
+    constructor(opts = {}) {
+      this.length = opts.length || 44100;
+      this.sampleRate = opts.sampleRate || 44100;
+    }
+  };
+}
+
+// AudioContext (AudioWorklet unavailable in Jest)
 if (typeof global.AudioContext === 'undefined') {
   global.AudioContext = jest.fn().mockReturnValue({
     audioWorklet: { addModule: jest.fn() },
