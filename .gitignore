@@ -32,6 +32,7 @@ build/
 *~
 
 # Test files (not part of extension)
+test-results/
 
 jest.config.js
 jest.setup.js
