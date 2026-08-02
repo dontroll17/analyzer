@@ -49,32 +49,5 @@
       "timestamp": "2026-08-02T15:23:10.500Z",
       "checkName": "Coverage Report"
     }
-  ],
-  "comparison": {
-    "hasHistory": true,
-    "previousFile": "run-2026-08-02T15-23-10-500Z.json",
-    "comparisons": [
-      {
-        "metric": "statements",
-        "previous": 93.7,
-        "current": 93.7,
-        "diff": "0.00",
-        "status": "PASS"
-      },
-      {
-        "metric": "functions",
-        "previous": 93.3,
-        "current": 93.3,
-        "diff": "0.00",
-        "status": "PASS"
-      },
-      {
-        "metric": "branches",
-        "previous": 96,
-        "current": 96,
-        "diff": "0.00",
-        "status": "PASS"
-      }
-    ]
-  }
+  ]
 }
