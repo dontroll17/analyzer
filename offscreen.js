@@ -327,88 +327,76 @@ async function startCapture(source, tabStreamId) {
       }
       
       case 'combined': {
-        // Tab audio + microphone - need to capture both
-        // For combined mode, we still need to get tab stream ID first
-        if (!tabStreamId) {
-          safeSendMessage({
-            type: '_OFFSCREEN_ERROR',
-            error: 'Tab stream ID is required for combined mode'
+        // Tab audio + microphone
+        // getDisplayMedia will prompt user to share tab with audio
+        try {
+          mediaStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { width: 1, height: 1, displaySurface: 'browser' },
+            audio: true
           });
-          cleanup();
-          return { ok: false, error: 'missing_tab_stream_id' };
-        }
-        
-        // Check if tab has audio tracks (can't easily check without starting)
-        // Use getUserMedia with tab source
-        const tabStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            mandatory: {
-              chromeMediaSource: 'tab',
-              chromeMediaSourceId: tabStreamId
+          
+          // Now also get microphone
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 44100
             }
-          },
-          video: false
-        });
-        
-        const tabAudioTracks = tabStream.getAudioTracks();
-        if (tabAudioTracks.length === 0) {
+          });
+          
+          // Combine: create a new stream with tab + mic tracks
+          const combinedStream = new MediaStream();
+          mediaStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+          micStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+          
+          // Stop mic stream (tracks are already added)
+          micStream.getTracks().forEach(t => t.stop());
+          mediaStream = combinedStream;
+        } catch (err) {
+          if (err.name === 'NotAllowedError') {
+            return { ok: false, error: 'Capture denied by user' };
+          }
           safeSendMessage({
             type: '_OFFSCREEN_ERROR',
-            error: 'No tab audio — make sure to check "Share tab audio"'
+            error: 'Combined capture failed: ' + err.message
           });
-          cleanup();
-          return { ok: false, error: 'no_tab_audio' };
+          return { ok: false, error: 'combined_capture_failed' };
         }
-        
-        // Get microphone
-        const micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 44100
-          }
-        });
-        
-        // Combine: create a new stream with both audio tracks
-        const combinedStream = new MediaStream();
-        tabAudioTracks.forEach(track => combinedStream.addTrack(track));
-        micStream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
-        
-        // Stop mic stream (tracks are already added)
-        micStream.getTracks().forEach(t => t.stop());
-        
-        mediaStream = combinedStream;
         break;
       }
       
       case 'tab':
       default: {
         // Tab audio only (default)
-        // Use getUserMedia with the tab source ID
-        // If tabStreamId is null, Chrome will show its native tab selection dialog
-        streamOptions = {
-          audio: {
-            mandatory: {
-              chromeMediaSource: 'tab',
-              ...(tabStreamId ? { chromeMediaSourceId: tabStreamId } : {})
-            },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 44100
-          },
-          video: false
-        };
-        mediaStream = await navigator.mediaDevices.getUserMedia(streamOptions);
-        const tracks = mediaStream.getAudioTracks();
-        if (tracks.length === 0) {
+        // Use getDisplayMedia with audio (replaces tabCapture API removed in Chrome 123+)
+        // This shows the native Chrome "Share tab audio" dialog
+        try {
+          mediaStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { width: 1, height: 1, displaySurface: 'browser' },
+            audio: true
+          });
+          
+          // User may have shared screen without audio - try to get tab audio only
+          if (mediaStream.getAudioTracks().length === 0) {
+            safeSendMessage({
+              type: '_OFFSCREEN_ERROR',
+              error: 'Please enable "Share tab audio" in the dialog'
+            });
+            mediaStream.getTracks().forEach(t => t.stop());
+            cleanup();
+            return { ok: false, error: 'no_tab_audio' };
+          }
+        } catch (getDisplayErr) {
+          // getDisplayMedia may fail if user cancels or if extension context
+          if (getDisplayErr.name === 'NotAllowedError') {
+            return { ok: false, error: 'Tab capture denied by user' };
+          }
           safeSendMessage({
             type: '_OFFSCREEN_ERROR',
-            error: 'No tab audio — make sure to check "Share tab audio"'
+            error: 'getDisplayMedia failed: ' + getDisplayErr.message
           });
-          cleanup();
-          return { ok: false, error: 'no_tab_audio' };
+          return { ok: false, error: 'getDisplay_media_failed' };
         }
         break;
       }
