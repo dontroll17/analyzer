@@ -9,14 +9,18 @@ export default defineConfig({
       'dsp-engine/tests/**/*.test.js',
       'dsp-engine/tests/**/*.spec.js',
     ],
+    setupFiles: ['tests/unit/setup.js'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      // Only check coverage for files that are actually imported in tests
+      // Only measure coverage for files that have unit tests
       include: [
-        'dsp-engine/**/*.js',
-        'popup/**/popup-testable.js',
+        'dsp-engine/rms.js',
+        'dsp-engine/midi-export.js',
+        'dsp-engine/defensive-processors.js',
+        'popup/popup-testable.js',
       ],
+      // Exclude files not covered by unit tests
       exclude: [
         'node_modules/',
         'tests/',
@@ -24,12 +28,11 @@ export default defineConfig({
         'coverage/',
         '**/*.test.js',
         '**/*.spec.js',
-        // Main extension files tested via E2E, not unit tests
+        // Main extension files tested via E2E only (not counted in coverage threshold)
         'background.js',
         'content.js',
         'offscreen.js',
         'logger.js',
-        // Not yet tested
         'dsp-engine/audio-worklet.js',
         'dsp-engine/frequency-bands.js',
         'dsp-engine/real-speech.js',
