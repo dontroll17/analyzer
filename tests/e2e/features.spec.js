@@ -376,4 +376,155 @@ test.describe('E2E Features', () => {
     expect(drops.hasCount).toBe(true);
     expect(drops.isHidden).toBe(true); // Should be hidden when not capturing
   });
+
+  // === Entropy State Display Test ===
+
+  test('should have entropy state indicator element', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const entropyState = await page.evaluate(() => {
+      const el = document.getElementById('entropyState');
+      return {
+        exists: !!el,
+        text: el?.textContent?.trim(),
+        classList: el?.className || '',
+      };
+    });
+
+    expect(entropyState.exists).toBe(true);
+    expect(typeof entropyState.text).toBe('string');
+  });
+
+  // === Glitch State Color Tests ===
+
+  test('should have glitch state dot with expected classes', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const glitchDot = await page.evaluate(() => {
+      const dot = document.getElementById('glitchStateDot');
+      return {
+        exists: !!dot,
+        classList: dot?.className || '',
+        styleDisplay: dot?.style?.display,
+      };
+    });
+
+    expect(glitchDot.exists).toBe(true);
+    expect(typeof glitchDot.classList).toBe('string');
+  });
+
+  // === Split Screen Controls Test ===
+
+  test('should have split screen toggle and set reference button', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const splitControls = await page.evaluate(() => {
+      return {
+        splitBtn: !!document.getElementById('splitBtn'),
+        setRefBtn: !!document.getElementById('setRefBtn'),
+        splitActive: document.getElementById('splitBtn')?.classList?.contains('active'),
+      };
+    });
+
+    expect(splitControls.splitBtn).toBe(true);
+    expect(splitControls.setRefBtn).toBe(true);
+    expect(typeof splitControls.splitActive).toBe('boolean');
+  });
+
+  // === Capture Source State Test ===
+
+  test('should track active capture source selection', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const sourceState = await page.evaluate(() => {
+      const select = document.getElementById('captureSourceSelect');
+      return {
+        selected: select?.value,
+        hasOptions: select?.options?.length > 0,
+      };
+    });
+
+    expect(sourceState.selected).toMatch(/^(tab|mic|combined)$/);
+    expect(sourceState.hasOptions).toBe(true);
+  });
+
+  // === Threshold Slider Range Test ===
+
+  test('should have threshold slider with correct min/max values', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const sliderInfo = await page.evaluate(() => {
+      const slider = document.getElementById('thresholdSlider');
+      return {
+        min: slider?.min,
+        max: slider?.max,
+        step: slider?.step,
+        defaultValue: slider?.value,
+      };
+    });
+
+    expect(sliderInfo.min).toBe('60');
+    expect(sliderInfo.max).toBe('90');
+    expect(sliderInfo.step).toBe('1');
+    expect(sliderInfo.defaultValue).toBe('85');
+  });
+
+  // === Limiter Settings UI Test ===
+
+  test('should have limiter section with threshold slider', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const limiterUI = await page.evaluate(() => {
+      const limiterSection = document.getElementById('limiterSection');
+      return {
+        exists: !!limiterSection,
+        threshold: !!document.getElementById('limThresh'),
+        attack: !!document.getElementById('limAttack'),
+        release: !!document.getElementById('limRelease'),
+      };
+    });
+
+    expect(limiterUI.exists).toBe(true);
+    expect(limiterUI.threshold).toBe(true);
+    expect(limiterUI.attack).toBe(true);
+    expect(limiterUI.release).toBe(true);
+  });
+
+  // === Log Count Display Test ===
+
+  test('should have log count display element', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const countInfo = await page.evaluate(() => {
+      const countEl = document.getElementById('logsCount');
+      return {
+        exists: !!countEl,
+        text: countEl?.textContent?.trim(),
+      };
+    });
+
+    expect(countInfo.exists).toBe(true);
+    expect(countInfo.text).toMatch(/^\d+$/);
+  });
 });

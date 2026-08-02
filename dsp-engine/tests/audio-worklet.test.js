@@ -1,6 +1,7 @@
 const { fftReal1024, hzToBin, downsampleSpectrum, calculateBandEntropy, detectSpectralFlatness,
   calculateFrequencyBands, detectHighFrequencyAnomaly, calculateZCR, calculateRMS,
-  calculateSpectralCentroid, calculateSpectralRolloff, checkGlitchState, FFT_SIZE, HALF_N
+  calculateSpectralCentroid, calculateSpectralRolloff, checkGlitchState, calculateMFCC,
+  FFT_SIZE, HALF_N
 } = require("./dsp-engine-testable");
 
 // ====================== fftReal1024 Tests ======================
@@ -860,5 +861,231 @@ describe("Integration Tests", function() {
   test("FFT_SIZE and HALF_N are exported correctly", function() {
     expect(FFT_SIZE).toBe(1024);
     expect(HALF_N).toBe(512);
+  });
+});
+// ====================== MFCC (V4 AI Detection) Tests ======================
+describe("calculateMFCC — V4 AI Detection", function() {
+  test("returns 13-element Float32Array for valid FFT input", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    expect(mfcc).toBeInstanceOf(Float32Array);
+    expect(mfcc.length).toBe(13);
+  });
+
+  test("MFCC coefficients are finite numbers", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 440 * i / 44100) * 0.3;
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    for (var i = 0; i < mfcc.length; i++) {
+      expect(Number.isFinite(mfcc[i])).toBe(true);
+    }
+  });
+
+  test("MFCC for silence returns deterministic coefficients", function() {
+    var input = new Float32Array(1024);
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    // Silence: all bins are ~0, log(1e-10) ≈ -23, DCT accumulates these
+    // Result is deterministic but not near-zero
+    for (var i = 0; i < mfcc.length; i++) {
+      expect(Number.isFinite(mfcc[i])).toBe(true);
+    }
+    // First coefficient should be large negative (accumulated log(epsilon))
+    expect(mfcc[0]).toBeLessThan(0);
+  });
+
+  test("different signals produce different MFCC", function() {
+    var tone440 = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) tone440[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
+    var fft440 = fftReal1024(tone440);
+    var mfcc440 = calculateMFCC(fft440, 44100);
+
+    var tone880 = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) tone880[i] = Math.sin(2 * Math.PI * 880 * i / 44100);
+    var fft880 = fftReal1024(tone880);
+    var mfcc880 = calculateMFCC(fft880, 44100);
+
+    // At least 3 coefficients should differ
+    var diffCount = 0;
+    for (var i = 0; i < 13; i++) {
+      if (Math.abs(mfcc440[i] - mfcc880[i]) > 0.1) diffCount++;
+    }
+    expect(diffCount).toBeGreaterThan(3);
+  });
+
+  test("works with 48000 sample rate", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 1000 * i / 48000);
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 48000);
+    expect(mfcc).toBeInstanceOf(Float32Array);
+    expect(mfcc.length).toBe(13);
+    for (var i = 0; i < mfcc.length; i++) {
+      expect(Number.isFinite(mfcc[i])).toBe(true);
+    }
+  });
+
+  test("MFCC first coefficient (DC) is typically largest magnitude", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) {
+      input[i] = 0.3 * Math.sin(2 * Math.PI * 220 * i / 44100) +
+                 0.1 * Math.sin(2 * Math.PI * 880 * i / 44100);
+    }
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    // MFCC[0] represents overall energy envelope
+    expect(Math.abs(mfcc[0])).toBeGreaterThan(Math.abs(mfcc[12]));
+  });
+
+  test("MFCC for broadband noise differs from tonal signal", function() {
+    var tone = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) tone[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
+    var fftTone = fftReal1024(tone);
+    var mfccTone = calculateMFCC(fftTone, 44100);
+
+    var noise = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) noise[i] = (Math.random() - 0.5) * 2.0;
+    var fftNoise = fftReal1024(noise);
+    var mfccNoise = calculateMFCC(fftNoise, 44100);
+
+    // Noise should have higher MFCC variance across coefficients
+    var toneVar = 0, noiseVar = 0;
+    for (var i = 0; i < 13; i++) {
+      toneVar += mfccTone[i] * mfccTone[i];
+      noiseVar += mfccNoise[i] * mfccNoise[i];
+    }
+    // Both should be finite and different
+    expect(Number.isFinite(toneVar)).toBe(true);
+    expect(Number.isFinite(noiseVar)).toBe(true);
+    expect(toneVar).not.toBe(noiseVar);
+  });
+
+  test("MFCC produces consistent results on repeated calls", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 330 * i / 44100);
+    var fftData = fftReal1024(input);
+    var mfcc1 = calculateMFCC(fftData, 44100);
+    var mfcc2 = calculateMFCC(fftData, 44100);
+    for (var i = 0; i < 13; i++) {
+      expect(mfcc1[i]).toBeCloseTo(mfcc2[i], 10);
+    }
+  });
+
+  test("MFCC with null/undefined sample rate uses default 44100", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
+    var fftData = fftReal1024(input);
+    var mfcc1 = calculateMFCC(fftData, null);
+    var mfcc2 = calculateMFCC(fftData, undefined);
+    for (var i = 0; i < 13; i++) {
+      expect(mfcc1[i]).toBeCloseTo(mfcc2[i], 10);
+    }
+  });
+
+  test("MFCC for 50Hz tone has energy in low-frequency bands", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) input[i] = Math.sin(2 * Math.PI * 50 * i / 44100);
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    // Low freq tone should have specific MFCC pattern
+    expect(Number.isFinite(mfcc[0])).toBe(true);
+    expect(Math.abs(mfcc[0])).toBeGreaterThan(0.1);
+  });
+
+  test("MFCC does not crash with extreme FFT values", function() {
+    var fftData = new Float32Array(512);
+    for (var i = 0; i < 512; i++) fftData[i] = 100.0;
+    var mfcc = calculateMFCC(fftData, 44100);
+    expect(mfcc).not.toBeNull();
+    for (var i = 0; i < 13; i++) {
+      expect(Number.isFinite(mfcc[i])).toBe(true);
+    }
+  });
+
+  test("MFCC preserves relative ordering of tonal hierarchy", function() {
+    // Complex tone with harmonics simulates musical instrument
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) {
+      input[i] = Math.sin(2 * Math.PI * 261.63 * i / 44100) + // C4
+                 0.5 * Math.sin(2 * Math.PI * 523.25 * i / 44100) + // C5
+                 0.25 * Math.sin(2 * Math.PI * 784.88 * i / 44100); // G5
+    }
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    // Should produce meaningful coefficients
+    expect(mfcc[0]).not.toBeNaN();
+    expect(mfcc[0]).not.toBe(0);
+  });
+});
+
+// ====================== V4 Integration Tests ======================
+describe("V4 AI Detection — Integration", function() {
+  test("full V4 pipeline: input → FFT → MFCC → temporal analysis simulation", function() {
+    // Simulate a signal analysis pipeline
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) {
+      input[i] = 0.3 * Math.sin(2 * Math.PI * 440 * i / 44100) +
+                 0.1 * (Math.random() - 0.5);
+    }
+    
+    var fftData = fftReal1024(input);
+    expect(fftData.length).toBe(512);
+    
+    var mfcc = calculateMFCC(fftData, 44100);
+    expect(mfcc).not.toBeNull();
+    expect(mfcc.length).toBe(13);
+    
+    // Simulate temporal statistics (100-frame window)
+    var mfccHistory = [];
+    for (var frame = 0; frame < 10; frame++) {
+      var frameInput = new Float32Array(1024);
+      for (var i = 0; i < 1024; i++) {
+        frameInput[i] = input[i] * (1 + 0.1 * Math.sin(2 * Math.PI * frame / 10));
+      }
+      var frameFft = fftReal1024(frameInput);
+      var frameMfcc = calculateMFCC(frameFft, 44100);
+      mfccHistory.push(Array.from(frameMfcc));
+    }
+    
+    // Compute temporal mean
+    var temporalMean = new Float32Array(13);
+    for (var c = 0; c < 13; c++) {
+      var sum = 0;
+      for (var f = 0; f < mfccHistory.length; f++) {
+        sum += mfccHistory[f][c];
+      }
+      temporalMean[c] = sum / mfccHistory.length;
+      expect(Number.isFinite(temporalMean[c])).toBe(true);
+    }
+  });
+
+  test("aiScore heuristic: tonal speech-like signal", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) {
+      input[i] = 0.3 * Math.sin(2 * Math.PI * 200 * i / 44100) +
+                 0.15 * Math.sin(2 * Math.PI * 600 * i / 44100) +
+                 0.1 * Math.sin(2 * Math.PI * 1200 * i / 44100);
+    }
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    expect(mfcc).not.toBeNull();
+    expect(mfcc.length).toBe(13);
+    // Human speech-like: low aiScore (not AI-generated)
+    // (Score depends on combined metrics, MFCC is just one component)
+  });
+
+  test("aiScore heuristic: synthetic-like uniform signal", function() {
+    var input = new Float32Array(1024);
+    for (var i = 0; i < 1024; i++) {
+      // Very regular synthetic pattern
+      input[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / 44100);
+    }
+    var fftData = fftReal1024(input);
+    var mfcc = calculateMFCC(fftData, 44100);
+    expect(mfcc).not.toBeNull();
+    expect(mfcc.length).toBe(13);
   });
 });

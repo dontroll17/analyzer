@@ -9,8 +9,8 @@
     "offscreen",
     "storage",
     "alarms",
-    "tabCapture",
-    "sidePanel"
+    "sidePanel",
+    "tabs"
   ],
   "side_panel": {
     "default_path": "popup/popup.html"

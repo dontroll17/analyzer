@@ -29,7 +29,8 @@
   <!-- Performance Monitor -->
   <div id="perfMonitorHeader" class="section-tertiary" style="margin-top: 10px; padding: 4px 8px;">
     <div class="flex-between">
-      <div class="label-sm">Performance</div>
+      <div class="label-sm">Performance Monitor</div>
+      <span class="metric-desc" style="width:100%;text-align:right;">FPS, draw time, latency, DSP load, memory, connection stats</span>
       <button id="togglePerfBtn" class="btn-sm">Perf</button>
     </div>
   </div>
@@ -54,6 +55,7 @@
   <!-- RMS Display Section -->
   <div id="rmsSection" class="section" style="display: none;">
     <div class="label" style="margin-bottom: 8px;">Current RMS:</div>
+    <span class="metric-desc" style="margin-bottom: 4px;">Root Mean Square — perceived loudness (0=silent, 1=full scale)</span>
     <div id="rmsValue" class="text-bold" style="font-size: 18px;">0.0000</div>
     <div id="peakValue" class="text-red" style="font-size: 11px; margin-bottom: 2px;">Peak: --</div>
     <div id="rmsLevel" class="label" style="margin-bottom: 10px;">Level: --</div>
@@ -64,45 +66,49 @@
       </div>
     </div>
 
-    <!-- Frequency Bands Section -->
-    <div id="freqBandsSection" class="divider" style="margin-top: 10px; padding-top: 10px; display: none;">
-      <div class="flex-between" style="margin-bottom: 8px;">
-        <div class="label">Frequency Bands:</div>
-        <div id="channelIndicator" class="channel-indicator">MONO</div>
-      </div>
+      <!-- Frequency Bands Section -->
+      <div id="freqBandsSection" class="divider" style="margin-top: 10px; padding-top: 10px; display: none;">
+        <div class="flex-between" style="margin-bottom: 8px;">
+          <div class="label">Frequency Bands:</div>
+          <span class="metric-desc">Energy distribution across spectral bands</span>
+          <div id="channelIndicator" class="channel-indicator">MONO</div>
+        </div>
 
-      <!-- Bass Band -->
-      <div style="margin-bottom: 6px;">
-        <div class="flex-between label-sm">
-          <span>Bass (0-220Hz)</span>
-          <span id="bassValue">0%</span>
+        <!-- Bass Band -->
+        <div style="margin-bottom: 6px;">
+          <div class="flex-between label-sm">
+            <span>Bass (0-220Hz)</span>
+            <span id="bassValue">0%</span>
+          </div>
+          <span class="metric-desc">Low frequencies — kick, bass guitar, rumble</span>
+          <div class="bar-track">
+            <div id="bassBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--bass-start), var(--bass-end));"></div>
+          </div>
         </div>
-        <div class="bar-track">
-          <div id="bassBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--bass-start), var(--bass-end));"></div>
-        </div>
-      </div>
 
-      <!-- Mid Band -->
-      <div style="margin-bottom: 6px;">
-        <div class="flex-between label-sm">
-          <span>Mid (220-4400Hz)</span>
-          <span id="midValue">0%</span>
+        <!-- Mid Band -->
+        <div style="margin-bottom: 6px;">
+          <div class="flex-between label-sm">
+            <span>Mid (220-4400Hz)</span>
+            <span id="midValue">0%</span>
+          </div>
+          <span class="metric-desc">Core frequencies — vocals, guitars, most instruments</span>
+          <div class="bar-track">
+            <div id="midBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--mid-start), var(--mid-end));"></div>
+          </div>
         </div>
-        <div class="bar-track">
-          <div id="midBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--mid-start), var(--mid-end));"></div>
-        </div>
-      </div>
 
-      <!-- Treble Band -->
-      <div style="margin-bottom: 6px;">
-        <div class="flex-between label-sm">
-          <span>Treble (4.4-22kHz)</span>
-          <span id="trebleValue">0%</span>
+        <!-- Treble Band -->
+        <div style="margin-bottom: 6px;">
+          <div class="flex-between label-sm">
+            <span>Treble (4.4-22kHz)</span>
+            <span id="trebleValue">0%</span>
+          </div>
+          <span class="metric-desc">High frequencies — cymbals, air, harsh artifacts</span>
+          <div class="bar-track">
+            <div id="trebleBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--treble-start), var(--treble-end));"></div>
+          </div>
         </div>
-        <div class="bar-track">
-          <div id="trebleBar" class="bar-fill" style="width: 0%; background: linear-gradient(90deg, var(--treble-start), var(--treble-end));"></div>
-        </div>
-      </div>
 
       <!-- Glitch Settings -->
       <div id="glitchSettings" class="section-tertiary" style="margin-top: 10px; display: none;">
@@ -110,6 +116,7 @@
           <div class="label">Glitch Sensitivity:</div>
           <button id="resetSensitivityBtn" class="btn-sm">Reset</button>
         </div>
+        <span class="metric-desc">Threshold for high-frequency anomaly detection — higher = more sensitive</span>
         <div class="flex-gap">
           <input type="range" id="thresholdSlider" min="60" max="90" value="85" step="1">
           <span id="thresholdValue" class="text-bold" style="font-size: 11px; min-width: 35px; text-align: right;">85%</span>
@@ -120,20 +127,31 @@
       <div id="glitchSection" class="section-tertiary flex-between" style="margin-top: 10px;">
         <div>
           State: <span id="glitchStateDot" class="text-green" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); margin-right: 5px;"></span><span id="glitchStatus" class="text-bold text-green">STABLE</span>
+          <span class="metric-desc">Audio anomaly state — STABLE/DRIFT/GLITCH based on spectral analysis</span>
         </div>
         <div>
           Glitches: <span id="glitchCount" class="text-bold" style="color: var(--text-primary);">0</span>
+          <span class="metric-desc">Cumulative glitch counter since capture start</span>
         </div>
       </div>
 
       <!-- Spectral Entropy Display -->
       <div id="entropySection" class="section-tertiary flex-between" style="margin-top: 8px; display: none;">
-        <span class="label">Entropy:</span>
-        <span id="entropyValue" class="text-bold text-green">0.00</span>
-        <span class="label">Flat:</span>
-        <span id="flatnessValue" class="text-bold text-green">0.00</span>
-        <span class="label">State:</span>
-        <span id="entropyState" class="text-bold text-green">STABLE</span>
+        <div>
+          <span class="label">Entropy:</span>
+          <span id="entropyValue" class="text-bold text-green">0.00</span>
+          <span class="metric-desc">Shannon entropy of 4 spectral bands — measures audio randomness</span>
+        </div>
+        <div>
+          <span class="label">Flat:</span>
+          <span id="flatnessValue" class="text-bold text-green">0.00</span>
+          <span class="metric-desc">Spectral flatness — tone vs noise ratio (1=noise, 0=tone)</span>
+        </div>
+        <div>
+          <span class="label">State:</span>
+          <span id="entropyState" class="text-bold text-green">STABLE</span>
+          <span class="metric-desc">Entropy-based anomaly classification</span>
+        </div>
       </div>
       <div id="entropyHint" class="label-xs" style="display: none;">
         H: voice&lt;1.0 DRIFT · &gt;1.5+noise GLITCH
@@ -144,20 +162,32 @@
         <div class="flex-between" style="margin-bottom: 4px;">
           <span class="label-sm">HNR:</span>
           <span id="hnrValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Harmonic-to-Noise Ratio — voice quality indicator</span>
+        </div>
+        <div class="flex-between" style="margin-bottom: 4px;">
           <span class="label-sm">ZCR:</span>
           <span id="zcrValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Zero Crossing Rate — signal texture / roughness</span>
         </div>
         <div class="flex-between" style="margin-bottom: 4px;">
           <span class="label-sm">Centroid:</span>
           <span id="centroidValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Spectral Centroid — "brightness" of sound</span>
+        </div>
+        <div class="flex-between" style="margin-bottom: 4px;">
           <span class="label-sm">Rolloff:</span>
           <span id="rolloffValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">85% energy rolloff frequency</span>
         </div>
         <div class="flex-between">
           <span class="label-sm">Onset:</span>
           <span id="onsetValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">NO</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Spectral flux onset detection</span>
+        </div>
+        <div class="flex-between">
           <span class="label-sm">RTT:</span>
           <span id="rttValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Round-trip connection latency</span>
         </div>
       </div>
 
@@ -166,21 +196,55 @@
         <div class="flex-between" style="margin-bottom: 3px;">
           <span class="label-sm">D.Range:</span>
           <span id="drValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Dynamic range — peak dB minus RMS dB</span>
+        </div>
+        <div class="flex-between" style="margin-bottom: 3px;">
           <span class="label-sm">B/M:</span>
           <span id="bassMidRatioValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Bass-to-Mid energy ratio in dB</span>
         </div>
         <div class="flex-between">
           <span class="label-sm">M/T:</span>
           <span id="midTrebleRatioValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Mid-to-Treble energy ratio in dB</span>
+        </div>
+        <div class="flex-between">
           <span class="label-sm">Rate:</span>
           <span id="glitchRateValue" class="text-bold" style="font-size: 10px; color: var(--accent-blue);">--</span>
+          <span class="metric-desc" style="width:100%;text-align:right;">Detected glitch rate per second</span>
+        </div>
+      </div>
+
+      <!-- AI Detection Section (V4) -->
+      <div id="aiScoreSection" class="section-tertiary" style="margin-top: 6px; display: none;">
+        <div class="flex-between" style="margin-bottom: 4px;">
+          <span class="label-sm">🤖 AI Score</span>
+          <span id="aiScoreValue" class="text-bold" style="font-size: 11px; color: var(--accent-blue);">--</span>
+        </div>
+        <div style="background: rgba(255,255,255,0.05); border-radius: 4px; height: 6px; margin: 4px 0; overflow: hidden;">
+          <div id="aiScoreBar" style="height: 100%; width: 0%; border-radius: 4px; transition: width 0.3s, background 0.3s; background: var(--accent-blue);"></div>
+        </div>
+        <div class="flex-between" style="font-size: 9px; margin-top: 2px;">
+          <span class="metric-desc" style="width:100%;text-align:right;">Probability of AI-generated audio (0=real, 100=AI)</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 8px; color: var(--text-muted); margin-top: 2px;">
+          <span>REAL</span>
+          <span>SUSPICIOUS</span>
+          <span>AI-GEN</span>
+        </div>
+        <div class="flex-between" style="margin-top: 4px;">
+          <span class="label-sm">MFCC:</span>
+          <span id="mfccValue" class="text-bold" style="font-size: 9px; color: var(--text-muted);">--</span>
+          <span class="label-sm">σ:</span>
+          <span id="mfccStdValue" class="text-bold" style="font-size: 9px; color: var(--text-muted);">--</span>
         </div>
       </div>
 
       <!-- Audio Effects Section (C.3) -->
       <div id="effectsSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="label" style="margin-bottom: 4px;">Audio Effects</div>
+        <span class="metric-desc" style="margin-bottom: 8px;">Real-time signal processing chain — compressor → EQ → delay → limiter</span>
         <div class="flex-between" style="margin-bottom: 8px;">
-          <div class="label">Audio Effects</div>
           <button id="effectsResetBtn" class="btn-sm">Reset All</button>
         </div>
 
@@ -193,6 +257,7 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <span class="effect-desc">Reduces dynamic range — lowers peaks to control loudness variations</span>
           <div class="flex-gap" style="font-size: 9px;">
             <div style="flex:1;">
               <label class="label-xs">Threshold: <span id="compThresholdVal">-24</span>dB</label>
@@ -228,6 +293,7 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <span class="effect-desc">Shapes frequency response — cut bass/tilt highs, boost/cut specific bands</span>
           <div class="flex-gap" style="font-size: 9px;">
             <div style="flex:1;">
               <label class="label-xs">HPF Freq: <span id="hpfFreqVal">20</span>Hz</label>
@@ -263,6 +329,7 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <span class="effect-desc">Hard ceiling — prevents signal from exceeding threshold using soft-clipping curve</span>
           <div class="flex-gap" style="font-size: 9px;">
             <div style="flex:1;">
               <label class="label-xs">Threshold: <span id="limThreshVal">-1</span>dB</label>
@@ -280,6 +347,7 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <span class="effect-desc">Echo effect — repeats signal with configurable timing, feedback, and wet/dry mix</span>
           <div class="flex-gap" style="font-size: 9px;">
             <div style="flex:1;">
               <label class="label-xs">Time: <span id="delayTimeVal">0.0</span>s</label>
@@ -299,17 +367,18 @@
 
       <!-- Oscilloscope Section -->
       <div id="oscilloscopeSection" class="section" style="margin-top: 15px; display: none;">
+        <div class="label" style="margin-bottom: 4px;">Oscilloscope</div>
+        <span class="metric-desc" style="margin-bottom: 8px;">Real-time waveform view — Left (cyan) / Right (magenta) channel waveforms</span>
         <div class="flex-between" style="margin-bottom: 8px;">
-          <div class="label">Oscilloscope</div>
-          <div class="flex-gap">
+          <div class="flex-gap" style="flex-wrap: wrap;">
             <button id="freezeBtn" class="btn-sm" title="Freeze oscilloscope">❄️ Freeze</button>
             <button id="splitBtn" class="btn-sm" title="Split-screen: live + reference">◱ Split</button>
-            <button id="setRefBtn" class="btn-sm" title="Set current frame as reference">📌 Reference</button>
-            <button id="clearOscBtn" class="btn-sm btn-clear-osc" title="Clear oscilloscope">🗑️ Clear</button>
-            <button id="zoomBtn" class="btn-sm" title="Toggle zoom">🔍 Zoom</button>
+            <button id="setRefBtn" class="btn-sm" title="Set current frame as reference">📌 Ref</button>
+            <button id="clearOscBtn" class="btn-sm btn-clear-osc" title="Clear oscilloscope">🗑️</button>
+            <button id="zoomBtn" class="btn-sm" title="Toggle zoom">🔍</button>
             <button id="logScaleBtn" class="btn-sm" title="Toggle log scale">log</button>
-            <button id="exportBtn" class="btn-export-csv">CSV</button>
-            <button id="exportLogBtn" class="btn-export-log">Log</button>
+            <button id="exportBtn" class="btn-sm btn-export-csv" style="flex-shrink: 0;">CSV</button>
+            <button id="exportLogBtn" class="btn-sm btn-export-log" style="flex-shrink: 0;">Log</button>
           </div>
         </div>
 
@@ -324,16 +393,17 @@
 
       <!-- Glitch Timeline Section -->
       <div id="timelineSection" class="section" style="margin-top: 15px; display: none;">
-        <div class="label" style="margin-bottom: 8px;">Glitch Timeline</div>
+        <div class="label" style="margin-bottom: 4px;">Glitch Timeline</div>
+        <span class="metric-desc" style="margin-bottom: 8px;">RMS history over time — colored by state: cyan=STABLE, purple=DRIFT, pink=GLITCH</span>
         <canvas id="timelineCanvas" width="260" height="60" class="canvas tim-canvas"></canvas>
       </div>
 
       <!-- Glitch Heatmap Section -->
       <div id="heatmapSection" class="section" style="margin-top: 15px; display: none;">
-        <div class="flex-between" style="margin-bottom: 8px;">
+        <div class="flex-between" style="margin-bottom: 4px;">
           <div class="label">Glitch Heatmap</div>
-          <div class="label-xs" style="max-width: 120px;">X=time, Y=bands, color=intensity</div>
         </div>
+        <span class="metric-desc" style="margin-bottom: 8px;">Spectral energy over time — X=time, Y=bands, color=energy (blue→red)</span>
         <canvas id="heatmapCanvas" width="260" height="80" class="canvas heatmap-canvas"></canvas>
         <div class="flex-between label-xs" style="margin-top: 4px;">
           <span class="text-blue">Bass</span>

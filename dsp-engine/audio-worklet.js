@@ -738,6 +738,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Skip warmup frames — buffers empty, metrics are garbage (Infinity, 0)
     if (this.frameCount <= this.warmupFrames) return;
     
+    // V4: declare aiScore variables hoisted via var
+    var aiScore = 0, mfccTop4 = [], mfccStdTop4 = [];
+    
     const leftData = this.leftFrameData;
     const rightData = this.rightFrameData;
     
@@ -823,6 +826,94 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const rmsdB = combinedRMS > 0 ? 20 * Math.log10(combinedRMS) : -Infinity;
     const dynamicRange = peakdB - rmsdB; // >= 0 dB
     
+    // V4.1: MFCC extraction (13 coefficients) on combined FFT
+    _ensureMelBank(this.sampleRate);
+    const mfcc = calculateMFCC(this.combinedFFT);
+    
+    // V4.2: Temporal statistics (mean/stddev over 100-frame sliding window)
+    // Rolling window for each MFCC coefficient
+    if (mfcc) {
+      if (!this._mfccWindow) {
+        this._mfccWindow = [];
+        this._mfccIndex = 0;
+        this._mfccCount = 0;
+      }
+      // Store in circular buffer (window size: 100 frames ≈ 2.3s)
+      const winSize = 100;
+      if (!this._mfccBuffer) {
+        this._mfccBuffer = new Float32Array(winSize * MFCC_MFCC_COEFFS);
+      }
+      // Store current frame
+      for (let c = 0; c < MFCC_MFCC_COEFFS; c++) {
+        const idx = this._mfccIndex * MFCC_MFCC_COEFFS + c;
+        this._mfccBuffer[idx] = mfcc[c];
+      }
+      this._mfccIndex = (this._mfccIndex + 1) % winSize;
+      if (this._mfccCount < winSize) this._mfccCount++;
+      
+      // Compute mean per coefficient
+      const mfccMean = new Float32Array(MFCC_MFCC_COEFFS);
+      const mfccStd = new Float32Array(MFCC_MFCC_COEFFS);
+      for (let c = 0; c < MFCC_MFCC_COEFFS; c++) {
+        let sum = 0;
+        const start = Math.max(0, this._mfccIndex - this._mfccCount);
+        const end = this._mfccIndex;
+        const count = end - start + (end === 0 && this._mfccIndex === 0 ? 0 : (this._mfccIndex === 0 ? winSize - start : 0));
+        
+        // Simplified: iterate over filled frames
+        const filledFrames = this._mfccCount;
+        const startIdx = filledFrames >= winSize ? ((this._mfccIndex - winSize + winSize) % winSize) : 
+                         (this._mfccIndex - filledFrames + winSize) % winSize;
+        
+        for (let f = 0; f < filledFrames; f++) {
+          const frameIdx = (startIdx + f) % winSize;
+          sum += this._mfccBuffer[frameIdx * MFCC_MFCC_COEFFS + c];
+        }
+        mfccMean[c] = sum / filledFrames;
+        
+        // Stddev
+        let varSum = 0;
+        for (let f = 0; f < filledFrames; f++) {
+          const frameIdx = (startIdx + f) % winSize;
+          const diff = this._mfccBuffer[frameIdx * MFCC_MFCC_COEFFS + c] - mfccMean[c];
+          varSum += diff * diff;
+        }
+        mfccStd[c] = Math.sqrt(varSum / filledFrames);
+      }
+      
+      // V4.3: Rule-based aiScore (0-100)
+      // AI-generated audio has distinct MFCC patterns:
+      // - Lower temporal variance in coefficients (smoother transitions)
+      // - Different spectral envelope shape
+      // - Lower high-frequency content
+      // - Lower ZCR and HNR variance
+      
+      const mfccStdSum = mfccStd.reduce((s, v) => s + v, 0);
+      const mfccMeanSum = Math.abs(mfccMean.reduce((s, v) => s + v, 0));
+      
+      // Heuristic features
+      const lowTemporalVariance = mfccStdSum < 2.0 ? 1 : 0; // AI: smoother
+      const lowHighFreq = combinedHighFreqAnomaly < 0.15 ? 1 : 0; // AI: less HF content
+      const moderateZCR = combinedZCR > 2000 && combinedZCR < 6000 ? 1 : 0; // AI: constrained ZCR
+      const moderateEntropy = entropy > 1.2 && entropy < 1.8 ? 1 : 0; // AI: mid entropy range
+      
+       // Weighted score
+       aiScore = 0;
+       aiScore += lowTemporalVariance * 25;  // MFCC temporal smoothness
+       aiScore += lowHighFreq * 20;           // Low HF energy
+       aiScore += moderateZCR * 20;           // Constrained ZCR
+       aiScore += moderateEntropy * 15;       // Mid-range entropy
+       aiScore += (flatness > 0.35 ? 10 : 0); // Spectral flatness
+       
+       aiScore = Math.min(100, Math.max(0, Math.round(aiScore)));
+       
+       // V4.2: Compute mfccTop4 and mfccStdTop4 for payload
+       mfccTop4 = Array.from(mfcc.slice(0, 4)); // Top 4 coefficients (most discriminative)
+       
+       // Also compute mfccStdTop4
+       var mfccStdTop4 = Array.from(mfccStd.slice(0, 4));
+     }
+    
     // C.2.10: Inter-band Energy Ratios (log-scaled, ~0dB = balanced)
     const bassMidRatio = combinedBands.mid > 1e-10
       ? 10 * Math.log10(combinedBands.bass / combinedBands.mid)
@@ -855,7 +946,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const criticalMetrics = [combinedRMS, peakRMS, entropy, flatness, 
                              combinedBands.bass, combinedBands.mid, combinedBands.treble,
                              combinedHighFreqAnomaly, combinedZCR, spectralCentroid, spectralRolloff,
-                             hnr, dynamicRange, bassMidRatio, midTrebleRatio];
+                             hnr, dynamicRange, bassMidRatio, midTrebleRatio,
+                             aiScore || 0];
     
     for (const val of criticalMetrics) {
       if (!Number.isFinite(val)) {
@@ -896,7 +988,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       dynamicRange: dynamicRange,
       bassMidRatio: bassMidRatio,
       midTrebleRatio: midTrebleRatio,
-      glitchRate: this._glitchWindow ? this._glitchWindow.length : 0
+      glitchRate: this._glitchWindow ? this._glitchWindow.length : 0,
+      // V4: AI Detection
+      aiScore: aiScore,
+      mfcc: mfccTop4,
+      mfccStd: mfccStdTop4
     };
     
     if (includeWaveform) {
@@ -912,6 +1008,128 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     
     this.port.postMessage(payload);
   }
+}
+
+// ============================================================
+// V4: AI Detection — Mel Filter Bank + DCT for MFCC
+// ============================================================
+
+// Mel filter bank: 40 filters across 512 FFT bins
+// Each filter: [startBin, endBin, centerWeightedBin]
+const MFCC_MEL_FILTERS = 40;
+const MFCC_MFCC_COEFFS = 13;
+
+function _hzToMel(hz) { return 2595 * Math.log10(1 + hz / 700); }
+function _melToHz(mel) { return 700 * (Math.pow(10, mel / 2595) - 1); }
+
+// Precompute Mel filter bank for given sample rate
+function _createMelFilterBank(numBins, sampleRate) {
+  const nyquist = sampleRate / 2;
+  const melMin = _hzToMel(20);
+  const melMax = _hzToMel(nyquist);
+  const melStep = (melMax - melMin) / (MFCC_MEL_FILTERS + 1);
+
+  // Precompute filter edges in Hz
+  const filterEdges = [];
+  for (let i = 0; i <= MFCC_MEL_FILTERS + 1; i++) {
+    filterEdges.push(_melToHz(melMin + i * melStep));
+  }
+
+  // Convert to bin indices
+  const binEdges = filterEdges.map(hz => Math.floor(hz * FFT_SIZE / sampleRate));
+
+  // Build filter bank: each filter maps FFT bins → mel band energies
+  // For efficiency, store: [start, end, peakBin] per filter
+  // During processing, sum magnitude² for bins in range [start, end]
+  const banks = [];
+  for (let i = 0; i < MFCC_MEL_FILTERS; i++) {
+    const start = Math.max(0, binEdges[i]);
+    const end = Math.min(numBins - 1, binEdges[i + 2]);
+    const peak = binEdges[i + 1];
+    if (start < end) {
+      banks.push({ start, end, peak });
+    }
+  }
+  return banks;
+}
+
+// Precomputed DCT-II matrix (13 coefficients × MFCC_MEL_FILTERS bands)
+// DCT-II: X[k] = sum_{n=0}^{N-1} x[n] * cos(π*k*(2n+1)/(2N))
+function _createDCTMatrix(numCoeffs, numBands) {
+  const matrix = new Float32Array(numCoeffs * numBands);
+  for (let k = 0; k < numCoeffs; k++) {
+    for (let n = 0; n < numBands; n++) {
+      const idx = k * numBands + n;
+      matrix[idx] = Math.cos(Math.PI * k * (2 * n + 1) / (2 * numBands));
+    }
+  }
+  return matrix;
+}
+
+// Create Mel filter bank and DCT for runtime sample rate
+let _melBanks = null;
+let _dctMatrix = null;
+
+function _ensureMelBank(sampleRate) {
+  if (_melBanks && _melBanks.length > 0 && _melBanks[0].peak > 0) {
+    // Already initialized — reuse
+    return;
+  }
+  // Check if already built
+  if (_melBanks && _melBanks.length === MFCC_MEL_FILTERS && _dctMatrix) {
+    return;
+  }
+  _melBanks = _createMelFilterBank(HALF_N, sampleRate);
+  _dctMatrix = _createDCTMatrix(MFCC_MFCC_COEFFS, MFCC_MEL_FILTERS);
+}
+
+/**
+ * Compute MFCC (13 coefficients) from magnitude spectrum
+ * Step 1: Apply Mel filter bank → mel-spectral energy (40 bands)
+ * Step 2: Log compression → log(melEnergy + epsilon)
+ * Step 3: DCT-II → 13 MFCC coefficients
+ * 
+ * Pre-allocated buffers for zero GC per frame.
+ * O(N) with small constants — suitable for real-time DSP.
+ * 
+ * @param {Float32Array} fftData — magnitude spectrum (512 bins)
+ * @returns {Float32Array} 13 MFCC coefficients
+ */
+function calculateMFCC(fftData) {
+  // Ensure Mel filter bank is initialized
+  if (!_melBanks || _melBanks.length === 0) {
+    return null;
+  }
+
+  // Step 1: Mel filter bank energies (sum of magnitude² in each band)
+  const melEnergy = new Float32Array(MFCC_MEL_FILTERS);
+  for (let f = 0; f < MFCC_MEL_FILTERS; f++) {
+    const filter = _melBanks[f];
+    let energy = 0;
+    for (let b = filter.start; b <= filter.end; b++) {
+      const mag = fftData[b];
+      energy += mag * mag;
+    }
+    melEnergy[f] = energy;
+  }
+
+  // Step 2: Log compression
+  for (let f = 0; f < MFCC_MEL_FILTERS; f++) {
+    melEnergy[f] = Math.log(melEnergy[f] + 1e-10);
+  }
+
+  // Step 3: DCT-II → 13 coefficients
+  const mfcc = new Float32Array(MFCC_MFCC_COEFFS);
+  for (let k = 0; k < MFCC_MFCC_COEFFS; k++) {
+    let sum = 0;
+    const rowOffset = k * MFCC_MEL_FILTERS;
+    for (let n = 0; n < MFCC_MEL_FILTERS; n++) {
+      sum += melEnergy[n] * _dctMatrix[rowOffset + n];
+    }
+    mfcc[k] = sum;
+  }
+
+  return mfcc;
 }
 
 registerProcessor('audio-analyzer', AudioAnalyzer);

@@ -266,6 +266,7 @@ button {
   border: 1px solid var(--accent-blue-border);
   border-radius: 3px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .btn-export-log {
@@ -278,6 +279,7 @@ button {
   border: 1px solid var(--accent-orange-border);
   border-radius: 3px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .btn-clear-osc {
@@ -809,3 +811,48 @@ h3 {
 .log-level-warn { color: var(--accent-orange); }
 .log-level-info { color: var(--accent-blue); }
 .log-level-debug { color: var(--text-tertiary); }
+
+/* ===== Metric & Effect Descriptions ===== */
+.metric-desc {
+  display: block;
+  font-size: 8px;
+  color: var(--text-tertiary);
+  opacity: 0.7;
+  margin-top: 1px;
+  line-height: 1.2;
+  font-style: italic;
+}
+
+.effect-desc {
+  display: block;
+  font-size: 8px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  margin-top: 2px;
+  line-height: 1.2;
+  font-style: italic;
+  padding: 2px 4px;
+  background: var(--bg-bar);
+  border-radius: 2px;
+}
+
+/* Oscilloscope container — prevent overflow */
+#oscilloscopeSection {
+  overflow: hidden;
+  word-break: normal;
+}
+
+#oscilloscopeSection .flex-between {
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+#oscilloscopeSection .flex-between > * {
+  flex-shrink: 0;
+}
+
+/* Timeline & Heatmap containers — prevent overflow */
+#timelineSection,
+#heatmapSection {
+  overflow: hidden;
+}

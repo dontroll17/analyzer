@@ -570,6 +570,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // === P.6: Popup ready signal — relay to offscreen so it can connect directly ===
+  if (message && message.type === '_SSA_POPUP_READY') {
+    // Forward to all extension contexts; offscreen will handle it
+    chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   return false;
 });
 

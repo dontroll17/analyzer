@@ -71,6 +71,8 @@ let metricFlatnessEl = null;
 let metricRttEl = null;
 let metricDropsEl = null;
 let metricEntropyStateEl = null;
+let metricAiScoreEl = null;
+let currentAiScore = 0;
 
 // Waveform data (from popup metrics)
 let leftChannelHistory = new Float32Array(1024);
@@ -307,6 +309,7 @@ function updateOverlayDisplay(data) {
   currentFlatness = data.flatness || 0;
   currentRTT = data.rtt || 0;
   currentAudioDrops = data.audioDrops || 0;
+  currentAiScore = data.aiScore || 0;
   
   // Update status dot
   if (statusDotEl) {
@@ -321,6 +324,18 @@ function updateOverlayDisplay(data) {
   // Update RMS value
   if (rmsValueEl) {
     rmsValueEl.textContent = 'RMS: ' + currentRMS.toFixed(3);
+  }
+  
+  // Update AI Score with color coding
+  if (metricAiScoreEl) {
+    metricAiScoreEl.textContent = currentAiScore;
+    if (currentAiScore >= 70) {
+      metricAiScoreEl.style.color = '#FF007F'; // Red - high AI probability
+    } else if (currentAiScore >= 40) {
+      metricAiScoreEl.style.color = '#FFD700'; // Yellow - moderate
+    } else {
+      metricAiScoreEl.style.color = '#00E5FF'; // Cyan - low AI probability
+    }
   }
   
   // Update mini bar
@@ -613,6 +628,7 @@ function injectOverlay() {
         <span class="ssa-metric-item"><span class="ssa-metric-label">GL:</span><span class="ssa-metric-value"></span></span>
         <span class="ssa-metric-item"><span class="ssa-metric-label">H:</span><span class="ssa-metric-value"></span></span>
         <span class="ssa-metric-item"><span class="ssa-metric-label">F:</span><span class="ssa-metric-value"></span></span>
+        <span class="ssa-metric-item"><span class="ssa-metric-label">AI:</span><span class="ssa-metric-value"></span></span>
         <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">RTT:</span><span class="ssa-metric-value"></span></span>
         <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">Drops:</span><span class="ssa-metric-value"></span></span>
         <span class="ssa-metric-item" style="display:none"><span class="ssa-metric-label">State:</span><span class="ssa-metric-value"></span></span>
@@ -646,13 +662,14 @@ function injectOverlay() {
   const metricsRowEl = shadow.querySelector('.ssa-metrics-row');
   if (metricsRowEl && !metricGlitchEl) {
     const spans = metricsRowEl.querySelectorAll('.ssa-metric-value');
-    if (spans.length >= 3) {
+    if (spans.length >= 4) {
       metricGlitchEl = spans[0];
       metricEntropyEl = spans[1];
       metricFlatnessEl = spans[2];
-      if (spans[3]) metricRttEl = spans[3];
-      if (spans[4]) metricDropsEl = spans[4];
-      if (spans[5]) metricEntropyStateEl = spans[5];
+      metricAiScoreEl = spans[3];
+      if (spans[4]) metricRttEl = spans[4];
+      if (spans[5]) metricDropsEl = spans[5];
+      if (spans[6]) metricEntropyStateEl = spans[6];
     }
   }
   

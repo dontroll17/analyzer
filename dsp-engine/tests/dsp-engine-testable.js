@@ -290,6 +290,108 @@ module.exports = {
   calculateSpectralCentroid,
   calculateSpectralRolloff,
   checkGlitchState,
+  calculateMFCC,
   FFT_SIZE,
   HALF_N
 };
+
+// ============================================================
+// V4: MFCC extraction (13 coefficients)
+// ============================================================
+
+const MFCC_MEL_FILTERS = 40;
+const MFCC_MFCC_COEFFS = 13;
+
+function _hzToMel(hz) { return 2595 * Math.log10(1 + hz / 700); }
+function _melToHz(mel) { return 700 * (Math.pow(10, mel / 2595) - 1); }
+
+function _createMelFilterBank(numBins, sampleRate) {
+  const nyquist = sampleRate / 2;
+  const melMin = _hzToMel(20);
+  const melMax = _hzToMel(nyquist);
+  const melStep = (melMax - melMin) / (MFCC_MEL_FILTERS + 1);
+
+  const filterEdges = [];
+  for (let i = 0; i <= MFCC_MEL_FILTERS + 1; i++) {
+    filterEdges.push(_melToHz(melMin + i * melStep));
+  }
+
+  const binEdges = filterEdges.map(function(hz) { return Math.floor(hz * FFT_SIZE / sampleRate); });
+
+  const banks = [];
+  for (let i = 0; i < MFCC_MEL_FILTERS; i++) {
+    const start = Math.max(0, binEdges[i]);
+    const end = Math.min(numBins - 1, binEdges[i + 2]);
+    if (start < end) {
+      banks.push({ start: start, end: end });
+    }
+  }
+  return banks;
+}
+
+function _createDCTMatrix(numCoeffs, numBands) {
+  const matrix = new Float32Array(numCoeffs * numBands);
+  for (let k = 0; k < numCoeffs; k++) {
+    for (let n = 0; n < numBands; n++) {
+      const idx = k * numBands + n;
+      matrix[idx] = Math.cos(Math.PI * k * (2 * n + 1) / (2 * numBands));
+    }
+  }
+  return matrix;
+}
+
+// Precomputed for default sample rate
+var _melBanks = null;
+var _dctMatrix = null;
+
+function _ensureMelBank(sampleRate) {
+  sampleRate = sampleRate || 44100;
+  if (_melBanks && _dctMatrix) return;
+  _melBanks = _createMelFilterBank(HALF_N, sampleRate);
+  _dctMatrix = _createDCTMatrix(MFCC_MFCC_COEFFS, MFCC_MEL_FILTERS);
+}
+
+/**
+ * Compute MFCC (13 coefficients) from magnitude spectrum
+ * @param {Float32Array} fftData - magnitude spectrum (512 bins)
+ * @param {number} sampleRate - sample rate (default 44100)
+ * @returns {Float32Array} 13 MFCC coefficients or null
+ */
+function calculateMFCC(fftData, sampleRate) {
+  sampleRate = sampleRate || 44100;
+  _ensureMelBank(sampleRate);
+  
+  if (!_melBanks || _melBanks.length === 0) {
+    return null;
+  }
+
+  // Step 1: Mel filter bank energies
+  var melEnergy = new Float32Array(MFCC_MEL_FILTERS);
+  for (var f = 0; f < MFCC_MEL_FILTERS; f++) {
+    var filter = _melBanks[f];
+    var energy = 0;
+    for (var b = filter.start; b <= filter.end; b++) {
+      var mag = fftData[b];
+      energy += mag * mag;
+    }
+    melEnergy[f] = energy;
+  }
+
+  // Step 2: Log compression
+  for (var f = 0; f < MFCC_MEL_FILTERS; f++) {
+    melEnergy[f] = Math.log(melEnergy[f] + 1e-10);
+  }
+
+  // Step 3: DCT-II → 13 coefficients
+  var mfcc = new Float32Array(MFCC_MFCC_COEFFS);
+  for (var k = 0; k < MFCC_MFCC_COEFFS; k++) {
+    var sum = 0;
+    var rowOffset = k * MFCC_MEL_FILTERS;
+    for (var n = 0; n < MFCC_MEL_FILTERS; n++) {
+      sum += melEnergy[n] * _dctMatrix[rowOffset + n];
+    }
+    mfcc[k] = sum;
+  }
+
+  return mfcc;
+}

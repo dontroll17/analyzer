@@ -11,7 +11,8 @@ class DelayProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._maxDelay = 1.0; // 1 second max delay
-    this._bufferSize = Math.ceil(this._maxDelay * 44100);
+    this._sampleRate = 44100; // Default, updated via message
+    this._bufferSize = Math.ceil(this._maxDelay * this._sampleRate);
     this._bufferL = new Float32Array(this._bufferSize);
     this._bufferR = new Float32Array(this._bufferSize);
     this._writeIndex = 0;
@@ -24,6 +25,21 @@ class DelayProcessor extends AudioWorkletProcessor {
         if (e.data.delayTime !== undefined) this._delayTime = Math.min(this._maxDelay, Math.max(0, e.data.delayTime));
         if (e.data.feedback !== undefined) this._feedback = Math.min(0.95, Math.max(0, e.data.feedback));
         if (e.data.mix !== undefined) this._mix = Math.min(1, Math.max(0, e.data.mix));
+      }
+      // Update sample rate if provided (for accurate delay at non-44100 rates)
+      if (e.data.sampleRate !== undefined) {
+        const newSampleRate = e.data.sampleRate;
+        if (newSampleRate !== this._sampleRate) {
+          // Resample: convert existing delayTime from old to new sample rate
+          const delaySamples = Math.floor(this._delayTime * this._sampleRate);
+          this._sampleRate = newSampleRate;
+          this._delayTime = delaySamples / this._sampleRate;
+          // Reallocate buffers if needed
+          this._bufferSize = Math.ceil(this._maxDelay * this._sampleRate);
+          this._bufferL = new Float32Array(this._bufferSize);
+          this._bufferR = new Float32Array(this._bufferSize);
+          this._writeIndex = 0;
+        }
       }
     };
   }
@@ -38,7 +54,7 @@ class DelayProcessor extends AudioWorkletProcessor {
 
     const numChannels = input.length;
     const numSamples = input[0].length;
-    const delaySamples = Math.max(0, Math.floor(this._delayTime * 44100));
+    const delaySamples = Math.max(0, Math.floor(this._delayTime * this._sampleRate));
 
     for (let ch = 0; ch < numChannels; ch++) {
       // Wrap both L and R into one buffer for simplicity (or use same buffer for both channels)

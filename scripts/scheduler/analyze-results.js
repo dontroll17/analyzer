@@ -49,7 +49,6 @@ const IMPORTANT_PATHS = [
   'spectral',
   'delay processor',
   'popup',
-  'overlay',
 ];
 
 const TEST_BUMPS = {

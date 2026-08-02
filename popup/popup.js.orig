@@ -1659,92 +1659,9 @@ function safePostMessage(port, msg) {
   }
 }
 
-// === P.6: Direct port from offscreen for metrics ===
-let _offscreenPort = null;
-let _offscreenMetricsHandler = null;
-
-/**
- * Handle direct metrics port from offscreen (P.6 optimization).
- * Eliminates background relay overhead for popup → metrics.
- */
-function _setupOffscreenPort(port) {
-  if (_offscreenPort && !_offscreenPort._disconnected) {
-    log.warn('P.6: Offscreen port already connected, disconnecting old');
-    try { _offscreenPort.disconnect(); } catch (_) {}
-  }
-  
-  _offscreenPort = port;
-  log.info('P.6: Direct port from offscreen connected');
-  
-  if (_offscreenMetricsHandler) {
-    port.onMessage.removeListener(_offscreenMetricsHandler);
-  }
-  
-  _offscreenMetricsHandler = (data) => {
-    if (!data || !captureActive) return;
-    
-    if (data.type === 'METRICS') {
-      applyMetrics(data);
-      if (data.audioDrops !== undefined) {
-        updateDropCounter(data.audioDrops);
-      }
-    }
-    // Control messages via direct port
-    if (data.type === '_AUDIO_DROP') {
-      dropCount = data.count;
-      updateDropCounter(dropCount);
-    }
-    if (data.type === '_AUDIO_DROP_RESET') {
-      dropCount = 0;
-      updateDropCounter(0);
-    }
-    if (data.type === '_OFFSCREEN_ENDED') {
-      gracefulStop = true;
-      stopAudioProcessing();
-      updateUI(false);
-      captureActive = false;
-      if (startBtn) {
-        startBtn.textContent = 'Start Capture';
-        startBtn.disabled = false;
-      }
-      setTimeout(() => { gracefulStop = false; }, 100);
-    }
-    if (data.type === '_OFFSCREEN_ERROR') {
-      if (rmsLevel) {
-        rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
-        rmsLevel.style.color = tc('rms').SILENCE;
-      }
-      captureActive = false;
-      if (startBtn) {
-        startBtn.textContent = 'Start Capture';
-        startBtn.disabled = false;
-      }
-    }
-  };
-  
-  port.onMessage.addListener(_offscreenMetricsHandler);
-  
-  port.onDisconnect.addListener(() => {
-    log.info('P.6: Offscreen port disconnected');
-    if (_offscreenMetricsHandler) {
-      port.onMessage.removeListener(_offscreenMetricsHandler);
-      _offscreenMetricsHandler = null;
-    }
-    _offscreenPort = null;
-  });
-}
-
 // Background port — create ONCE at page load to prevent memory leaks
 let bgPortId = 0; // Track connection generation to reject stale messages
 let bgMetricsConnected = false; // Track if port is actually connected
-
-// === P.6: Listen for incoming ports from offscreen ===
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'offscreen-metrics') {
-    _setupOffscreenPort(port);
-  }
-});
-
 function ensureBackgroundPort() {
   // Skip if port is already connected
   if (bgPort && !bgPort._disconnected && bgMetricsConnected) {
@@ -1931,11 +1848,6 @@ function ensureBackgroundPort() {
         bgPort.postMessage({ type: 'REQUEST_METRICS' });
       }
     }, 100);
-    
-    // P.6: Signal offscreen that popup is ready — triggers direct port connection
-    chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {
-      // Silently ignore — offscreen may not be listening
-    });
     
     return true;
   } catch (e) {

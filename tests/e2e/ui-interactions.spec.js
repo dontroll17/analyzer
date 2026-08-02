@@ -344,4 +344,49 @@ test.describe('E2E UI Interactions', () => {
     // Allow up to 20 errors (expected in headless without offscreen)
     expect(errors).toBeLessThanOrEqual(20);
   });
+
+  // === Theme Cycling Tests ===
+
+  test('should have three theme color presets', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    const themeInfo = await page.evaluate(() => {
+      return {
+        bodyClass: document.body?.className || '',
+        hasCssVars: getComputedStyle(document.documentElement).getPropertyValue('--ssa-bg') !== '',
+      };
+    });
+
+    // Body should have some class that indicates current theme
+    expect(typeof themeInfo.bodyClass).toBe('string');
+  });
+
+  // === Export Button Tests ===
+
+  test('should have export buttons that do not crash on click', async () => {
+    const page = await context.newPage();
+    await page.goto(getPopupURL());
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+
+    let errors = 0;
+    try {
+      await page.click('#exportBtn');
+    } catch (e) {
+      errors++;
+    }
+    try {
+      await page.click('#exportLogBtn');
+    } catch (e) {
+      errors++;
+    }
+
+    // Page should still be functional
+    const stillFunctional = await page.evaluate(() => !!document.getElementById('startBtn'));
+    expect(stillFunctional).toBe(true);
+    expect(errors).toBeLessThanOrEqual(2);
+  });
 });

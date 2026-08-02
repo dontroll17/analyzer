@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    allowAutoTruncate: true,
     include: [
       'tests/unit/**/*.spec.js',
       'dsp-engine/tests/**/*.test.js',
@@ -19,7 +20,9 @@ export default defineConfig({
         'dsp-engine/midi-export.js',
         'dsp-engine/defensive-processors.js',
         'popup/popup-testable.js',
-        'dsp-engine/limiter.js', // ← NEW: extracted from offscreen.js
+        'dsp-engine/limiter.js',
+        'dsp-engine/session-db.js', // ← V1.4: session DB config
+        'logger.js', // ← V1.1: logger.js coverage (12 tests exist)
       ],
       // Exclude files not covered by unit tests
       exclude: [

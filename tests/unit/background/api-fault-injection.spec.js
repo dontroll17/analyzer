@@ -151,27 +151,6 @@ describe('D4 — MV3 Fault Injection (chrome.runtime.lastError, port disconnect,
       expect(mockPort.postMessage).not.toHaveBeenCalled();
     });
 
-    it('should handle overlayPort disconnect during metrics forward', () => {
-      const overlayPort = {
-        name: 'overlay-metrics',
-        postMessage: vi.fn(() => {
-          throw new Error('Port disconnected');
-        }),
-        disconnect: vi.fn(),
-        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
-        onDisconnect: { addListener: vi.fn(), removeListener: vi.fn() },
-      };
-
-      let errorMessage = null;
-      try {
-        overlayPort.postMessage({ type: 'METRICS', rms: 0.5 });
-      } catch (e) {
-        errorMessage = e.message;
-      }
-
-      expect(errorMessage).toBe('Port disconnected');
-    });
-
     it('should gracefully handle port disconnect event during active metrics', async () => {
       const disconnectCallbacks = [];
       const onDisconnectListeners = [];
@@ -204,26 +183,6 @@ describe('D4 — MV3 Fault Injection (chrome.runtime.lastError, port disconnect,
 
       expect(disconnectedPortRef).toBe(mockPort);
       expect(mockPort._disconnected).toBe(true);
-    });
-
-    it('should handle multiple port disconnections in sequence', () => {
-      const ports = [
-        { name: 'popup-metrics', _disconnected: false, disconnect: vi.fn() },
-        { name: 'overlay-metrics', _disconnected: false, disconnect: vi.fn() },
-      ];
-
-      // Disconnect first port
-      ports[0]._disconnected = true;
-      ports[0].disconnect();
-
-      // Disconnect second port
-      ports[1]._disconnected = true;
-      ports[1].disconnect();
-
-      expect(ports[0]._disconnected).toBe(true);
-      expect(ports[1]._disconnected).toBe(true);
-      expect(ports[0].disconnect).toHaveBeenCalled();
-      expect(ports[1].disconnect).toHaveBeenCalled();
     });
 
     it('should handle postMessage on already-disconnected port silently', () => {

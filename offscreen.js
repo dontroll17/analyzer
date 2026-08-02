@@ -34,6 +34,8 @@ const audioChain = {
 
 let mediaStream = null;
 let _metricsCounter = 0;
+let _popupPort = null; // Direct port to popup for metrics (P.6)
+let _popupConnectTimer = null;
 let audioContext = null;
 let cleanupScheduled = false;
 let lastMetrics = null;
@@ -54,8 +56,66 @@ let _effectsState = {
     lpf: { enabled: false, frequency: 22050 },
     peaking: { enabled: false, frequency: 1000, gain: 0, Q: 1 }
   },
-  delay: { delayTime: 0, feedback: 0, mix: 0 }
+  delay: { enabled: false, delayTime: 0, feedback: 0, mix: 0 }
 };
+
+// === P.4: Load effects settings from chrome.storage (offscreen self-loading) ===
+// Elimimates the need for popup to send settings via setTimeout — offscreen reads directly.
+function _loadEffectsFromStorage() {
+  chrome.storage.local.get(['ssa_effectsSettings'], (result) => {
+    if (!result.ssa_effectsSettings || typeof result.ssa_effectsSettings !== 'object') return;
+    const s = _effectsState;
+    const saved = result.ssa_effectsSettings;
+    if (saved.compressor && typeof saved.compressor === 'object') {
+      if (saved.compressor.threshold !== undefined) s.compressor.threshold = saved.compressor.threshold;
+      if (saved.compressor.ratio !== undefined) s.compressor.ratio = saved.compressor.ratio;
+      if (saved.compressor.knee !== undefined) s.compressor.knee = saved.compressor.knee;
+      if (saved.compressor.attack !== undefined) s.compressor.attack = saved.compressor.attack;
+      if (saved.compressor.release !== undefined) s.compressor.release = saved.compressor.release;
+      if (typeof saved.compressor.active === 'boolean') s.compressor.enabled = saved.compressor.active;
+    }
+    if (saved.eq && typeof saved.eq === 'object') {
+      if (typeof saved.eq.active === 'boolean') s.eq.enabled = saved.eq.active;
+      if (saved.eq.hpfFreq !== undefined) s.eq.hpfFreq = saved.eq.hpfFreq;
+      if (saved.eq.lpfFreq !== undefined) s.eq.lpfFreq = saved.eq.lpfFreq;
+      if (saved.eq.peakFreq !== undefined) s.eq.peakFreq = saved.eq.peakFreq;
+      if (saved.eq.peakGain !== undefined) s.eq.peakGain = saved.eq.peakGain;
+      if (saved.eq.peakQ !== undefined) s.eq.peakQ = saved.eq.peakQ;
+    }
+    if (saved.limiter && typeof saved.limiter === 'object') {
+      if (typeof saved.limiter.active === 'boolean') s.limiter.enabled = saved.limiter.active;
+      if (saved.limiter.threshold !== undefined) s.limiter.threshold = saved.limiter.threshold;
+    }
+    if (saved.delay && typeof saved.delay === 'object') {
+      if (typeof saved.delay.active === 'boolean') s.delay.enabled = saved.delay.active;
+      if (saved.delay.delayTime !== undefined) s.delay.delayTime = saved.delay.delayTime;
+      if (saved.delay.feedback !== undefined) s.delay.feedback = saved.delay.feedback;
+      if (saved.delay.mix !== undefined) s.delay.mix = saved.delay.mix;
+    }
+  });
+}
+
+// === Equal-Power Crossfade helpers (fixes P.4 and P.5) ===
+// Exponential crossfade (g_wet=1-e^(-t/τ), g_dry=e^(-t/τ)) has sum=1 but power dips:
+// At midpoint (g=0.5): P=0.25+0.25=0.5 → -3dB volume drop.
+// Equal-power uses sin/cos: g_wet=sin(θ), g_dry=cos(θ), where θ∈[0,π/2].
+// This ensures g²_wet + g²_dry = 1 at all times → constant power.
+
+/**
+ * Create equal-power crossfade curve (sin/cos).
+ * @param {number} steps - Number of samples in the curve
+ * @returns {{ dryCurve: Float32Array, wetCurve: Float32Array }}
+ */
+function createEqualPowerCurve(steps) {
+  const dryCurve = new Float32Array(steps);
+  const wetCurve = new Float32Array(steps);
+  for (let i = 0; i < steps; i++) {
+    const theta = (Math.PI * i) / (2 * steps);
+    dryCurve[i] = Math.cos(theta);
+    wetCurve[i] = Math.sin(theta);
+  }
+  return { dryCurve, wetCurve };
+}
 
 // Audio Drop Counter
 let audioDropCount = 0;
@@ -75,6 +135,9 @@ let _lastStreamActiveState = true;
 let _dspTimeTimer = null;
 let _lastWorkletTimestamp = 0;
 
+// Persistent port to background for effect forwarding
+
+
 // Suppress runtime.lastError spam when background is unavailable
 // Chrome throws on sendMessage when SW/background is dead — suppress silently
 function safeSendMessage(msg) {
@@ -82,6 +145,53 @@ function safeSendMessage(msg) {
     // Silently ignore — background may be dead during SW restart, popup disconnected, etc.
     // These are expected and non-critical.
   });
+}
+
+// === P.6: Direct port to popup for metrics (bypass background relay) ===
+// When popup is ready, offscreen connects directly and sends metrics via port.
+// Background still receives metrics for persistence/queuing, but popup gets them directly.
+function _ensurePopupPort() {
+  if (_popupPort && !_popupPort._disconnected) return;
+  
+  try {
+    _popupPort = chrome.runtime.connect({ name: 'offscreen-metrics' });
+    log.info('P.6: Direct port to popup opened');
+    
+    _popupPort.onDisconnect.addListener(() => {
+      _popupPort = null;
+      // Reset reconnect timer — popup may have closed
+      if (_popupConnectTimer) {
+        clearTimeout(_popupConnectTimer);
+        _popupConnectTimer = null;
+      }
+    });
+    
+    // Reschedule reconnection attempt
+    _schedulePopupConnect();
+  } catch (e) {
+    log.warn('P.6: Failed to connect to popup:', e.message);
+    _schedulePopupConnect();
+  }
+}
+
+function _schedulePopupConnect() {
+  if (_popupConnectTimer) return;
+  _popupConnectTimer = setTimeout(() => {
+    _popupConnectTimer = null;
+    _ensurePopupPort();
+  }, 500); // Try every 500ms
+}
+
+function _sendToPopup(data) {
+  if (_popupPort && !_popupPort._disconnected) {
+    try {
+      _popupPort.postMessage(data);
+      return true;
+    } catch (e) {
+      _popupPort = null;
+    }
+  }
+  return false;
 }
 
 // Track per-track ended listeners for cleanup (prevent memory leaks)
@@ -99,72 +209,87 @@ let _silenceLogCounter = 0;
 // C.3.2: Update compressor settings (vector crossfading with smooth transitions)
 // Uses setTargetAtTime for exponential smoothing: G(t) = G_final ± (G_final - G_initial) * e^(-αΔt)
 // τ = 15ms ensures 0dB transition with no audible clicks
+// ALWAYS updates _effectsState (for pre-capture parameter setting); only applies audio graph when ready
 function _updateCompressor(params) {
+  if (!audioContext) return;
+  const t = audioContext.currentTime;
+  
+  if (params.enabled !== undefined) {
+    _effectsState.compressor.enabled = params.enabled;
+  }
+  if (params.threshold !== undefined) _effectsState.compressor.threshold = params.threshold;
+  if (params.knee !== undefined) _effectsState.compressor.knee = params.knee;
+  if (params.ratio !== undefined) _effectsState.compressor.ratio = params.ratio;
+  if (params.attack !== undefined) _effectsState.compressor.attack = params.attack;
+  if (params.release !== undefined) _effectsState.compressor.release = params.release;
+  
+  // Only apply audio graph changes when capture is active
   if (!audioChain.ready || !audioChain.compressor) return;
   
   const comp = audioChain.compressor;
   const dryGain = audioChain.compressorDryGain;
   const wetGain = audioChain.compressorWetGain;
-  const ctx = audioContext;
-  const t = ctx.currentTime;
-  
-  if (params.enabled !== undefined) {
-    _effectsState.compressor.enabled = params.enabled;
-  }
   
   // Smooth gain transition for crossfading
   if (_effectsState.compressor.enabled) {
-    // Activate compressor: wet→1, dry→0
-    comp.ratio.value = params.ratio !== undefined ? params.ratio : 12;
-    comp.threshold.value = params.threshold !== undefined ? params.threshold : -24;
-    comp.knee.value = params.knee !== undefined ? params.knee : 30;
-    comp.attack.value = params.attack !== undefined ? params.attack / 1000 : 0.003;
-    comp.release.value = params.release !== undefined ? params.release / 1000 : 0.250;
-    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    // Activate compressor: wet→1, dry→0 — equal-power crossfade to prevent -3dB power dip
+    comp.ratio.value = _effectsState.compressor.ratio;
+    comp.threshold.value = _effectsState.compressor.threshold;
+    comp.knee.value = _effectsState.compressor.knee;
+    comp.attack.value = _effectsState.compressor.attack / 1000;
+    comp.release.value = _effectsState.compressor.release / 1000;
+    // Cancel previous automation to prevent InvalidStateError (P.5)
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
+    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
+    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
+    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
   } else {
     // Bypass compressor: wet→0, dry→1
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
     wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
     dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
   }
-  
-  // Continue updating parameters
-  if (params.threshold !== undefined && _effectsState.compressor.enabled) comp.threshold.value = params.threshold;
-  if (params.knee !== undefined && _effectsState.compressor.enabled) comp.knee.value = params.knee;
-  if (params.ratio !== undefined && _effectsState.compressor.enabled) comp.ratio.value = params.ratio;
-  if (params.attack !== undefined && _effectsState.compressor.enabled) comp.attack.value = params.attack / 1000;
-  if (params.release !== undefined && _effectsState.compressor.enabled) comp.release.value = params.release / 1000;
 }
 
 
 // C.3.3: Update limiter settings
+// ALWAYS updates _effectsState; only applies waveShaper when ready
 function _updateLimiter(params) {
-  if (!audioChain.ready || !audioChain.waveShaper) return;
-  
-  const ws = audioChain.waveShaper;
   const threshold = params.threshold !== undefined ? params.threshold : _effectsState.limiter.threshold;
   
   if (params.enabled !== undefined) _effectsState.limiter.enabled = params.enabled;
-  if (params.enabled && _effectsState.limiter.enabled) {
+  if (params.threshold !== undefined) _effectsState.limiter.threshold = threshold;
+  
+  // Only apply audio graph changes when capture is active
+  if (!audioChain.ready || !audioChain.waveShaper) return;
+  
+  const ws = audioChain.waveShaper;
+  if (_effectsState.limiter.enabled) {
     ws.curve = createLimiterCurve(threshold, 4);
-    ws.oversample = '4x';
   } else {
     ws.curve = new Float32Array([0, 1]);
-    ws.oversample = 'none';
   }
-  
-  if (params.threshold !== undefined) {
-    _effectsState.limiter.threshold = threshold;
-    if (_effectsState.limiter.enabled) ws.curve = createLimiterCurve(threshold, 4);
-  }
-  
-  // NOTE: Limiter does NOT call _setEffectsActive — it's just one node in the chain
-  // Routing is controlled by compressor EQ/delay toggles
 }
 
 // C.3.4: Parametric EQ update (vector crossfading after DC Blocker)
 // Smooth transitions: LPF+Peaking use wet/dry crossfading with τ=15ms
 function _updateEQ(params) {
+  if (!audioContext) return;
+  const t = audioContext.currentTime;
+  
+  // ALWAYS update state (for pre-capture parameter setting)
+  if (params.enabled !== undefined) {
+    _effectsState.eq.enabled = params.enabled;
+  }
+  if (params.hpfFreq !== undefined) _effectsState.eq.hpfFreq = params.hpfFreq;
+  if (params.lpfFreq !== undefined) _effectsState.eq.lpfFreq = params.lpfFreq;
+  if (params.peakFreq !== undefined) _effectsState.eq.peakFreq = params.peakFreq;
+  if (params.peakGain !== undefined) _effectsState.eq.peakGain = params.peakGain;
+  if (params.peakQ !== undefined) _effectsState.eq.peakQ = params.peakQ;
+  
+  // Only apply audio graph changes when capture is active
   if (!audioChain.ready || !audioChain.dcBlocker || !audioChain.lpf || !audioChain.peaking) return;
   
   const dc = audioChain.dcBlocker;
@@ -172,42 +297,27 @@ function _updateEQ(params) {
   const peak = audioChain.peaking;
   const dryGain = audioChain.peakingDryGain;
   const wetGain = audioChain.peakingWetGain;
-  const ctx = audioContext;
-  const t = ctx.currentTime;
   
-  if (params.enabled !== undefined) {
-    _effectsState.eq.enabled = params.enabled;
-  }
-  
-  // Update frequencies regardless of enabled state (pre-filtered audio stays clean)
-  if (params.hpfFreq !== undefined) {
-    _effectsState.eq.hpfFreq = params.hpfFreq;
-    if (_effectsState.eq.enabled) dc.frequency.value = params.hpfFreq;
-  }
-  if (params.lpfFreq !== undefined) {
-    _effectsState.eq.lpfFreq = params.lpfFreq;
-    if (_effectsState.eq.enabled) lpf.frequency.value = params.lpfFreq;
-  }
-  if (params.peakFreq !== undefined) {
-    _effectsState.eq.peakFreq = params.peakFreq;
-    if (_effectsState.eq.enabled) peak.frequency.value = params.peakFreq;
-  }
-  if (params.peakGain !== undefined) {
-    _effectsState.eq.peakGain = params.peakGain;
-    if (_effectsState.eq.enabled) peak.gain.value = params.peakGain;
-  }
-  if (params.peakQ !== undefined) {
-    _effectsState.eq.peakQ = params.peakQ;
-    if (_effectsState.eq.enabled) peak.Q.value = params.peakQ;
-  }
-  
-  // Smooth gain transition for crossfading
+  // Apply parameter values from state (always active) — use smooth transitions to prevent IIR transients
   if (_effectsState.eq.enabled) {
-    // Activate EQ: wet→1, dry→0
-    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    dc.frequency.setTargetAtTime(_effectsState.eq.hpfFreq, t, 0.01);
+    lpf.frequency.setTargetAtTime(_effectsState.eq.lpfFreq, t, 0.01);
+    peak.frequency.setTargetAtTime(_effectsState.eq.peakFreq, t, 0.01);
+    peak.gain.setTargetAtTime(_effectsState.eq.peakGain, t, 0.01);
+    peak.Q.setTargetAtTime(_effectsState.eq.peakQ, t, 0.01);
+  }
+  
+  // Smooth gain transition for crossfading — equal-power to prevent -3dB dip
+  if (_effectsState.eq.enabled) {
+    // Cancel previous automation to prevent InvalidStateError (P.5)
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
+    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
+    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
+    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
   } else {
-    // Bypass LPF+Peaking: wet→0, dry→1 (DC Blocker still active)
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
     wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
     dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
   }
@@ -216,40 +326,63 @@ function _updateEQ(params) {
 // C.3.5: Delay update (vector crossfading with smooth transitions)
 // τ = 15ms ensures smooth fade without clicks
 function _updateDelay(params) {
+  if (!audioContext) return;
+  const t = audioContext.currentTime;
+  
+  // ALWAYS update state (for pre-capture parameter setting)
+  if (params.enabled !== undefined) {
+    _effectsState.delay.enabled = !!params.enabled;
+  } else {
+    _effectsState.delay.enabled = _effectsState.delay.enabled || false;
+  }
+  if (params.delayTime !== undefined) _effectsState.delay.delayTime = params.delayTime;
+  if (params.feedback !== undefined) _effectsState.delay.feedback = params.feedback;
+  if (params.mix !== undefined) _effectsState.delay.mix = params.mix;
+  
+  // Only apply audio graph changes when capture is active
   if (!audioChain.ready || !audioChain.delay) return;
   
   const wetGain = audioChain.delayWetGain;
   const dryGain = audioChain.delayDryGain;
-  const ctx = audioContext;
-  const t = ctx.currentTime;
   
-  if (params.enabled !== undefined) {
-    _effectsState.delay.enabled = params.enabled;
-  }
-  
-  // Smooth gain transition for crossfading
+  // Smooth gain transition for crossfading — equal-power (cos/sin) to prevent -3dB dip
+  // NOTE: cos²/sin² was removed because P = cos⁴+sin⁴ still dips to 0.5 (-3dB)
+  // Equal power requires g_wet = sin(θ), g_dry = cos(θ) so that g²_wet + g²_dry = 1
   if (_effectsState.delay.enabled) {
-    // Activate delay: wet→1, dry→0
-    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    // Cancel previous automation to prevent InvalidStateError (P.5)
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
+    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
+    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
+    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
   } else {
-    // Bypass delay: wet→0, dry→1
+    // Bypass delay
+    wetGain.gain.cancelScheduledValues(t);
+    dryGain.gain.cancelScheduledValues(t);
     wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
     dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
   }
   
-  if (params.delayTime !== undefined) {
-    // popup sends delayTime in ms (0-1000), delay-processor expects seconds
-    audioChain.delay.port.postMessage({ type: 'SET_DELAY', delayTime: params.delayTime / 1000 });
-    _effectsState.delay.delayTime = params.delayTime;
-  }
-  if (params.feedback !== undefined) {
-    audioChain.delay.port.postMessage({ type: 'SET_DELAY', feedback: params.feedback / 100 });
-    _effectsState.delay.feedback = params.feedback;
-  }
-  if (params.mix !== undefined) {
-    audioChain.delay.port.postMessage({ type: 'SET_DELAY', mix: params.mix / 100 });
-    _effectsState.delay.mix = params.mix;
+  // Send delay parameters to worklet (popup sends delayTime in ms, feedback/mix in 0-100)
+  audioChain.delay.port.postMessage({
+    type: 'SET_DELAY',
+    delayTime: (_effectsState.delay.delayTime || 0) / 1000,
+    feedback: (_effectsState.delay.feedback || 0) / 100,
+    mix: (_effectsState.delay.mix || 0) / 100,
+    sampleRate: audioContext.sampleRate
+  });
+}
+
+// === Centralized effect message handler (used by both onMessage and port) ===
+function _handleEffectMessage(message) {
+  if (message.type === '_SSA_SET_COMPRESSOR') {
+    _updateCompressor({ enabled: message.active, ...message.params });
+  } else if (message.type === '_SSA_SET_LIMITER') {
+    _updateLimiter({ enabled: message.active, ...message.params });
+  } else if (message.type === '_SSA_SET_EQ') {
+    _updateEQ({ enabled: message.active, ...message.params });
+  } else if (message.type === '_SSA_SET_DELAY') {
+    _updateDelay({ enabled: message.active, ...message.params });
   }
 }
 
@@ -274,23 +407,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // Effect controls — popup sends { type, active, params }
   // offscreen receives active as top-level field, params nested
-  if (message.type === '_SSA_SET_COMPRESSOR') {
-    _updateCompressor({ enabled: message.active, ...message.params });
-    sendResponse({ ok: true });
-    return false;
-  }
-  if (message.type === '_SSA_SET_LIMITER') {
-    _updateLimiter({ enabled: message.active, ...message.params });
-    sendResponse({ ok: true });
-    return false;
-  }
-  if (message.type === '_SSA_SET_EQ') {
-    _updateEQ({ enabled: message.active, ...message.params });
-    sendResponse({ ok: true });
-    return false;
-  }
-  if (message.type === '_SSA_SET_DELAY') {
-    _updateDelay({ enabled: message.active, ...message.params });
+  // Effect controls — popup sends { type, active, params }
+  // offscreen receives active as top-level field, params nested
+  if (message.type === '_SSA_SET_COMPRESSOR' || message.type === '_SSA_SET_LIMITER' ||
+      message.type === '_SSA_SET_EQ' || message.type === '_SSA_SET_DELAY') {
+    log.info('Effect received:', message.type, message);
+    _handleEffectMessage(message);
     sendResponse({ ok: true });
     return false;
   }
@@ -305,6 +427,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // P.6: Popup ready — establish direct port
+  if (message.type === '_SSA_POPUP_READY') {
+    log.info('P.6: Popup ready signal received');
+    _ensurePopupPort();
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   return false;
 });
 
@@ -313,6 +443,11 @@ async function startCapture(source, tabStreamId) {
     if (mediaStream) return { ok: true, alreadyActive: true };
     
     let streamOptions;
+    
+    // P.4: Load saved effect settings from chrome.storage (self-loading)
+    // This eliminates the need for popup to send settings via setTimeout.
+    // Settings are loaded asynchronously and applied when audioChain.ready = true.
+    _loadEffectsFromStorage();
     
     // Start offscreen→BG keepalive to prevent SW sleep
     // SW wake threshold ~30-60s, ping every 10s to keep BG alive
@@ -428,6 +563,17 @@ async function startCapture(source, tabStreamId) {
     
     const audioTracks = mediaStream.getAudioTracks();
     
+    // Guard: stream must be active — if false, user cancelled or permission denied
+    if (!mediaStream.active) {
+      safeSendMessage({
+        type: '_OFFSCREEN_ERROR',
+        error: 'Stream inactive — please grant permission in the dialog'
+      });
+      mediaStream.getTracks().forEach(t => t.stop());
+      cleanup();
+      return { ok: false, error: 'stream_inactive' };
+    }
+    
     if (audioTracks.length === 0) {
       safeSendMessage({
         type: '_OFFSCREEN_ERROR',
@@ -457,6 +603,7 @@ async function startCapture(source, tabStreamId) {
     // Create AudioContext at the track's native sampleRate — zero SRC = zero DC offset
     audioContext = new AudioContext({ sampleRate: targetSampleRate });
     log.info(`AudioContext initialized at ${targetSampleRate}Hz (match input track)`);
+    
     const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
@@ -485,8 +632,8 @@ async function startCapture(source, tabStreamId) {
     compressorNode.ratio.value = 1;
     compressorNode.threshold.value = -100;
     compressorNode.knee.value = 0;
-    compressorNode.attack.value = 0;
-    compressorNode.release.value = 0;
+    compressorNode.attack.value = 0.003; // 3ms default attack (was 0 — caused unstable behaviour)
+    compressorNode.release.value = 0.250; // 250ms default release (was 0 — compressed to 1.0s by processor)
     
     const compressorWetGain = audioContext.createGain();
     compressorWetGain.gain.value = 0; // Silent initially — handled by Silent Masking phase
@@ -529,17 +676,17 @@ async function startCapture(source, tabStreamId) {
       channelInterpretation: 'discrete' // L/R channels processed independently
     });
     
+    // Send sample rate to delay processor for accurate delay calculation
+    delayNode.port.postMessage({ sampleRate: audioContext.sampleRate });
+    
     const delayWetGain = audioContext.createGain();
     delayWetGain.gain.value = 0; // Silent initially
     const delayDryGain = audioContext.createGain();
     delayDryGain.gain.value = 1; // Silent initially
-    // Analysis tap: always connected to delayNode output, independent of wet/dry mix
-    const delayAnalysisGain = audioContext.createGain();
-    delayAnalysisGain.gain.value = 1;
     
     const waveShaperNode = audioContext.createWaveShaper();
     waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
-    waveShaperNode.oversample = 'none';
+    waveShaperNode.oversample = '4x'; // Always on: prevents aliasing from soft-clipping harmonics above Nyquist
     
     // Master gain for graceful shutdown (ramp to 0 before close)
     // Unity gain (1.0): Wet/Dry crossfades sum to 1.0 mathematically
@@ -558,7 +705,6 @@ async function startCapture(source, tabStreamId) {
     audioChain.delay = delayNode;
     audioChain.delayWetGain = delayWetGain;
     audioChain.delayDryGain = delayDryGain;
-    audioChain.delayAnalysisGain = delayAnalysisGain;
     audioChain.waveShaper = waveShaperNode;
     audioChain.effectGain = effectGainNode;
     audioChain.masterGain = masterGainNode;
@@ -581,19 +727,31 @@ async function startCapture(source, tabStreamId) {
     peakingNode.connect(peakingDryGain);
     
     // Peaking Wet/Dry → Delay
+    // Wet path: peaking → delayNode → delayWetGain
     peakingWetGain.connect(delayNode);
-    peakingDryGain.connect(delayNode);
-    
-    // Delay Wet/Dry → waveShaper(limiter) → master → output
-    // Metrics: delayNode → delayAnalysisGain → workletNode (always active, independent of wet/dry)
     delayNode.connect(delayWetGain);
-    delayNode.connect(delayDryGain);
-    delayNode.connect(delayAnalysisGain);
-    delayAnalysisGain.connect(workletNode); // Analysis tap: signal after delay effect
+    // Dry path: peaking → delayDryGain (bypasses delayNode completely)
+    peakingDryGain.connect(delayDryGain);
+
+    // Delay Wet/Dry → waveShaper(limiter) → master → output
     delayWetGain.connect(waveShaperNode);
     delayDryGain.connect(waveShaperNode);
     waveShaperNode.connect(effectGainNode);
     effectGainNode.connect(masterGainNode);
+    
+    // Analysis tap: signal BEFORE effects (input level, always active)
+    const analysisTap = audioContext.createGain();
+    analysisTap.gain.value = 1;
+    audioSource.connect(analysisTap);
+    analysisTap.connect(workletNode);
+    audioChain.analysisTap = analysisTap;
+
+    // === P.1 CRITICAL: Connect graph to destination ===
+    // Web Audio API uses Pull-Model — without destination, rendering stops,
+    // audioContext.currentTime freezes, worklet metrics stop, automation freezes.
+    // Even if output is muted, a connected destination is required for the graph
+    // to keep processing. masterGain is already at unity (1.0).
+    masterGainNode.connect(audioContext.destination);
     
     // Legacy toggle (kept for backward compat)
     window._ssaSetEffectsActive = function(active) {
@@ -623,6 +781,12 @@ async function startCapture(source, tabStreamId) {
     const warmUpDuration = 100; // ms — ~3840 samples at 48kHz
     await new Promise(resolve => setTimeout(resolve, warmUpDuration));
     
+    // Apply saved effect states (may have been updated before capture started)
+    _updateCompressor({});
+    _updateEQ({});
+    _updateLimiter({});
+    _updateDelay({});
+    
     // === Phase 3: Gradual Ramp-Up ===
     // Smooth transition: setTargetAtTime with τ=15ms for all gain nodes
     const ctx = audioContext;
@@ -644,8 +808,10 @@ async function startCapture(source, tabStreamId) {
     // Drop detection: poll MediaStream active state (reliable in MV3)
     // AudioContext.statechange is unreliable in offscreen docs — state stays 'running'
     // when user stops sharing. MediaStream.active=false fires reliably.
-    _lastStreamActiveState = mediaStream.active;
+    // Start monitor IMMEDIATELY — we only reach here AFTER user granted permission
     _streamMonitorStopped = false;
+    _lastStreamActiveState = mediaStream.active; // Capture initial state synchronously
+    
     _streamMonitorTimer = setInterval(() => {
       if (_streamMonitorStopped || !mediaStream) return;
       
@@ -704,6 +870,13 @@ async function startCapture(source, tabStreamId) {
           log.info('Frame', _metricsCounter, 'RMS:', event.data.rms.toFixed(4), 'Peak:', event.data.peakRMS.toFixed(4), 'Bands[B/M/T]:', event.data.bass.toFixed(1), event.data.mid.toFixed(1), event.data.treble.toFixed(1));
         }
         
+        // P.6: Send metrics directly to popup via port (bypass background relay)
+        const sentToPopup = _sendToPopup({ type: 'METRICS', ...event.data });
+        if (!sentToPopup && _metricsCounter <= 10) {
+          log.info('P.6: Popup not connected yet, will receive via background relay');
+        }
+        
+        // Background relay still needed for persistence/queuing
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
         // Log every 1000 messages to avoid killing SW
         if (_metricsCounter % 1000 === 0) {
@@ -835,6 +1008,16 @@ function _performCleanup() {
     _dspTimeTimer = null;
   }
   
+  // P.6: Clean up direct port to popup
+  if (_popupPort) {
+    try { _popupPort.disconnect(); } catch (_) {}
+    _popupPort = null;
+  }
+  if (_popupConnectTimer) {
+    clearTimeout(_popupConnectTimer);
+    _popupConnectTimer = null;
+  }
+  
   // Stop keepalive ping
   if (_keepaliveTimer) {
     clearInterval(_keepaliveTimer);
@@ -874,6 +1057,7 @@ function _performCleanup() {
     if (audioChain.peakingWetGain) audioChain.peakingWetGain.disconnect();
     if (audioChain.peakingDryGain) audioChain.peakingDryGain.disconnect();
     if (audioChain.dcBlocker) audioChain.dcBlocker.disconnect();
+    if (audioChain.analysisTap) audioChain.analysisTap.disconnect();
     if (audioChain.compressor) audioChain.compressor.disconnect();
     if (audioChain.compressorWetGain) audioChain.compressorWetGain.disconnect();
     if (audioChain.compressorDryGain) audioChain.compressorDryGain.disconnect();
@@ -892,6 +1076,7 @@ function _performCleanup() {
   audioChain.delay = null;
   audioChain.delayWetGain = null;
   audioChain.delayDryGain = null;
+  audioChain.analysisTap = null;
   audioChain.waveShaper = null;
   audioChain.effectGain = null;
   audioChain.masterGain = null;
