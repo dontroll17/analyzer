@@ -165,7 +165,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
-    this.WAVEFORM_THROTTLE = 1; // send waveform every frame for debugging
+    this.WAVEFORM_THROTTLE = 4; // ~10fps waveform — reduces MessagePort serialization by ~75% without visible quality loss
     this.warmupFrames = 15; // skip first N frames — buffers empty
     
     // Используем штатную глобальную переменную sampleRate воркета
@@ -580,12 +580,34 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   processChannelFrame(ch) {
     const buffer = this.inputBuffers[ch];
     const { rms, peak } = this.calculateRMS(buffer);
+    
+    // === DEFENSIVE GUARD: Validate computed metrics ===
+    // Prevent NaN/Infinity from corrupting the metrics pipeline
+    if (!Number.isFinite(rms) || !Number.isFinite(peak) || rms < 0 || peak < 0) {
+      // Silently skip this frame — buffer may be empty/corrupted during context transitions
+      return;
+    }
+    
     const fft = this.calculateFFT(buffer);
     const bands = this.calculateFrequencyBands(fft);
     const highFreqAnomaly = this.detectHighFrequencyAnomaly(fft);
-    
-    // C.2.3: ZCR (per-channel, waveform-based metric)
     const zcr = this.calculateZCR(buffer);
+    
+    // Validate band percentages
+    if (!Number.isFinite(bands.bass) || !Number.isFinite(bands.mid) || !Number.isFinite(bands.treble)) {
+      return;
+    }
+    
+    // Validate high frequency anomaly
+    if (!Number.isFinite(highFreqAnomaly) || highFreqAnomaly < 0 || highFreqAnomaly > 1) {
+      return;
+    }
+    
+    // Validate ZCR
+    if (!Number.isFinite(zcr) || zcr < 0) {
+      return;
+    }
+    // === END DEFENSIVE GUARD ===
     
     // Сохраняем данные для объединения позже
     const frameData = { rms, peak, fft, bands, highFreqAnomaly, zcr };
@@ -612,9 +634,49 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const output = outputs[0];
     const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
     
+    // === DEFENSIVE GUARDS ===
+    // Guard 1: If input is missing or empty, passthrough + return (no metrics this block)
+    if (!input || input.length === 0) {
+      // Still passthrough if output exists
+      if (output && output.length > 0) {
+        for (let ch = 0; ch < output.length; ch++) {
+          if (output[ch]) output[ch].fill(0);
+        }
+      }
+      return true;
+    }
+    
+    // Guard 2: Validate all sample data — reject NaN/Infinity to prevent metric corruption
+    let hasInvalidData = false;
+    for (let ch = 0; ch < input.length; ch++) {
+      const channelData = input[ch];
+      if (!channelData || channelData.length === 0) {
+        hasInvalidData = true;
+        break;
+      }
+      for (let i = 0; i < channelData.length; i++) {
+        if (!Number.isFinite(channelData[i])) {
+          hasInvalidData = true;
+          break;
+        }
+      }
+      if (hasInvalidData) break;
+    }
+    
+    // If invalid data detected, passthrough zeros and skip metrics
+    if (hasInvalidData) {
+      if (output && output.length > 0) {
+        for (let ch = 0; ch < output.length; ch++) {
+          if (output[ch]) output[ch].fill(0);
+        }
+      }
+      return true;
+    }
+    // === END DEFENSIVE GUARDS ===
+    
     // 1. Пробрасываем звук на динамики
-    if (input && output && input.length > 0) {
-      for (let channel = 0; channel < input.length; channel++) {
+    if (output && output.length > 0) {
+      for (let channel = 0; channel < Math.min(input.length, output.length); channel++) {
         if (output[channel]) {
           output[channel].set(input[channel]);
         }
@@ -787,6 +849,21 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Use new Float32Array() instead of Array.from() — single memcpy, no boxing
     // Downsample 512 true FFT bins → 64 bins for popup visualization
     const spectrumCopy = this._downsampleSpectrum(this.combinedFFT);
+    
+    // === FINAL DEFENSIVE GUARD: Validate entire payload before serialization ===
+    // Catch any remaining NaN/Infinity values that slipped through earlier checks
+    const criticalMetrics = [combinedRMS, peakRMS, entropy, flatness, 
+                             combinedBands.bass, combinedBands.mid, combinedBands.treble,
+                             combinedHighFreqAnomaly, combinedZCR, spectralCentroid, spectralRolloff,
+                             hnr, dynamicRange, bassMidRatio, midTrebleRatio];
+    
+    for (const val of criticalMetrics) {
+      if (!Number.isFinite(val)) {
+        // Silently skip this frame — one corrupted metric invalidates the entire payload
+        return;
+      }
+    }
+    // === END FINAL GUARD ===
     
     const payload = {
       type: 'METRICS',

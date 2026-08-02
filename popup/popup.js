@@ -1349,7 +1349,23 @@ async function initAudioProcessing(stream) {
   popupCaptureStream = stream;
   
   try {
-    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+    // === DYNAMIC SAMPLE RATE SYNC ===
+    // Match AudioContext sampleRate to the input track to eliminate SRC (Sample Rate Conversion)
+    let targetSampleRate = 44100; // Fallback — Chrome's internal default
+    try {
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0 && audioTracks[0].getSettings) {
+        const settings = audioTracks[0].getSettings();
+        if (settings.sampleRate && settings.sampleRate > 0) {
+          targetSampleRate = settings.sampleRate;
+        }
+      }
+    } catch (e) {
+      // getSettings() not available in all browsers
+      log.info('getSettings() not available — using default sampleRate:', targetSampleRate);
+    }
+    
+    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
     
     if (popupAudioContext.state === 'suspended') {
       await popupAudioContext.resume();
@@ -1364,7 +1380,7 @@ async function initAudioProcessing(stream) {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       channelCount: 2,
-      channelCountMode: 'max',
+      channelCountMode: 'explicit', // Prevents dynamic input array length changes on mono/stereo switch
       channelInterpretation: 'discrete'
     });
 
@@ -1856,20 +1872,10 @@ startBtn.addEventListener('click', async () => {
 
   const captureSource = captureSourceSelect?.value || 'tab';
 
-  // Acquire tabStreamId via chrome.tabCapture (no GUI dialog)
-  let tabStreamId = null;
-  try {
-    tabStreamId = await chrome.tabCapture.getMediaId();
-    log.info('Tab stream ID acquired:', tabStreamId);
-  } catch (e) {
-    log.warn('Failed to acquire tabStreamId, falling back to getDisplayMedia:', e.message);
-  }
-
   connectToBackground();
   safeSendMessage({
     type: 'START_CAPTURE',
-    captureSource: captureSource,
-    tabStreamId: tabStreamId || null
+    captureSource: captureSource
   }, response => {
     if (response?.ok) {
       updateUI(true);
@@ -2492,6 +2498,43 @@ if (themeToggle) {
     const next = THEME_CYCLE[nextIndex];
     applyTheme(next);
     chrome.storage.local.set({ [THEME_KEY]: next });
+  });
+}
+
+// ============================================
+// Side Panel Toggle
+// ============================================
+const SIDE_PANEL_MODE_KEY = 'sidePanelMode'; // 'popup' | 'sidePanel'
+const sidePanelToggle = document.getElementById('sidePanelToggle');
+
+// Load saved side panel mode and apply to button
+chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
+  const mode = result[SIDE_PANEL_MODE_KEY] || 'popup';
+  if (sidePanelToggle) {
+    sidePanelToggle.textContent = mode === 'sidePanel' ? 'Side Panel: ON' : 'Side Panel: OFF';
+    sidePanelToggle.title = mode === 'sidePanel' ? 'Switch to popup mode' : 'Open side panel on icon click';
+    sidePanelToggle.style.borderColor = mode === 'sidePanel' ? 'rgba(0, 229, 255, 0.6)' : '';
+    sidePanelToggle.style.background = mode === 'sidePanel' ? 'rgba(0, 229, 255, 0.15)' : '';
+  }
+});
+
+if (sidePanelToggle) {
+  sidePanelToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
+      const currentMode = result[SIDE_PANEL_MODE_KEY] || 'popup';
+      const newMode = currentMode === 'popup' ? 'sidePanel' : 'popup';
+      
+      chrome.storage.local.set({ [SIDE_PANEL_MODE_KEY]: newMode }, () => {
+        if (sidePanelToggle) {
+          sidePanelToggle.textContent = newMode === 'sidePanel' ? 'Side Panel: ON' : 'Side Panel: OFF';
+          sidePanelToggle.title = newMode === 'sidePanel' ? 'Switch to popup mode' : 'Open side panel on icon click';
+          sidePanelToggle.style.borderColor = newMode === 'sidePanel' ? 'rgba(0, 229, 255, 0.6)' : '';
+          sidePanelToggle.style.background = newMode === 'sidePanel' ? 'rgba(0, 229, 255, 0.15)' : '';
+        }
+        log.info(`Side panel mode switched to: ${newMode}`);
+      });
+    });
   });
 }
 

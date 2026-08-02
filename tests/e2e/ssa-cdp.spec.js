@@ -55,7 +55,8 @@ test.describe('CDP Service Worker Kill Test', () => {
 
     // Service Worker should have been recreated
     const newSw = context.serviceWorkers()[0];
-    expect(newSw).toBeDefined();
+    expect(newSw).toBeTruthy();
+    expect(typeof newSw.url).toBe('string');
 
     await page.close();
   });

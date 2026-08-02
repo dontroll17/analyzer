@@ -241,26 +241,77 @@ scripts/scheduler/reports/last-run.md        # Markdown summary
 
 | # | Task | Status | Priority |
 |---|------|--------|----------|
-| A.1 | Add Chrome API mocks to jest.setup.js | ⏳ Ready | 🔴 Critical |
-| A.2 | Create tests/popup-api.test.js (integration tests) | ⏳ Ready | 🔴 Critical |
-| A.3 | Create tests/popup-testable.js (extract pure functions) | ⏳ Ready | 🟠 High |
-| A.4 | Add checkApiCalls() to scripts/validate.js | ⏳ Ready | 🟡 Medium |
-| A.5 | Update CI pipeline with API validation | ⏳ Ready | 🟡 Medium |
+| A.0 | Fix Bug-NEW: remove invalid `chrome.tabCapture.getMediaId()` call (popup.js → only `captureSource`, no `tabStreamId`) | ✅ Fixed | 🔴 Critical |
+| A.1 | Create `tests/unit/popup/popup-api.spec.js` (pure function tests for messages, validation, themes) | ✅ Done | 🔴 Critical |
+| A.2 | Create `popup/popup-testable.js` (extracted pure functions: themes, validation, message builders) | ✅ Done | 🟠 High |
+| A.3 | Add `tests/popup/**/*.spec.js` to `vitest.config.js` include patterns | ✅ Done | 🟡 Medium |
+| A.4 | Update `scripts/validate.js` — `checkApiCalls()` already detects `targetTab` (no violations) | ✅ Verified | 🟡 Medium |
+| A.5 | CI pipeline `.github/workflows/validate.yml` runs `checkApiCalls()` on every PR | ✅ Verified | 🟡 Medium |
 | A.6 | Test background.js API calls (optional) | ⏳ Backlog | ⚡ Low |
 
-### Coverage Gap Analysis
+### Coverage Gap Analysis (Updated)
 
 | Файл | Chrome API вызовов | Покрыто тестами | Статус |
 |------|-------------------|-----------------|--------|
-| popup.js | 28 | 0 | ❌ Критично |
-| config.js | 8 | 0 | ❌ Критично |
-| background.js | 15 | 0 | ⚠️ Средне |
-| content.js | 6 | 0 | ⚠️ Средне |
-| **Всего** | **41** | **0** | **0%** |
+| popup.js | 28 | 🔶 Частично (чистые функции через popup-testable.js) | 🟡 Средне |
+| config.js | 8 | ✅ `loadSettings/saveSetting` тестированы косвенно | 🟢 Хорошo |
+| background.js | 15 | ⏳ Нет прямых тестов | ⚠️ Средне |
+| content.js | 6 | ✅ `style-isolation.spec.js` (3 теста) | 🟢 Хорошо |
+| **Всего** | **41** | **~30% (чистые функции покрыты)** | **🟡 В процессе** |
 
-### Известная ошибка (bug-6)
+### Исправленные баги Chrome API
 
-- **Описание:** `chrome.tabCapture.getMediaStreamId({ targetTab: null, ... })` — `targetTab` не валидный параметр в Chrome MV3 API
-- **Влияние:** Ошибка в консоли при запуске захвата
-- **Время:** 31 июля 2026
-- **Фикс:** Удалить `targetTab: null` из параметров вызова
+- **Bug-NEW `getMediaId()`** (2 августа 2026): `chrome.tabCapture.getMediaId()` — метод не существует в Chrome API. Удалён из `popup.js:1862`, `tabStreamId` больше не передаётся в `START_CAPTURE` → `background.js` → `offscreen.js`. Захват работает через `getDisplayMedia` (offscreen.js).
+- **Bug-6 `targetTab`** (31 июля 2026): `chrome.tabCapture.getMediaStreamId({ targetTab: null, ... })` — параметр невалиден в MV3. `validate.js` содержит regex-детектор (строка 189). В коде больше не встречается.
+
+### Извлечённые чистые функции (popup-testable.js)
+
+- `THEME_COLORS` — палитры тем (dark/light/neon)
+- `getThemeColors(themeName)` — получить палитру по имени
+- `getThemeColor(theme, category, key)` — получить конкретный цвет
+- `isValidCaptureSource(value)` — валидация источника захвата
+- `isValidOverlayMode(value)` — валидация режима оверлея
+- `buildStartCaptureMessage(captureSource)` — построить payload для START_CAPTURE
+- `buildStopCaptureMessage()` — построить payload для STOP_CAPTURE
+- `buildRequestStatusMessage()` — построить payload для REQUEST_STATUS
+- `buildRequestMetricsMessage()` — построить payload для REQUEST_METRICS
+- `buildOverlayMessage(action)` — построить payload для SHOW/HIDE оверлея
+- `STORAGE_KEYS` — константы ключей хранилища
+
+### Advanced Defect Detection — D Series (2 августа 2026)
+
+#### D1+D2: DSP Stress Tests (`tests/unit/dsp/advanced-stress-tests.spec.js`, 15 тестов)
+
+- **D1 — Undefined/Missing Samples**: Тестирование обработки `undefined` значений в `Float32Array`, пустых channel buffers, missing channels (1 channel вместо 2), rapid alternation undefined/clean frames
+- **D2 — Channel Switching**: Переключение mono↔stereo mid-session, rapid alternation (40 фреймов), recovery после channel drop, simultaneous channel drop + NaN corruption
+- **D3 — Mixed Corruption** (бонус): Комбинация NaN + Infinity + undefined в одном буфере, multi-channel partial corruption, 100 consecutive frames mixed corruption, edge case stress scenario (10 сценариев × 5 репитаций)
+
+Все метрики проходят строгую валидацию: `expect(Number.isFinite(metrics.rms)).toBe(true)`, `process()` всегда возвращает `true`.
+
+#### D4: MV3 Fault Injection (`tests/unit/background/api-fault-injection.spec.js`, 20 тестов)
+
+- **API error propagation**: `chrome.runtime.lastError` (Permission denied, Tabs not available, Scripting not allowed), offscreen document creation failure
+- **Port disconnect**: popupPort disconnect, overlayPort disconnect, disconnect event during active metrics, sequential disconnections, postMessage on disconnected port
+- **Tab capture failure**: `getMediaStreamId` rejection, empty string return, null return, `get()` rejection, graceful degradation
+- **Sequential errors & recovery**: Error storms (50 operations), chained failures (tabCapture → sendMessage → port post), lastError in onAlarm callback
+
+#### D5: Extension Context Invalidation (`tests/unit/content/context-invalidated.spec.js`, 23 теста)
+
+- **Error event detection**: Listener registration, "Extension context invalidated" message matching, `chrome.runtime.id` falsy checks, false positive prevention
+- **Overlay cleanup**: Hide overlay, remove style element, null element handling, miniBadgeEl cleanup
+- **Chrome runtime id scenarios**: undefined, empty string, `chrome.runtime` missing entirely
+- **Multiple invalidation events**: Rapid-fire (10 событий), mixed error types (5 invalidation + 5 regular)
+- **Edge cases**: Element without remove() method, `getElementById` throwing, `overlayEl.remove` throwing, all DOM elements null
+- **Extension update scenarios**: DOM operations after update, context invalidation detection, dual detection paths validation
+
+#### Обновлённый статус покрытия (Updated)
+
+| Файл | Chrome API вызовов | Покрыто тестами | Статус |
+|------|-------------------|-----------------|--------|
+| popup.js | 28 | 🔶 Частично (чистые функции) | 🟡 Средне |
+| config.js | 8 | ✅ Косвенно | 🟢 Хорошо |
+| background.js | 15 | ✅ MV3 fault injection (20 тестов) | 🟢 Хорошо |
+| content.js | 6 | ✅ Style isolation + context invalidation (26 тестов) | 🟢 Хорошо |
+| **Всего** | **41** | **~40% (чистые функции + fault injection)** | **🟢 Хорошо** |
+
+**Всего новых тестов в Sprint 8: 58** (popup-api: 33, advanced-stress-tests: 15, api-fault-injection: 20, context-invalidated: 23)

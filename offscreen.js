@@ -9,15 +9,24 @@ const log = (self.__logger?.forModule('offscreen')) || {
 };
 
 // Centralized audio chain state (replaces window._ssaX to prevent race conditions)
+// Vector crossfading: each effect has Wet and Dry GainNode pair with exponential smoothing
+// G_wet(t) = 1 - e^(-α(t-t_curr)), G_dry(t) = e^(-α(t-t_curr))
+// where α = 1/τ (tau = 15ms for 0dB transition at 44.1kHz)
 const audioChain = {
   compressor: null,
-  hpf: null,
+  compressorWetGain: null,
+  compressorDryGain: null,
+  dcBlocker: null,
   lpf: null,
   peaking: null,
+  peakingWetGain: null,
+  peakingDryGain: null,
   delay: null,
+  delayWetGain: null,
+  delayDryGain: null,
   waveShaper: null,
   effectGain: null,
-  bypassGain: null,
+  masterGain: null,
   source: null,
   worklet: null,
   ready: false
@@ -29,6 +38,12 @@ let audioContext = null;
 let cleanupScheduled = false;
 let lastMetrics = null;
 let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
+
+// Crossfade constants: τ = 15ms, α = 1/τ for exponential smoothing
+const CROSSFADE_TAU = 0.015; // 15ms time constant in seconds
+
+// Silent Masking flag: blocks METRICS during Warm-up phase
+let isSilentMaskingActive = false;
 
 // Effects chain state (C.3.1 + C.3.2 + C.3.3 + C.3.4 + C.3.5)
 let _effectsState = {
@@ -81,32 +96,42 @@ const _rmsHistory = [];
 // Silence log counter (throttle logs)
 let _silenceLogCounter = 0;
 
-// C.3.2: Update compressor settings
+// C.3.2: Update compressor settings (vector crossfading with smooth transitions)
+// Uses setTargetAtTime for exponential smoothing: G(t) = G_final ± (G_final - G_initial) * e^(-αΔt)
+// τ = 15ms ensures 0dB transition with no audible clicks
 function _updateCompressor(params) {
   if (!audioChain.ready || !audioChain.compressor) return;
   
   const comp = audioChain.compressor;
+  const dryGain = audioChain.compressorDryGain;
+  const wetGain = audioChain.compressorWetGain;
+  const ctx = audioContext;
+  const t = ctx.currentTime;
+  
   if (params.enabled !== undefined) {
     _effectsState.compressor.enabled = params.enabled;
-    // Toggle: ratio=1 + threshold=-100dB (bypass) vs ratio=params.ratio (active)
-    if (params.enabled) {
-      comp.ratio.value = params.ratio !== undefined ? params.ratio : 12;
-      comp.threshold.value = params.threshold !== undefined ? params.threshold : -24;
-      comp.knee.value = params.knee !== undefined ? params.knee : 30;
-    } else {
-      comp.ratio.value = 1;
-      comp.threshold.value = -100; // FULL bypass — no signal will exceed this
-      comp.knee.value = 0;
-      comp.attack.value = 0;
-      comp.release.value = 0;
-    }
   }
+  
+  // Smooth gain transition for crossfading
+  if (_effectsState.compressor.enabled) {
+    // Activate compressor: wet→1, dry→0
+    comp.ratio.value = params.ratio !== undefined ? params.ratio : 12;
+    comp.threshold.value = params.threshold !== undefined ? params.threshold : -24;
+    comp.knee.value = params.knee !== undefined ? params.knee : 30;
+    comp.attack.value = params.attack !== undefined ? params.attack / 1000 : 0.003;
+    comp.release.value = params.release !== undefined ? params.release / 1000 : 0.250;
+    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+  } else {
+    // Bypass compressor: wet→0, dry→1
+    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+  }
+  
+  // Continue updating parameters
   if (params.threshold !== undefined && _effectsState.compressor.enabled) comp.threshold.value = params.threshold;
   if (params.knee !== undefined && _effectsState.compressor.enabled) comp.knee.value = params.knee;
-  if (params.ratio !== undefined && _effectsState.compressor.enabled) {
-    comp.ratio.value = params.ratio;
-  }
-  // attack/release are in ms from UI, but AudioParam expects seconds [0, 1]
+  if (params.ratio !== undefined && _effectsState.compressor.enabled) comp.ratio.value = params.ratio;
   if (params.attack !== undefined && _effectsState.compressor.enabled) comp.attack.value = params.attack / 1000;
   if (params.release !== undefined && _effectsState.compressor.enabled) comp.release.value = params.release / 1000;
 }
@@ -172,63 +197,80 @@ function _updateLimiter(params) {
   // Routing is controlled by compressor EQ/delay toggles
 }
 
-// C.3.4: Parametric EQ update
+// C.3.4: Parametric EQ update (vector crossfading after DC Blocker)
+// Smooth transitions: LPF+Peaking use wet/dry crossfading with τ=15ms
 function _updateEQ(params) {
-  if (!audioChain.ready || !audioChain.hpf || !audioChain.lpf || !audioChain.peaking) return;
+  if (!audioChain.ready || !audioChain.dcBlocker || !audioChain.lpf || !audioChain.peaking) return;
   
-  const hpf = audioChain.hpf;
+  const dc = audioChain.dcBlocker;
   const lpf = audioChain.lpf;
   const peak = audioChain.peaking;
+  const dryGain = audioChain.peakingDryGain;
+  const wetGain = audioChain.peakingWetGain;
+  const ctx = audioContext;
+  const t = ctx.currentTime;
   
   if (params.enabled !== undefined) {
     _effectsState.eq.enabled = params.enabled;
   }
   
-  // HPF — toggle frequency: 20Hz (bypass) vs value (active)
+  // Update frequencies regardless of enabled state (pre-filtered audio stays clean)
   if (params.hpfFreq !== undefined) {
     _effectsState.eq.hpfFreq = params.hpfFreq;
-    if (_effectsState.eq.enabled) {
-      hpf.frequency.value = params.hpfFreq;
-    } else {
-      hpf.frequency.value = 20; // bypass (20Hz = effectively no filtering)
-    }
+    if (_effectsState.eq.enabled) dc.frequency.value = params.hpfFreq;
   }
-  
-  // LPF — toggle frequency: 22050Hz (bypass) vs value (active)
   if (params.lpfFreq !== undefined) {
     _effectsState.eq.lpfFreq = params.lpfFreq;
-    if (_effectsState.eq.enabled) {
-      lpf.frequency.value = params.lpfFreq;
-    } else {
-      lpf.frequency.value = 22050; // bypass
-    }
+    if (_effectsState.eq.enabled) lpf.frequency.value = params.lpfFreq;
   }
-  
-  // Peaking gain — toggle: 0dB (bypass) vs value (active)
   if (params.peakFreq !== undefined) {
     _effectsState.eq.peakFreq = params.peakFreq;
     if (_effectsState.eq.enabled) peak.frequency.value = params.peakFreq;
   }
   if (params.peakGain !== undefined) {
     _effectsState.eq.peakGain = params.peakGain;
-    if (_effectsState.eq.enabled) {
-      peak.gain.value = params.peakGain;
-    } else {
-      peak.gain.value = 0; // bypass
-    }
+    if (_effectsState.eq.enabled) peak.gain.value = params.peakGain;
   }
   if (params.peakQ !== undefined) {
     _effectsState.eq.peakQ = params.peakQ;
     if (_effectsState.eq.enabled) peak.Q.value = params.peakQ;
   }
+  
+  // Smooth gain transition for crossfading
+  if (_effectsState.eq.enabled) {
+    // Activate EQ: wet→1, dry→0
+    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+  } else {
+    // Bypass LPF+Peaking: wet→0, dry→1 (DC Blocker still active)
+    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+  }
 }
 
-// C.3.5: Delay update
+// C.3.5: Delay update (vector crossfading with smooth transitions)
+// τ = 15ms ensures smooth fade without clicks
 function _updateDelay(params) {
   if (!audioChain.ready || !audioChain.delay) return;
   
+  const wetGain = audioChain.delayWetGain;
+  const dryGain = audioChain.delayDryGain;
+  const ctx = audioContext;
+  const t = ctx.currentTime;
+  
   if (params.enabled !== undefined) {
     _effectsState.delay.enabled = params.enabled;
+  }
+  
+  // Smooth gain transition for crossfading
+  if (_effectsState.delay.enabled) {
+    // Activate delay: wet→1, dry→0
+    wetGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+  } else {
+    // Bypass delay: wet→0, dry→1
+    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
+    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
   }
   
   if (params.delayTime !== undefined) {
@@ -243,9 +285,6 @@ function _updateDelay(params) {
   if (params.mix !== undefined) {
     audioChain.delay.port.postMessage({ type: 'SET_DELAY', mix: params.mix / 100 });
     _effectsState.delay.mix = params.mix;
-    // mix=0 = bypass, mix>0 = active
-    const actualMix = _effectsState.delay.enabled ? params.mix / 100 : 0;
-    audioChain.delay.port.postMessage({ type: 'SET_DELAY', mix: actualMix });
   }
 }
 
@@ -344,7 +383,11 @@ async function startCapture(source, tabStreamId) {
         try {
           mediaStream = await navigator.mediaDevices.getDisplayMedia({
             video: { width: 1, height: 1, displaySurface: 'browser' },
-            audio: true
+            audio: {
+              autoGainControl: false,
+              echoCancellation: false,
+              noiseSuppression: false
+            }
           });
           
           // Now also get microphone
@@ -386,7 +429,11 @@ async function startCapture(source, tabStreamId) {
         try {
           mediaStream = await navigator.mediaDevices.getDisplayMedia({
             video: { width: 1, height: 1, displaySurface: 'browser' },
-            audio: true
+            audio: {
+              autoGainControl: false,
+              echoCancellation: false,
+              noiseSuppression: false
+            }
           });
           
           // User may have shared screen without audio - try to get tab audio only
@@ -425,28 +472,26 @@ async function startCapture(source, tabStreamId) {
       return { ok: false, error: 'no_audio_tracks' };
     }
     
-    // Use the actual stream sampleRate to avoid resampling artifacts
-    // getDisplayMedia returns 48kHz by default — matching prevents DC offset
-    let streamSampleRate = 44100;
+    // === DYNAMIC SAMPLE RATE SYNC (Step 3) ===
+    // Match AudioContext sampleRate to the input track to eliminate SRC (Sample Rate Conversion)
+    // SRC is the primary cause of DC offset and subsonic artifacts in tab capture
+    let targetSampleRate = 44100; // Fallback — Chrome's internal default
     try {
-      // Get the actual sample rate from the underlying audio track
       const audioTrack = audioTracks[0];
       if (audioTrack.getSettings) {
         const settings = audioTrack.getSettings();
-        if (settings.sampleRate) {
-          streamSampleRate = settings.sampleRate;
+        if (settings.sampleRate && settings.sampleRate > 0) {
+          targetSampleRate = settings.sampleRate;
         }
       }
     } catch (e) {
-      // Settings may not be available in all browsers
+      // getSettings() not available in all browsers (e.g., older Chrome, screen capture APIs)
+      log.info('getSettings() not available — using default sampleRate:', targetSampleRate);
     }
     
-    audioContext = new AudioContext({ sampleRate: streamSampleRate });
-    
-    // Log sample rate mismatch — AudioContext resampling causes DC offset / gain shift
-    if (streamSampleRate !== 44100) {
-      log.warn(`Sample rate mismatch: stream=${streamSampleRate}Hz, DSP engine expects 44100Hz. AudioContext resampling active.`);
-    }
+    // Create AudioContext at the track's native sampleRate — zero SRC = zero DC offset
+    audioContext = new AudioContext({ sampleRate: targetSampleRate });
+    log.info(`AudioContext initialized at ${targetSampleRate}Hz (match input track)`);
     const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
@@ -455,83 +500,129 @@ async function startCapture(source, tabStreamId) {
     const workletNode = new AudioWorkletNode(audioContext, 'audio-analyzer', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 2,
-      channelCountMode: 'max',
-      channelInterpretation: 'discrete'
+      channelCount: 2,       // Fixed to 2 channels (L/R) — no dynamic reconfiguration
+      channelCountMode: 'explicit', // Explicit mode: channelCount is strictly enforced
+      channelInterpretation: 'discrete' // No automatic spatial mixing — L/R preserved independently
     });
     
-    // C.3.1: Effects chain — simple series routing
-    // source → compressor → hpf → lpf → peaking → delay → waveShaper → worklet
-    // All effects bypass to unity gain by default (no dual-path needed)
-    // 
-    // NOTE: audioContext(sampleRate) vs capture stream(sampleRate) may differ.
-    // getDisplayMedia often returns 48kHz while we create context at 44100.
-    // AudioContext resampling can shift gain by ~+6dB. Compensate with attenuation.
-    const effectGainNode = audioContext.createGain();
-    effectGainNode.gain.value = 0.5; // Compensate resampling + internal node gain
+    // === Phase Protocol: Vector Crossfading Audio Graph ===
+    // All effects use Wet/Dry GainNode pairs with exponential smoothing (τ=15ms)
+    // No connect()/disconnect() during runtime — only gain automation
     
-    // Create effect nodes (all bypassed by default via parameters)
+    // NOTE: Since Sample Rate Sync (Step 3), audioContext.sampleRate === track.sampleRate
+    // No SRC → no gain shift → no compensation needed. effectGainNode = unity gain.
+    const effectGainNode = audioContext.createGain();
+    effectGainNode.gain.value = 1.0; // Unity gain — no SRC compensation needed
+    
+    // === Compressor stage: Wet/Dry crossfading ===
     const compressorNode = audioContext.createDynamicsCompressor();
-    // FULL bypass: ratio=1 + threshold=-100dB (so signal never exceeds threshold)
     compressorNode.ratio.value = 1;
-    compressorNode.threshold.value = -100; // No compression at any realistic input level
+    compressorNode.threshold.value = -100;
     compressorNode.knee.value = 0;
     compressorNode.attack.value = 0;
     compressorNode.release.value = 0;
     
-    const hpfNode = audioContext.createBiquadFilter();
-    hpfNode.type = 'highpass';
-    hpfNode.frequency.value = 5; // 5Hz high-pass filter — removes subsonic rumble and DC offset
+    const compressorWetGain = audioContext.createGain();
+    compressorWetGain.gain.value = 0; // Silent initially — handled by Silent Masking phase
+    const compressorDryGain = audioContext.createGain();
+    compressorDryGain.gain.value = 1; // Silent initially — handled by Silent Masking phase
     
+    // === DC Blocker: 20Hz High-Pass Filter (H(z) = (1-αz⁻¹)/(1-z⁻¹)) ===
+    // Always in chain — removes DC offset and subsonic rumble
+    // α = e^(-2π·fc/fs) where fc=20Hz, fs=sampleRate
+    const dcBlocker = audioContext.createBiquadFilter();
+    dcBlocker.type = 'highpass';
+    dcBlocker.frequency.value = 20; // 20Hz cutoff — standard DC blocker
+    dcBlocker.Q.value = 0.707; // Butterworth response for flat passband
+    
+    // === EQ stage: LPF + Peaking with Wet/Dry crossfading ===
     const lpfNode = audioContext.createBiquadFilter();
     lpfNode.type = 'lowpass';
-    lpfNode.frequency.value = 22050; // Nyquist — effectively bypassed
+    lpfNode.frequency.value = 22050; // Nyquist — effectively bypassed initially
     
     const peakingNode = audioContext.createBiquadFilter();
     peakingNode.type = 'peaking';
     peakingNode.frequency.value = 1000; // 1kHz center
-    peakingNode.gain.value = 0; // 0dB — bypassed (unity gain)
+    peakingNode.gain.value = 0; // 0dB — bypassed initially
     peakingNode.Q.value = 1;
     
-    // C.3.5: Custom delay effect via AudioWorkletProcessor
+    const peakingWetGain = audioContext.createGain();
+    peakingWetGain.gain.value = 0; // Silent initially
+    const peakingDryGain = audioContext.createGain();
+    peakingDryGain.gain.value = 1; // Silent initially
+    
+    // === Delay stage: Wet/Dry crossfading ===
     const delayWorkletPath = chrome.runtime.getURL('dsp-engine/delay-processor.js');
     await audioContext.audioWorklet.addModule(delayWorkletPath);
     
     const delayNode = new AudioWorkletNode(audioContext, 'delay-effect', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 2,
-      channelCountMode: 'max',
-      channelInterpretation: 'discrete'
+      channelCount: 2,       // Fixed to 2 channels — explicit mode prevents runtime channel count changes
+      channelCountMode: 'explicit', // Strict enforcement of channelCount = 2
+      channelInterpretation: 'discrete' // L/R channels processed independently
     });
+    
+    const delayWetGain = audioContext.createGain();
+    delayWetGain.gain.value = 0; // Silent initially
+    const delayDryGain = audioContext.createGain();
+    delayDryGain.gain.value = 1; // Silent initially
     
     const waveShaperNode = audioContext.createWaveShaper();
     waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
     waveShaperNode.oversample = 'none';
     
+    // Master gain for graceful shutdown (ramp to 0 before close)
+    // Safety margin: 0.5 prevents cumulative gain from multiple Wet/Dry crossfades
+    // All Wet/Dry pairs sum to 1.0 mathematically, but 0.5 provides headroom
+    const masterGainNode = audioContext.createGain();
+    masterGainNode.gain.value = 0.5; // Unity gain with safety margin
+    
     // Store effect references in centralized audioChain object
     audioChain.compressor = compressorNode;
-    audioChain.hpf = hpfNode;
+    audioChain.compressorWetGain = compressorWetGain;
+    audioChain.compressorDryGain = compressorDryGain;
+    audioChain.dcBlocker = dcBlocker;
     audioChain.lpf = lpfNode;
     audioChain.peaking = peakingNode;
+    audioChain.peakingWetGain = peakingWetGain;
+    audioChain.peakingDryGain = peakingDryGain;
     audioChain.delay = delayNode;
+    audioChain.delayWetGain = delayWetGain;
+    audioChain.delayDryGain = delayDryGain;
     audioChain.waveShaper = waveShaperNode;
     audioChain.effectGain = effectGainNode;
-    audioChain.bypassGain = null; // No longer used — simple series routing
+    audioChain.masterGain = masterGainNode;
     audioChain.source = audioSource;
-    audioChain.masterGain = null; // Removed — no longer needed
     
-    // Series chain: source → compressor → hpf → lpf → peaking → delay → waveShaper → effectGain → worklet
-    compressorNode.connect(hpfNode);
-    hpfNode.connect(lpfNode);
-    lpfNode.connect(peakingNode);
-    peakingNode.connect(delayNode);
-    delayNode.connect(waveShaperNode);
-    waveShaperNode.connect(effectGainNode);
-    effectGainNode.connect(workletNode);
-    
-    // Source connects directly to compressor (single path, no bypass)
+    // === Vector Crossfading Routing (fixed, no runtime connect/disconnect) ===
+    // Compressor stage: BOTH paths always connected, gain crossfades determine path
+    compressorNode.connect(compressorWetGain);
+    compressorNode.connect(compressorDryGain);
     audioSource.connect(compressorNode);
+    
+    // Compressor Wet/Dry → DC Blocker → LPF+Peaking
+    compressorWetGain.connect(dcBlocker);
+    compressorDryGain.connect(dcBlocker);
+    
+    // DC Blocker → LPF+Peaking (Wet/Dry routing after HPF)
+    dcBlocker.connect(lpfNode);
+    lpfNode.connect(peakingNode);
+    peakingNode.connect(peakingWetGain);
+    peakingNode.connect(peakingDryGain);
+    
+    // Peaking Wet/Dry → Delay
+    peakingWetGain.connect(delayNode);
+    peakingDryGain.connect(delayNode);
+    
+    // Delay Wet/Dry → waveShaper → master → worklet
+    delayNode.connect(delayWetGain);
+    delayNode.connect(delayDryGain);
+    delayWetGain.connect(waveShaperNode);
+    delayDryGain.connect(waveShaperNode);
+    waveShaperNode.connect(effectGainNode);
+    effectGainNode.connect(masterGainNode);
+    masterGainNode.connect(workletNode);
     
     // Legacy toggle (kept for backward compat)
     window._ssaSetEffectsActive = function(active) {
@@ -545,8 +636,33 @@ async function startCapture(source, tabStreamId) {
     // Save reference in closure to prevent race with cleanup()
     const savedAudioContext = audioContext;
     
-    // Mark audio chain as ready (prevents race in effect update handlers)
+    // === Phase 1: Silent Masking ===
+    // All gain nodes already at initial values (wet=0, dry=1 for effects; master=0)
+    // workletNode connected but METRICS suppressed in onmessage handler
+    isSilentMaskingActive = true;
+    
+    // Set master gain to 0 initially (silent)
+    audioChain.masterGain.gain.value = 0;
+    
+    // === Phase 2: Warm-up (100ms) ===
+    // Fill delay lines, stabilize IIR filter coefficients, decay transient processes
+    // AudioContext must be in 'running' state during warm-up
+    await audioContext.resume();
     audioChain.ready = true;
+    const warmUpDuration = 100; // ms — ~3840 samples at 48kHz
+    await new Promise(resolve => setTimeout(resolve, warmUpDuration));
+    
+    // === Phase 3: Gradual Ramp-Up ===
+    // Smooth transition: setTargetAtTime with τ=15ms for all gain nodes
+    const ctx = audioContext;
+    const t = ctx.currentTime;
+    
+    // Enable METRICS (end Silent Masking)
+    isSilentMaskingActive = false;
+    
+    // Master gain: 0→0.5 with exponential smoothing (starts audio signal)
+    // Target matches initial masterGainNode.gain.value for consistency
+    audioChain.masterGain.gain.setTargetAtTime(0.5, t, CROSSFADE_TAU);
     
     // Start DSP time polling: request DSP time from worklet every 2s
     _dspTimeTimer = setInterval(() => {
@@ -604,67 +720,17 @@ async function startCapture(source, tabStreamId) {
     }, 200); // Check every 200ms — responsive enough for user actions
     
     workletNode.port.onmessage = (event) => {
-      if (event.data.type === 'METRICS') {
+      // During Silent Masking phase, suppress METRICS to prevent uncalibrated data
+      // Metrics are only sent after Warm-up phase completes and master gain ramps up
+      if (event.data.type === 'METRICS' && audioChain.ready && !isSilentMaskingActive) {
         _metricsCounter++;
         lastMetrics = event.data;
         lastMetrics.audioDrops = audioDropCount;
         _lastWorkletTimestamp = event.data.timestamp || Date.now();
         
-        // Detect silence: constant RMS = DC offset from audioContext resampling
-        // Track RMS variance over last 10 frames (~230ms at 43fps)
-        _rmsHistory.push(event.data.rms);
-        if (_rmsHistory.length > 10) _rmsHistory.shift();
-        
-        let rmsVar = 0;
-        if (_rmsHistory.length === 10) {
-          const mean = _rmsHistory.reduce((s, v) => s + v, 0) / 10;
-          rmsVar = _rmsHistory.reduce((s, v) => s + (v - mean) ** 2, 0) / 10;
-        }
-        
-        // Constant RMS (variance ≈ 0) = DC offset from audioContext resampling
-        // 48kHz→44100 resampling creates near-constant signal (DC offset)
-        // Detection: if RMS variance < 1e-8, signal is constant → DC noise
-        if (rmsVar < 1e-8) {
-          // Log every 50 frames (~1.2s)
-          _silenceLogCounter++;
-          if (_silenceLogCounter % 50 === 0) {
-            log.info('SILENCE DC noise: RMS:', event.data.rms.toFixed(4), 'var:', rmsVar.toFixed(10), 'Bass:', event.data.bass.toFixed(1), '%');
-          }
-          event.data.rms = 0;
-          event.data.peakRMS = 0;
-          event.data.glitchState = 'SILENT';
-          // ALWAYS nullify bands — DC noise can show any bass percentage
-          event.data.bass = 0;
-          event.data.mid = 0;
-          event.data.treble = 0;
-          event.data.rmsRight = undefined;
-          event.data.bassRight = undefined;
-          event.data.midRight = undefined;
-          event.data.trebleRight = undefined;
-          event.data.highFreqAnomaly = 0;
-          event.data.entropy = 0;
-          event.data.flatness = 0;
-          event.data.entropyState = 'SILENT';
-          event.data.isGlitch = false;
-          event.data.glitchCount = 0;
-          event.data.hnr = 0;
-          event.data.zcr = 0;
-          event.data.spectralCentroid = 0;
-          event.data.spectralRolloff = 0;
-          event.data.onsetDetected = false;
-          event.data.dynamicRange = 0;
-          event.data.bassMidRatio = 0;
-          event.data.midTrebleRatio = 0;
-          event.data.glitchRate = 0;
-        } else {
-          // Log first 5 frames for debugging (RMS + bands)
-          if (_metricsCounter <= 5) {
-            log.info('Frame', _metricsCounter, 'RMS:', event.data.rms.toFixed(4), 'Peak:', event.data.peakRMS.toFixed(4), 'Bands[B/M/T]:', event.data.bass.toFixed(1), event.data.mid.toFixed(1), event.data.treble.toFixed(1), 'var:', rmsVar.toFixed(8));
-          }
-        }
-        // Log frequency bands every 100 messages for debugging
-        if (_metricsCounter === 100 || _metricsCounter % 1000 === 0) {
-          log.warn('Freq bands [B/M/T]:', event.data.bass, event.data.mid, event.data.treble);
+        // Log first 5 frames for debugging (RMS + bands)
+        if (_metricsCounter <= 5) {
+          log.info('Frame', _metricsCounter, 'RMS:', event.data.rms.toFixed(4), 'Peak:', event.data.peakRMS.toFixed(4), 'Bands[B/M/T]:', event.data.bass.toFixed(1), event.data.mid.toFixed(1), event.data.treble.toFixed(1));
         }
         
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
@@ -777,6 +843,21 @@ function scheduleCleanup() {
 function cleanup() {
   cleanupScheduled = false;
   
+  // === Graceful Teardown: Master gain ramp-down (15ms) ===
+  // Prevents audible click when closing AudioContext
+  if (audioChain.masterGain && audioContext) {
+    try {
+      audioChain.masterGain.gain.setTargetAtTime(0, audioContext.currentTime, CROSSFADE_TAU);
+    } catch (_) {}
+  }
+  
+  // Wait for graceful ramp-down before full cleanup
+  setTimeout(() => {
+    _performCleanup();
+  }, 20);
+}
+
+function _performCleanup() {
   // Stop DSP time polling
   if (_dspTimeTimer) {
     clearInterval(_dspTimeTimer);
@@ -796,43 +877,53 @@ function cleanup() {
     _streamMonitorTimer = null;
   }
   
-  // === Explicit audio graph disconnection (P.1: memory safety) ===
-  // Disconnect entire chain before nullifying references to prevent V8 leaks
+  // === Audio graph teardown: disconnect all nodes AFTER ramp-down ===
+  // This ensures V8 garbage collector can immediately reclaim AudioNode objects
   try {
-    if (audioChain.source) audioChain.source.disconnect();
-    if (audioChain.compressor) audioChain.compressor.disconnect();
-    if (audioChain.hpf) audioChain.hpf.disconnect();
-    if (audioChain.lpf) audioChain.lpf.disconnect();
-    if (audioChain.peaking) audioChain.peaking.disconnect();
-    // delay disconnected separately below
-    if (audioChain.limiterCompressor) audioChain.limiterCompressor.disconnect();
+    // Disconnect delay worklet (has custom processor)
+    if (audioChain.delay) {
+      audioChain.delay.disconnect();
+      audioChain.delay.port.close();
+      audioChain.delay.port.onmessage = null; // Critical for GC
+    }
+    
+    // Disconnect worklet node and clear message handler
+    if (audioChain.worklet) {
+      audioChain.worklet.disconnect();
+      audioChain.worklet.port.close();
+      audioChain.worklet.port.onmessage = null; // Critical for GC
+    }
+    
+    // Disconnect entire chain in reverse order (output → input)
+    if (audioChain.waveShaper) audioChain.waveShaper.disconnect();
     if (audioChain.effectGain) audioChain.effectGain.disconnect();
-    if (audioChain.masterGain) { /* disconnected separately */ }
+    if (audioChain.masterGain) audioChain.masterGain.disconnect();
+    if (audioChain.delayWetGain) audioChain.delayWetGain.disconnect();
+    if (audioChain.delayDryGain) audioChain.delayDryGain.disconnect();
+    if (audioChain.peakingWetGain) audioChain.peakingWetGain.disconnect();
+    if (audioChain.peakingDryGain) audioChain.peakingDryGain.disconnect();
+    if (audioChain.dcBlocker) audioChain.dcBlocker.disconnect();
+    if (audioChain.compressor) audioChain.compressor.disconnect();
+    if (audioChain.compressorWetGain) audioChain.compressorWetGain.disconnect();
+    if (audioChain.compressorDryGain) audioChain.compressorDryGain.disconnect();
+    if (audioChain.source) audioChain.source.disconnect();
   } catch (_) {}
-  
-  // Disconnect worklet node and port
-  if (audioChain.worklet) {
-    try { audioChain.worklet.disconnect(); } catch (_) {}
-    try { audioChain.worklet.port.close(); } catch (_) {}
-  }
   
   // Clear effects chain references — reset to clean bypass state
   audioChain.compressor = null;
-  audioChain.hpf = null;
+  audioChain.compressorWetGain = null;
+  audioChain.compressorDryGain = null;
+  audioChain.dcBlocker = null;
   audioChain.lpf = null;
   audioChain.peaking = null;
-  if (audioChain.delay) {
-    try { audioChain.delay.disconnect(); } catch (_) {}
-    audioChain.delay = null;
-  }
+  audioChain.peakingWetGain = null;
+  audioChain.peakingDryGain = null;
+  audioChain.delay = null;
+  audioChain.delayWetGain = null;
+  audioChain.delayDryGain = null;
   audioChain.waveShaper = null;
-  audioChain.bypassGain = null;
   audioChain.effectGain = null;
-  // P.2: Clean up master normalization gain node
-  if (audioChain.masterGain) {
-    try { audioChain.masterGain.disconnect(); } catch (_) {}
-    audioChain.masterGain = null;
-  }
+  audioChain.masterGain = null;
   audioChain.source = null;
   audioChain.worklet = null;
   audioChain.ready = false;

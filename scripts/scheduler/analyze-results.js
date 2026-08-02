@@ -85,7 +85,7 @@ function parseArgs() {
 // ==================== ANALYSIS ====================
 function analyzeTestFailures(report) {
   const failures = [];
-  const testsResult = report.results.find(r => r.checkName === 'Jest Unit Tests');
+  const testsResult = report.results.find(r => r.checkName === 'Unit Tests');
   
   if (!testsResult) {
     return { status: 'N/A', failures: [], error: 'No test results found' };

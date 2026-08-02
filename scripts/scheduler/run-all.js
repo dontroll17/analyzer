@@ -113,7 +113,7 @@ function runCheck(name, cmd, options = {}) {
 }
 
 function checkTests() {
-  return runCheck('Jest Unit Tests', 'npm test', {
+  return runCheck('Unit Tests', 'npm test', {
     timeout: 60000,
   });
 }
@@ -152,27 +152,36 @@ function checkCoverage() {
   return runCheck('Coverage Report', 'npm run test:coverage', {
     timeout: 60000,
     onOutput: (output) => {
-      // Parse coverage from output (jest --coverage table format)
-      const stmtsMatch = output.match(/All files\s+\|\s+(\d+\.?\d*)\s*\|/);
-      const branchMatch = output.match(/All files[^|]*\|\s*(\d+\.?\d*)\s*\|/);
-      const funcsMatch = output.match(/All files[^|]*\|[^|]*\|\s*(\d+\.?\d*)\s*\|/);
-      const linesMatch2 = output.match(/All files[^|]*\|[^|]*\|[^|]*\|\s*(\d+\.?\d*)\s*\|/);
+      // Parse coverage from Vitest JSON output or console summary
+      // Vitest v3 outputs percentage values like "85.23%" or just numbers
+      
+      // Try to match percentages from console output
+      const stmtsMatch = output.match(/Statements\s*\|[^|]*\|(\d+\.?\d*)%/);
+      const funcsMatch = output.match(/Functions\s*\|[^|]*\|(\d+\.?\d*)%/);
+      const branchesMatch = output.match(/Branches\s*\|[^|]*\|(\d+\.?\d*)%/);
+      const linesMatch = output.match(/Lines\s*\|[^|]*\|(\d+\.?\d*)%/);
+      
+      // Fallback: look for "X% (Y/Z)" patterns
+      if (!stmtsMatch) {
+        const stmtFallback = output.match(/(\d+\.?\d*)%\s*\(\d+\/\d+\)\s*statements/);
+        if (stmtFallback) stmtsMatch[1] = stmtFallback[1];
+      }
       
       if (stmtsMatch) {
         global.coverage = global.coverage || {};
         global.coverage.statements = parseFloat(stmtsMatch[1]);
       }
-      if (branchMatch) {
-        global.coverage = global.coverage || {};
-        global.coverage.branches = parseFloat(branchMatch[1]);
-      }
       if (funcsMatch) {
         global.coverage = global.coverage || {};
         global.coverage.functions = parseFloat(funcsMatch[1]);
       }
-      if (linesMatch2) {
+      if (branchesMatch) {
         global.coverage = global.coverage || {};
-        global.coverage.lines = parseFloat(linesMatch2[1]);
+        global.coverage.branches = parseFloat(branchesMatch[1]);
+      }
+      if (linesMatch) {
+        global.coverage = global.coverage || {};
+        global.coverage.lines = parseFloat(linesMatch[1]);
       }
     },
   });

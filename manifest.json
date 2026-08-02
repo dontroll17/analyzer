@@ -9,15 +9,13 @@
     "offscreen",
     "storage",
     "alarms",
-    "tabCapture"
+    "tabCapture",
+    "sidePanel"
   ],
+  "side_panel": {
+    "default_path": "popup/popup.html"
+  },
   "host_permissions": [],
-  "web_accessible_resources": [
-    {
-      "resources": ["dsp-engine/audio-worklet.js", "dsp-engine/delay-processor.js"],
-      "matches": ["<current_page>"]
-    }
-  ],
   "background": {
     "service_worker": "background.js"
   },

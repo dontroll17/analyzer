@@ -4,7 +4,7 @@
  * Запускается: npm run validate
  *
  * Checks:
- * 1. npm test — Jest unit tests
+ * 1. npm test — Vitest unit tests
  * 2. node --check — Syntax check all .js files
  * 3. Production logging audit — console.warn/log/debug in production code
  * 4. Manifest validation — MV3 compliance

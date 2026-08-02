@@ -34,7 +34,9 @@ test.describe('Stream Sensation Analyzer — E2E Agent', () => {
       serviceWorker = await context.waitForEvent('serviceworker', { timeout: 5000 });
     }
 
-    expect(serviceWorker).toBeDefined();
+    expect(serviceWorker).toBeTruthy();
+    expect(typeof serviceWorker.url).toBe('string');
+    expect(serviceWorker.url).toContain('serviceworker');
     await page.close();
   });
 
@@ -47,7 +49,8 @@ test.describe('Stream Sensation Analyzer — E2E Agent', () => {
 
     // Check that background script loaded without errors
     const sw = context.serviceWorkers()[0];
-    expect(sw).toBeDefined();
+    expect(sw).toBeTruthy();
+    expect(typeof sw.url).toBe('string');
 
     await page.close();
   });
@@ -93,7 +96,10 @@ test.describe('Stream Sensation Analyzer — E2E Agent', () => {
     });
 
     // Should not throw — tabStreamId is provided, no getDisplayMedia dialog
-    expect(response).toBeDefined();
+    // Should return a structured response object (not null/undefined)
+    expect(response).not.toBeNull();
+    expect(response).not.toBeUndefined();
+    expect(typeof response).toBe('object');
 
     await page.close();
   });

@@ -12,6 +12,7 @@ let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
 let persistentMetricsQueue = []; // Survives popup disconnect — used for instant replay (Phase 2.2)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
+let globalPopupDisconnectTimer = null; // Grace period timer for popup disconnect
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
 const MAX_METRICS_QUEUE = 10; // Limit transient queue for stability
 const MAX_PERSISTENT_METRICS = 500; // Max entries in persistent queue
@@ -40,7 +41,7 @@ let sessionDB = null;
 let dbReady = false;
 
 function openSessionDB() {
-  if (sessionDB || !('indexedDB' in window)) return Promise.resolve(false);
+  if (sessionDB || !('indexedDB' in self)) return Promise.resolve(false);
   return new Promise((resolve) => {
     const request = indexedDB.open(SESSION_DB_NAME, SESSION_DB_VERSION);
     request.onupgradeneeded = (event) => {
@@ -84,7 +85,7 @@ function closeSessionDB() {
 }
 
 // Open IndexedDB on startup
-if ('indexedDB' in window) {
+if ('indexedDB' in self) {
   openSessionDB();
 }
 
@@ -218,8 +219,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // NOTE: This handler NO LONGER clears ringBuffer or chrome.storage —
       // capture lifecycle is separate from UI lifecycle (Phase 2)
       const currentPort = popupPort;
+      // Immediately mark as disconnected to prevent postMessage on dead port
+      if (currentPort) currentPort._disconnected = true;
       globalPopupDisconnectTimer = setTimeout(() => {
-        if (popupPort === currentPort && currentPort && currentPort._disconnected) {
+        if (popupPort === currentPort) {
           log.info('Popup port disconnected, clearing only port reference');
           popupPort = null;
           // metricsQueue and ringBuffer persist until STOP_CAPTURE or _OFFSCREEN_ENDED
@@ -315,7 +318,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {
-    log.warn('START_CAPTURE received from popup, captureSource:', message.captureSource, 'tabStreamId:', message.tabStreamId ? 'present' : 'null');
+    log.warn('START_CAPTURE received from popup, captureSource:', message.captureSource);
     if (!canUseOffscreen()) {
       log.error('Offscreen API not available');
       sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
@@ -323,7 +326,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     
     const captureSource = message.captureSource || 'tab';
-    const tabStreamId = message.tabStreamId || null;
     
     // Helper: inject content.js and show overlay (Phase 4.2)
     async function showOverlayOnActiveTab() {
@@ -363,12 +365,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     
     if (offscreenReady) {
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId }, handleStartResponse);
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
     } else {
       // Try to create offscreen document — keep SW alive with async operation
       createOffscreenDocument().then((success) => {
         if (success) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId }, handleStartResponse);
+          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
         } else {
           sendResponse({ ok: false, error: 'Failed to create offscreen document' });
         }
@@ -444,7 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     
     // Forward to popup if connected (live stream)
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage({ type: 'METRICS', ...d });
       } catch (e) {
@@ -483,7 +485,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // === Forward audio drop events to popup ===
   if (message.type === '_AUDIO_DROP') {
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage(message);
       } catch (e) {
@@ -495,7 +497,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === '_AUDIO_DROP_RESET') {
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage(message);
       } catch (e) {
@@ -571,12 +573,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  createOffscreenDocument();
+// === Side Panel Support ===
+// Use chrome.storage to persist user preference for side panel mode
+const SIDE_PANEL_MODE_KEY = 'sidePanelMode'; // 'popup' | 'sidePanel'
+
+// Set default side panel behavior (respects per-tab overrides via setOptions)
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+
+// Handle extension icon click — route to popup or side panel based on user preference
+chrome.action.onClicked.addListener(async (tab) => {
+  const mode = await new Promise((resolve) => {
+    chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
+      resolve(result[SIDE_PANEL_MODE_KEY] || 'popup');
+    });
+  });
+  
+  if (mode === 'sidePanel') {
+    // Ensure side panel shows the correct page for this tab
+    await chrome.sidePanel.setOptions({
+      tabId: tab.id,
+      path: 'popup/popup.html'
+    }).catch(() => {});
+    
+    // Open side panel
+    await chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+  }
+  // If mode is 'popup', Chrome shows the default popup automatically
 });
 
-chrome.runtime.onStartup.addListener(() => {
-  createOffscreenDocument();
-});
-
-createOffscreenDocument();
+// Note: offscreen document is created lazily via ensureOffscreenReady() when capture starts.
+// Do NOT create on install/startup — Chrome requires justification and only one offscreen doc allowed.
