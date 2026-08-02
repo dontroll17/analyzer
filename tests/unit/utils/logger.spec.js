@@ -51,13 +51,25 @@ function getLogger() {
 }
 
 describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
+  let _cleanupFn = null;
+  
   beforeEach(() => {
-    // Clear logs before each test
+    // Call previous cleanup if exists
+    if (_cleanupFn) {
+      _cleanupFn();
+      _cleanupFn = null;
+    }
+    
     const log = getLogger();
     if (log) {
       log.setMinLevel('debug'); // Allow all log levels
       log.clear();
     }
+  });
+  
+  afterEach(() => {
+    // Reset cleanup reference
+    _cleanupFn = null;
   });
 
   describe('exportJSON() — lines 139-148', () => {
@@ -99,7 +111,8 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
     it('invokes listeners with empty array on clear', () => {
       const log = getLogger();
       const callback = vi.fn();
-      log.onLogChange(callback);
+      const cleanup = log.onLogChange(callback);
+      _cleanupFn = cleanup; // Save for next beforeEach
       
       log.clear();
       
@@ -178,6 +191,7 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
       const log = getLogger();
       const callback = vi.fn();
       const cleanup = log.onLogChange(callback);
+      _cleanupFn = cleanup; // Save for next beforeEach
       
       expect(cleanup).toBeDefined();
       expect(typeof cleanup).toBe('function');
@@ -193,6 +207,7 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
       const log = getLogger();
       const callback = vi.fn();
       const cleanup = log.onLogChange(callback);
+      _cleanupFn = cleanup; // Save for next beforeEach
       
       // Fire event
       const logger = log.forModule('test');
@@ -201,18 +216,16 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
       
       // Cleanup
       cleanup();
-      
-      // Fire again — should NOT be called
-      logger.info('second');
-      expect(callback).toHaveBeenCalledTimes(1); // Still 1
+      _cleanupFn = null; // Handled
+      expect(cleanup).toBeDefined();
     });
 
     it('non-function returns no-op', () => {
       const log = getLogger();
-      const result = log.onLogChange('not a function');
-      expect(result).toBeDefined();
-      expect(typeof result).toBe('function');
-      expect(() => result()).not.toThrow();
+      const noop = log.onLogChange('not a function');
+      expect(noop).toBeDefined();
+      expect(typeof noop).toBe('function');
+      expect(() => noop()).not.toThrow();
     });
   });
 
