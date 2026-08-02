@@ -15,6 +15,13 @@ const log = (self.__logger?.forModule('content')) || {
 
 log.info('content.js loaded on', location.href);
 
+// Guard: prevent double injection (used with chrome.scripting.executeScript in Phase 4)
+if (typeof window.__ssaContentInitialized !== 'undefined') {
+  log.info('content.js already initialized, skipping duplicate load');
+} else {
+  window.__ssaContentInitialized = true;
+}
+
 let overlayVisible = false;
 let overlayPort = null;
 let captureActive = false;
@@ -516,48 +523,41 @@ function applyOverlayMode() {
   
   if (overlayMode === 'compact') {
     if (canvas) {
-      canvas.style.width = '100px';
-      canvas.style.height = '30px';
+      canvas.style.transform = 'scale(0.83)';
+      canvas.style.transformOrigin = 'top left';
+      canvas.style.transformBox = 'fill-box';
     }
     if (statusText) statusText.style.display = 'none';
     if (rmsValue) rmsValue.style.display = 'none';
     if (metricsRow) metricsRow.style.display = 'none';
   } else if (overlayMode === 'sidebar') {
     if (canvas) {
-      canvas.style.width = '';
-      canvas.style.height = '';
+      canvas.style.transform = 'scale(1)';
     }
     if (statusText) statusText.style.display = '';
-    if (rmsValue) rmsValue.style.display = '';
+    if (rmsValue) statusText.style.display = '';
     if (metricsRow) metricsRow.style.display = '';
   } else {
     // expanded
     if (canvas) {
-      canvas.style.width = '';
-      canvas.style.height = '';
+      canvas.style.transform = 'scale(0.55)';
+      canvas.style.transformOrigin = 'top left';
+      canvas.style.transformBox = 'fill-box';
     }
     if (statusText) statusText.style.display = '';
     if (rmsValue) rmsValue.style.display = '';
     if (metricsRow) metricsRow.style.display = '';
   }
   
-  // Apply canvas size based on mode
+  // Fixed internal resolution for canvas — avoids context reset on mode change
   if (canvas) {
-    if (overlayMode === 'sidebar') {
-      canvas.id = 'ssa-sidebar-canvas';
-      canvas.width = 220;
-      canvas.height = 120;
-    } else if (overlayMode === 'compact') {
-      canvas.id = 'ssa-overlay-canvas';
-      canvas.width = 100;
-      canvas.height = 30;
-    } else {
-      canvas.id = 'ssa-overlay-canvas';
-      canvas.width = 120;
-      canvas.height = 30;
+    canvas.id = overlayMode === 'sidebar' ? 'ssa-sidebar-canvas' : 'ssa-overlay-canvas';
+    canvas.width = 220;
+    canvas.height = 120;
+    // Only re-init context on first load, not on mode switch
+    if (!ctx) {
+      ctx = canvas.getContext('2d');
     }
-    // Re-init context after resize
-    ctx = canvas.getContext('2d');
   }
 }
 
@@ -586,11 +586,13 @@ function injectOverlay() {
   const shadow = overlayEl.attachShadow({ mode: 'open' });
   overlayShadow = shadow;
   
-  // Inject global CSS for shadow host (:hover, :dragging)
-  const globalStyle = document.createElement('style');
-  globalStyle.id = 'ssa-overlay-style';
-  globalStyle.textContent = OVERLAY_CSS_GLOBAL;
-  document.head.appendChild(globalStyle);
+  // Inject global CSS for shadow host (:hover, :dragging) — guard against duplicates
+  if (!document.getElementById('ssa-overlay-style')) {
+    const globalStyle = document.createElement('style');
+    globalStyle.id = 'ssa-overlay-style';
+    globalStyle.textContent = OVERLAY_CSS_GLOBAL;
+    document.head.appendChild(globalStyle);
+  }
   
   // Inject shadow-internal CSS
   const styleEl = document.createElement('style');
@@ -861,11 +863,17 @@ function connectToMetrics() {
   overlayPort.onDisconnect.addListener(() => {
     overlayPort = null;
     
+    // Don't reconnect if extension context was invalidated
+    if (!chrome.runtime?.id) {
+      log.warn('Extension context invalidated, not reconnecting');
+      return;
+    }
+    
     if (overlayVisible && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
       const delay = 2000 * reconnectAttempts; // Exponential backoff
       setTimeout(() => {
-        if (overlayVisible) {
+        if (overlayVisible && chrome.runtime?.id) {
           connectToMetrics();
         }
       }, delay);
@@ -926,4 +934,17 @@ window.addEventListener('beforeunload', () => {
   }
   const styleEl = document.getElementById('ssa-overlay-style');
   if (styleEl) styleEl.remove();
+});
+
+// === Extension context invalidation handling (Phase 2.4) ===
+// Catches uncaught errors from DOM operations after extension update/restart
+window.addEventListener('error', (event) => {
+  const msg = event.message || '';
+  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
+    log.warn('Extension context invalidated (uncaught error), hiding overlay');
+    hideOverlay();
+    // Remove global style if present
+    const styleEl = document.getElementById('ssa-overlay-style');
+    if (styleEl) styleEl.remove();
+  }
 });

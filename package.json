@@ -3,8 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js --coverage",
+    "test": "npx vitest run",
+    "test:unit": "npx vitest run",
+    "test:unit:watch": "npx vitest",
+    "test:e2e": "npx playwright test",
+    "test:e2e:ui": "npx playwright test --ui",
+    "test:e2e:headed": "npx playwright test --headed",
+    "test:coverage": "npx vitest run --coverage",
+    "test:all": "npm test && npm run test:e2e",
     "validate": "node scripts/validate.js",
     "lint:logs": "node scripts/lint-logs.js",
     "lint:api": "node scripts/validate.js --check=api",
@@ -17,10 +23,12 @@
     "scheduler:quick": "node --check background.js content.js offscreen.js logger.js && npm test -- --silent"
   },
   "devDependencies": {
-    "@babel/core": "^7.29.7",
-    "@babel/preset-env": "^7.29.0",
-    "@types/jest": "^30.0.0",
-    "babel-jest": "^29.7.0",
-    "jest": "^29.7.0"
+    "@playwright/test": "^1.56.0",
+    "jsdom": "^25.0.0",
+    "vitest": "^3.2.6",
+    "vite": "^6.4.3"
+  },
+  "overrides": {
+    "brace-expansion": "^1.1.17"
   }
 }

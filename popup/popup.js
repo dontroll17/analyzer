@@ -1844,7 +1844,7 @@ function connectToBackground() {
   return ensureBackgroundPort();
 }
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   if (captureActive) return;
   
   captureActive = true;
@@ -1856,12 +1856,20 @@ startBtn.addEventListener('click', () => {
 
   const captureSource = captureSourceSelect?.value || 'tab';
 
-  // Offscreen will handle capture via getUserMedia (chrome.tabCapture API removed in Chrome 123+)
+  // Acquire tabStreamId via chrome.tabCapture (no GUI dialog)
+  let tabStreamId = null;
+  try {
+    tabStreamId = await chrome.tabCapture.getMediaId();
+    log.info('Tab stream ID acquired:', tabStreamId);
+  } catch (e) {
+    log.warn('Failed to acquire tabStreamId, falling back to getDisplayMedia:', e.message);
+  }
+
   connectToBackground();
-  safeSendMessage({ 
-    type: 'START_CAPTURE', 
+  safeSendMessage({
+    type: 'START_CAPTURE',
     captureSource: captureSource,
-    tabStreamId: null // Offscreen will call getUserMedia directly
+    tabStreamId: tabStreamId || null
   }, response => {
     if (response?.ok) {
       updateUI(true);

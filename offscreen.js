@@ -190,7 +190,7 @@ function _updateEQ(params) {
     if (_effectsState.eq.enabled) {
       hpf.frequency.value = params.hpfFreq;
     } else {
-      hpf.frequency.value = 20; // bypass
+      hpf.frequency.value = 20; // bypass (20Hz = effectively no filtering)
     }
   }
   
@@ -442,6 +442,11 @@ async function startCapture(source, tabStreamId) {
     }
     
     audioContext = new AudioContext({ sampleRate: streamSampleRate });
+    
+    // Log sample rate mismatch — AudioContext resampling causes DC offset / gain shift
+    if (streamSampleRate !== 44100) {
+      log.warn(`Sample rate mismatch: stream=${streamSampleRate}Hz, DSP engine expects 44100Hz. AudioContext resampling active.`);
+    }
     const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
@@ -476,7 +481,7 @@ async function startCapture(source, tabStreamId) {
     
     const hpfNode = audioContext.createBiquadFilter();
     hpfNode.type = 'highpass';
-    hpfNode.frequency.value = 20; // 20Hz — effectively bypassed
+    hpfNode.frequency.value = 5; // 5Hz high-pass filter — removes subsonic rumble and DC offset
     
     const lpfNode = audioContext.createBiquadFilter();
     lpfNode.type = 'lowpass';
@@ -791,11 +796,24 @@ function cleanup() {
     _streamMonitorTimer = null;
   }
   
-  // Disconnect source from all nodes before cleanup
-  if (audioChain.source) {
-    try {
-      audioChain.source.disconnect();
-    } catch (_) {}
+  // === Explicit audio graph disconnection (P.1: memory safety) ===
+  // Disconnect entire chain before nullifying references to prevent V8 leaks
+  try {
+    if (audioChain.source) audioChain.source.disconnect();
+    if (audioChain.compressor) audioChain.compressor.disconnect();
+    if (audioChain.hpf) audioChain.hpf.disconnect();
+    if (audioChain.lpf) audioChain.lpf.disconnect();
+    if (audioChain.peaking) audioChain.peaking.disconnect();
+    // delay disconnected separately below
+    if (audioChain.limiterCompressor) audioChain.limiterCompressor.disconnect();
+    if (audioChain.effectGain) audioChain.effectGain.disconnect();
+    if (audioChain.masterGain) { /* disconnected separately */ }
+  } catch (_) {}
+  
+  // Disconnect worklet node and port
+  if (audioChain.worklet) {
+    try { audioChain.worklet.disconnect(); } catch (_) {}
+    try { audioChain.worklet.port.close(); } catch (_) {}
   }
   
   // Clear effects chain references — reset to clean bypass state

@@ -1,7 +1,10 @@
 /**
- * Jest tests for MIDI Export module
+ * Vitest tests for MIDI Export module
  * Tests MIDIExporter class functionality: availability check, value mapping, CC sending, metrics
  */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { MIDIExporter, MIDI_CC } from '../midi-export.js';
 
 // Simple mock for MIDI output device
 let sentMessages = [];
@@ -37,7 +40,6 @@ describe('MIDI Export Module', () => {
 
   describe('MIDIExporter class', () => {
     it('creates instance with correct initial state', () => {
-      const { MIDIExporter } = require('../midi-export.js');
       const exporter = new MIDIExporter();
 
       expect(exporter.isConnected).toBe(false);
@@ -47,12 +49,10 @@ describe('MIDI Export Module', () => {
     });
 
     it('exports MIDIExporter class', () => {
-      const { MIDIExporter } = require('../midi-export.js');
       expect(typeof MIDIExporter).toBe('function');
     });
 
     it('exports MIDI_CC constants', () => {
-      const { MIDI_CC } = require('../midi-export.js');
       expect(MIDI_CC.MODULATION).toBe(1);
       expect(MIDI_CC.BALANCE).toBe(7);
       expect(MIDI_CC.PAN).toBe(10);
@@ -67,7 +67,6 @@ describe('MIDI Export Module', () => {
   describe('_toMIDI()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
     });
 
@@ -105,7 +104,6 @@ describe('MIDI Export Module', () => {
   describe('sendCC()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
 
       // Mock MIDI output
@@ -146,7 +144,6 @@ describe('MIDI Export Module', () => {
   describe('sendMetrics()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
 
       exporter.output = new MockMIDIOutput('test', 'Test MIDI');
@@ -274,7 +271,6 @@ describe('MIDI Export Module', () => {
   describe('getOutputs()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
     });
 
@@ -300,7 +296,6 @@ describe('MIDI Export Module', () => {
   describe('setOutput()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
 
       const outputs = new Map();
@@ -328,10 +323,9 @@ describe('MIDI Export Module', () => {
   describe('close()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
 
-      const mockClose = jest.fn();
+      const mockClose = vi.fn();
       const outputs = new Map();
       outputs.set('out-1', new MockMIDIOutput('out-1', 'Test'));
       exporter.midi = { outputs, close: mockClose };
@@ -353,12 +347,11 @@ describe('MIDI Export Module', () => {
   describe('onMetrics()', () => {
     let exporter;
     beforeEach(() => {
-      const { MIDIExporter } = require('../midi-export.js');
       exporter = new MIDIExporter();
     });
 
     it('registers a callback', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       exporter.onMetrics(callback);
 
       expect(exporter.metricsListener).toBe(callback);

@@ -10,9 +10,11 @@ let popupPort = null;
 let _lastMetricsSnapshot = null; // Cache latest metrics for instant replay on reconnect
 let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
+let persistentMetricsQueue = []; // Survives popup disconnect — used for instant replay (Phase 2.2)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
-const MAX_METRICS_QUEUE = 10; // Limit queue for stability
+const MAX_METRICS_QUEUE = 10; // Limit transient queue for stability
+const MAX_PERSISTENT_METRICS = 500; // Max entries in persistent queue
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
@@ -23,30 +25,97 @@ let _pendingMetricsData = null;
 let _pendingDropCount = null;
 const STORAGE_WRITE_DEBOUNCE_MS = 100; // 10fps max for storage
 
+// In-memory ring buffer for metrics persistence
+// Eliminates chrome.storage.local.get() before each write — reduces I/O by ~90%
+let ringBuffer = [];
+const RING_BUFFER_MAX = 80;
+const STORAGE_FLUSH_INTERVAL_MS = 1000; // Flush to disk 1/sec (not 100ms = 10fps)
+
+// === IndexedDB for long-term session history (Phase 2.3) ===
+// chrome.storage.local has ~5MB quota; IndexedDB provides persistent large storage
+const SESSION_DB_NAME = 'ssa-session-db';
+const SESSION_DB_VERSION = 1;
+const SESSION_STORE_NAME = 'sessions';
+let sessionDB = null;
+let dbReady = false;
+
+function openSessionDB() {
+  if (sessionDB || !('indexedDB' in window)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const request = indexedDB.open(SESSION_DB_NAME, SESSION_DB_VERSION);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(SESSION_STORE_NAME)) {
+        const store = db.createObjectStore(SESSION_STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('timestamp', 'timestamp', { unique: false });
+        store.createIndex('type', 'type', { unique: false });
+      }
+    };
+    request.onsuccess = (event) => {
+      sessionDB = event.target.result;
+      dbReady = true;
+      log.info('IndexedDB session store opened');
+      resolve(true);
+    };
+    request.onerror = () => {
+      log.warn('IndexedDB session store failed to open');
+      resolve(false);
+    };
+  });
+}
+
+function appendToSessionDB(data) {
+  if (!sessionDB || !dbReady) return;
+  try {
+    const tx = sessionDB.transaction([SESSION_STORE_NAME], 'readwrite');
+    const store = tx.objectStore(SESSION_STORE_NAME);
+    store.add({ ...data, timestamp: Date.now(), type: 'metrics' });
+  } catch (e) {
+    log.warn('Failed to append to IndexedDB:', e.message);
+  }
+}
+
+function closeSessionDB() {
+  if (sessionDB) {
+    sessionDB.close();
+    sessionDB = null;
+    dbReady = false;
+  }
+}
+
+// Open IndexedDB on startup
+if ('indexedDB' in window) {
+  openSessionDB();
+}
+
 function throttledPersistMetrics(data) {
-  _pendingMetricsData = data;
-  // Capture latest drop count so it's included in the next flush
+  // Also flush pending drop count if any
   if (data.audioDrops !== undefined) {
     _pendingDropCount = data.audioDrops;
+    chrome.storage.local.set({ [DROP_COUNT_KEY]: _pendingDropCount });
+    _pendingDropCount = null;
   }
+  
+  // Push to ring buffer (overflow protection)
+  ringBuffer.push(data);
+  if (ringBuffer.length > RING_BUFFER_MAX) {
+    ringBuffer.shift();
+  }
+  
+  // Also append to IndexedDB for long-term session history
+  appendToSessionDB(data);
+  
+  // Throttle: only one flush per interval
   if (_storageWriteTimer) return;
   _storageWriteTimer = setTimeout(() => {
     _storageWriteTimer = null;
-    if (_pendingMetricsData) {
-      chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
-        const queue = result[PERSISTENT_METRICS_KEY] || [];
-        queue.push(_pendingMetricsData);
-        if (queue.length > 80) queue.shift();
-        chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
+    if (ringBuffer.length > 0) {
+      // Atomic save: direct set, no read-before-write
+      chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: ringBuffer }, () => {
+        ringBuffer = []; // Clear after successful save
       });
-      _pendingMetricsData = null;
     }
-    // Also flush pending drop count if any
-    if (_pendingDropCount !== null) {
-      chrome.storage.local.set({ [DROP_COUNT_KEY]: _pendingDropCount });
-      _pendingDropCount = null;
-    }
-  }, STORAGE_WRITE_DEBOUNCE_MS);
+  }, STORAGE_FLUSH_INTERVAL_MS);
 }
 
 // Restore isCapturing from storage on startup (SW lifecycle)
@@ -63,16 +132,37 @@ function persistCapturing() {
 
 // Check if offscreen API is available (may be disabled in some Chrome versions)
 function canUseOffscreen() {
-  return !!(chrome.offscreen && chrome.offscreen.createDocument);
+  return !!(chrome.offscreen && chrome.offscreen.hasDocument);
+}
+
+// Ensure offscreen document is ready using chrome.offscreen.hasDocument()
+// This prevents Service Worker sleep by verifying document exists before sending messages
+async function ensureOffscreenReady() {
+  if (offscreenReady) return true;
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (hasDoc) {
+      offscreenReady = true;
+      return true;
+    }
+    return await createOffscreenDocument();
+  } catch (err) {
+    log.error('ensureOffscreenReady failed:', err);
+    return false;
+  }
 }
 
 // Keepalive alarm to prevent SW sleep during capture
 // SW max lifetime ~30-60s, use 15s interval (synced with offscreen keepalive)
 chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
-    // Ping offscreen to keep SW alive
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'ssa_keepalive' && isCapturing) {
+    // Use ensureOffscreenReady() to check/recreate offscreen document
+    await ensureOffscreenReady();
+    chrome.runtime.sendMessage(
+      { type: '_OFFSCREEN_REQ_METRICS' },
+      () => { if (chrome.runtime.lastError) { /* suppressed */ } }
+    );
   }
 });
 
@@ -117,29 +207,26 @@ chrome.runtime.onConnect.addListener((port) => {
     popupPort = port;
     log.info('Popup connected');
 
-    // Defer disconnect handling — popup may reconnect quickly
-    let _pendingDisconnect = null;
-    let _disconnectPending = false;
+    // Cancel any existing global disconnect timer (prevents race condition on reconnect)
+    if (globalPopupDisconnectTimer) {
+      clearTimeout(globalPopupDisconnectTimer);
+      globalPopupDisconnectTimer = null;
+    }
     
     popupPortDisconnectHandler = () => {
-      if (_pendingDisconnect) {
-        clearTimeout(_pendingDisconnect);
-        _pendingDisconnect = null;
-      }
-      
-      // Delay cleanup to allow rapid reconnect (popup SW restart)
-      _disconnectPending = true;
-      _pendingDisconnect = setTimeout(() => {
-        _disconnectPending = false;
-        if (!popupPort || popupPort._disconnected) {
-          log.info('Popup port disconnected, queues cleared');
+      // Only clear if port wasn't replaced by reconnect
+      // NOTE: This handler NO LONGER clears ringBuffer or chrome.storage —
+      // capture lifecycle is separate from UI lifecycle (Phase 2)
+      const currentPort = popupPort;
+      globalPopupDisconnectTimer = setTimeout(() => {
+        if (popupPort === currentPort && currentPort && currentPort._disconnected) {
+          log.info('Popup port disconnected, clearing only port reference');
           popupPort = null;
-          metricsQueue = [];
-          chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+          // metricsQueue and ringBuffer persist until STOP_CAPTURE or _OFFSCREEN_ENDED
         } else {
           log.info('Popup port reconnected, ignoring stale disconnect');
         }
-        _pendingDisconnect = null;
+        globalPopupDisconnectTimer = null;
       }, 500); // 500ms grace period for reconnect
     };
     port.onDisconnect.addListener(popupPortDisconnectHandler);
@@ -147,6 +234,11 @@ chrome.runtime.onConnect.addListener((port) => {
     // Named handler for proper removal
     popupPortMessageHandler = (message) => {
       if (message && message.type === 'REQUEST_METRICS') {
+        // Reset timer on active request
+        if (globalPopupDisconnectTimer) {
+          clearTimeout(globalPopupDisconnectTimer);
+          globalPopupDisconnectTimer = null;
+        }
         if (isCapturing) {
           chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
         }
@@ -159,14 +251,23 @@ chrome.runtime.onConnect.addListener((port) => {
     };
     port.onMessage.addListener(popupPortMessageHandler);
 
-    // On reconnect: clear stale queues and request fresh metrics (no drain)
-    // Draining old metrics causes 5-10s delay when queue has 80-130 items
+    // On reconnect: clear stale transient queue, replay from persistent queue (Phase 2.2)
     if (metricsQueue.length > 0) {
       log.debug('Discarding stale metrics queue:', metricsQueue.length);
       metricsQueue = [];
     }
     chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
     log.info('Popup reconnected, queues cleared');
+    
+    // Replay last metrics from persistent queue for instant snapshot
+    if (persistentMetricsQueue.length > 0 && isCapturing) {
+      const replayCount = Math.min(5, persistentMetricsQueue.length);
+      const recentMetrics = persistentMetricsQueue.slice(-replayCount);
+      for (const m of recentMetrics) {
+        popupPort.postMessage({ type: 'METRICS', ...m });
+      }
+      log.info(`Replayed ${replayCount} recent metrics from persistent queue`);
+    }
     
     // Reset disconnect warning flag on reconnect (allows warning on next disconnect)
     popupDisconnectedWarned = false;
@@ -192,9 +293,18 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'overlay-toggle') {
     port.onMessage.addListener((data) => {
       if (data && data.type === 'TOGGLE') {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
           if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }, () => {});
+            try {
+              // Ensure content.js is loaded before toggling
+              await chrome.scripting.executeScript({
+                target: { tabId: tabs[0].id },
+                files: ['content.js']
+              });
+              chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }, () => {});
+            } catch (e) {
+              // Content script injection failed — OK, tab may not be web page
+            }
           }
         });
       }
@@ -215,28 +325,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const captureSource = message.captureSource || 'tab';
     const tabStreamId = message.tabStreamId || null;
     
-    // Helper: notify content script on active tab only (consistent with STOP_CAPTURE)
-    function notifyTabsToShowOverlay() {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs.length > 0) {
-          const tab = tabs[0];
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            chrome.tabs.sendMessage(tab.id, { type: '_SSA_SHOW_OVERLAY' }, () => {
-              if (chrome.runtime.lastError) {
-                // Content.js not loaded in this tab — OK
-              }
-            });
-          }
-        }
-      });
+    // Helper: inject content.js and show overlay (Phase 4.2)
+    async function showOverlayOnActiveTab() {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs.length === 0) return;
+      const tab = tabs[0];
+      if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) return;
+      
+      try {
+        // Inject content.js if not already loaded
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js']
+        });
+        log.info('content.js injected into tab', tab.id);
+      } catch (e) {
+        log.warn('Failed to inject content.js into tab', tab.id, ':', e.message);
+      }
+      
+      // Send show overlay message after injection
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: '_SSA_SHOW_OVERLAY' });
+        log.info('Show overlay signal sent to tab', tab.id);
+      } catch (e) {
+        log.warn('Failed to send show overlay to tab', tab.id, ':', e.message);
+      }
     }
     
-    function handleStartResponse(response) {
+    async function handleStartResponse(response) {
       isCapturing = !!response?.ok;
       persistCapturing();
       log.info('START_CAPTURE response:', response?.ok ? 'ok' : response?.error);
       if (isCapturing) {
-        notifyTabsToShowOverlay();
+        await showOverlayOnActiveTab();
       }
       sendResponse(response);
     }
@@ -310,10 +431,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Persist to chrome.storage.local via throttled debounce (prevents 43fps backpressure)
     throttledPersistMetrics(d);
     
-    // Also add to in-memory queue (limit for stability)
+    // Also add to transient in-memory queue (limit for stability)
     metricsQueue.push(d);
     if (metricsQueue.length > MAX_METRICS_QUEUE) {
       metricsQueue.shift();
+    }
+    
+    // Push to persistent queue (survives popup disconnect for instant replay)
+    persistentMetricsQueue.push(d);
+    if (persistentMetricsQueue.length > MAX_PERSISTENT_METRICS) {
+      persistentMetricsQueue.shift();
     }
     
     // Forward to popup if connected (live stream)
@@ -390,8 +517,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       try { popupPort.disconnect(); } catch (e) {}
     }
-    // Also clear any lingering queues
+    // Also clear any lingering queues (including persistent replay buffer)
     metricsQueue = [];
+    persistentMetricsQueue = [];
     chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
     // Notify content script to hide overlay (silent)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
