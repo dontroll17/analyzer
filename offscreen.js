@@ -384,22 +384,14 @@ async function startCapture(source, tabStreamId) {
       
       case 'tab':
       default: {
-        // Tab audio only (default) — use pre-obtained streamId from popup
-        if (!tabStreamId) {
-          safeSendMessage({
-            type: '_OFFSCREEN_ERROR',
-            error: 'Tab stream ID is required for tab capture'
-          });
-          cleanup();
-          return { ok: false, error: 'missing_tab_stream_id' };
-        }
-        
-        // Use getUserMedia with the tab source ID (no getDisplayMedia call needed)
+        // Tab audio only (default)
+        // Use getUserMedia with the tab source ID
+        // If tabStreamId is null, Chrome will show its native tab selection dialog
         streamOptions = {
           audio: {
             mandatory: {
               chromeMediaSource: 'tab',
-              chromeMediaSourceId: tabStreamId
+              ...(tabStreamId ? { chromeMediaSourceId: tabStreamId } : {})
             },
             echoCancellation: false,
             noiseSuppression: false,
@@ -409,6 +401,15 @@ async function startCapture(source, tabStreamId) {
           video: false
         };
         mediaStream = await navigator.mediaDevices.getUserMedia(streamOptions);
+        const tracks = mediaStream.getAudioTracks();
+        if (tracks.length === 0) {
+          safeSendMessage({
+            type: '_OFFSCREEN_ERROR',
+            error: 'No tab audio — make sure to check "Share tab audio"'
+          });
+          cleanup();
+          return { ok: false, error: 'no_tab_audio' };
+        }
         break;
       }
     }

@@ -3,12 +3,21 @@
 
 function createLogger() {
   jest.resetModules();
+  // Save chrome.storage and remove it to force logger to use in-memory path
+  const savedChrome = global.chrome;
+  if (global.chrome && global.chrome.storage) {
+    delete global.chrome.storage;
+  }
   // Polyfill window before each require to get fresh IIFE
   global.window = {
     dispatchEvent: jest.fn(),
     matchMedia: jest.fn(function() { return { matches: false, addListener: jest.fn(), removeListener: jest.fn() }; }),
   };
   require("../logger.js");
+  // Restore chrome for other tests
+  if (savedChrome) {
+    global.chrome = savedChrome;
+  }
   return global.window.__logger;
 }
 

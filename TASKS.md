@@ -188,6 +188,79 @@
 | # | Task | Status | Priority |
 |---|------|--------|----------|
 | T.1 | Add tests for coverage gaps (calculateBandEntropy, detectSpectralFlatness, calculateZCR, etc.) | ⏳ Ready | 🟡 Medium |
-| A.5 | Create `.github/workflows/validate.yml` (GitHub Actions CI) | ⏳ Ready | ⚡ Low |
+| A.5 | Create `.github/workflows/validate.yml` (GitHub Actions CI) | ✅ Done | ⚡ Low |
 | B.4 | Session export: capture session as JSON/WAV | ⏳ Backlog | Low |
 | B.5 | History viewer: replay past sessions from chrome.storage | ⏳ Backlog | Low |
+
+---
+
+## Sprint 7 — Scheduler & Test Agent 🆕
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| S.1 | Create `scripts/scheduler/` directory structure | ✅ Done | ⚡ High |
+| S.2 | Implement `run-all.js` orchestrator ( Jest, syntax, linting, coverage) | ✅ Done | ⚡ High |
+| S.3 | Implement `analyze-results.js` agent (test failure diagnosis, coverage analysis, regression detection) | ✅ Done | ⚡ High |
+| S.4 | Implement `generate-tasks.js` task generator (auto-update TASKS.md) | ✅ Done | ⚡ High |
+| S.5 | Create GitHub Actions CI workflow `.github/workflows/validate.yml` | ✅ Done | ⚡ High |
+| S.6 | Create Windows scheduler scripts (`launch-scheduler.bat`, `schedule-creator.bat`) | ✅ Done | 🟡 Medium |
+| S.7 | Update `package.json` with scheduler scripts | ✅ Done | ⚡ High |
+| S.8 | Configure health score thresholds and priority rules | ✅ Done | 🟡 Medium |
+
+---
+
+## Scheduler — Commands Reference
+
+### Full pipeline
+```bash
+npm run scheduler:all          # Run all checks + agent analysis
+```
+
+### Step-by-step
+```bash
+npm run scheduler:run          # Run orchestrator only
+npm run scheduler:analyze      # Analyze last report
+npm run scheduler:generate     # Generate tasks from recommendations
+```
+
+### Quick checks
+```bash
+npm run scheduler:quick        # Syntax + tests only (fast)
+```
+
+### Reports location
+```
+scripts/scheduler/reports/last-run.json      # Full run report
+scripts/scheduler/reports/agent-report.json  # Agent analysis
+scripts/scheduler/reports/last-run.md        # Markdown summary
+```
+
+---
+
+## Sprint 8 — Chrome Extension API Tests 🆕
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| A.1 | Add Chrome API mocks to jest.setup.js | ⏳ Ready | 🔴 Critical |
+| A.2 | Create tests/popup-api.test.js (integration tests) | ⏳ Ready | 🔴 Critical |
+| A.3 | Create tests/popup-testable.js (extract pure functions) | ⏳ Ready | 🟠 High |
+| A.4 | Add checkApiCalls() to scripts/validate.js | ⏳ Ready | 🟡 Medium |
+| A.5 | Update CI pipeline with API validation | ⏳ Ready | 🟡 Medium |
+| A.6 | Test background.js API calls (optional) | ⏳ Backlog | ⚡ Low |
+
+### Coverage Gap Analysis
+
+| Файл | Chrome API вызовов | Покрыто тестами | Статус |
+|------|-------------------|-----------------|--------|
+| popup.js | 28 | 0 | ❌ Критично |
+| config.js | 8 | 0 | ❌ Критично |
+| background.js | 15 | 0 | ⚠️ Средне |
+| content.js | 6 | 0 | ⚠️ Средне |
+| **Всего** | **41** | **0** | **0%** |
+
+### Известная ошибка (bug-6)
+
+- **Описание:** `chrome.tabCapture.getMediaStreamId({ targetTab: null, ... })` — `targetTab` не валидный параметр в Chrome MV3 API
+- **Влияние:** Ошибка в консоли при запуске захвата
+- **Время:** 31 июля 2026
+- **Фикс:** Удалить `targetTab: null` из параметров вызова

@@ -45,6 +45,16 @@ export const THEME_COLORS = {
 // ============================================
 
 /**
+ * History buffer size for waveform history
+ */
+export const HISTORY_SIZE = 1024;
+
+/**
+ * Theme cycle order
+ */
+export const THEME_CYCLE = ['neon', 'light', 'system'];
+
+/**
  * Theme icons for theme toggle button
  */
 const THEME_ICONS = {

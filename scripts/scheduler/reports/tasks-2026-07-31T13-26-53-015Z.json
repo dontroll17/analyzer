@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "timestamp": "2026-07-31T13:26:53.015Z",
+  "totalRecommendations": 1,
+  "newTasks": 1,
+  "tasks": [
+    {
+      "id": "SCHED.1",
+      "title": "functions below threshold",
+      "priority": "🟡 Medium",
+      "suggestion": "Increase functions coverage from 79.21% to 80% (critical: fftReal1024, calculateRMS, calculateFrequencyBands, checkGlitchState, fft magnitude, RMS calculation, Band energy, glitch detection)"
+    }
+  ]
+}

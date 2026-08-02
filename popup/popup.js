@@ -1844,43 +1844,31 @@ startBtn.addEventListener('click', () => {
 
   const captureSource = captureSourceSelect?.value || 'tab';
 
-  // Get tab capture stream ID (requires user gesture — provided by button click)
-  chrome.tabCapture.getMediaStreamId({ audio: true, video: false }, (streamId) => {
-    if (chrome.runtime.lastError) {
-      log.error('Tab capture failed:', chrome.runtime.lastError.message);
-      alert('Ошибка захвата вкладки: ' + chrome.runtime.lastError.message);
+  // Offscreen will handle capture via getUserMedia (chrome.tabCapture API removed in Chrome 123+)
+  connectToBackground();
+  safeSendMessage({ 
+    type: 'START_CAPTURE', 
+    captureSource: captureSource,
+    tabStreamId: null // Offscreen will call getUserMedia directly
+  }, response => {
+    if (response?.ok) {
+      updateUI(true);
+      // Show overlay in active tab
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs.length > 0 && tabs[0].url && !tabs[0].url.startsWith('chrome://')) {
+          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }, () => {});
+        }
+      });
+    } else {
+      log.error('Capture failed:', response?.error);
+      alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
       captureActive = false;
       heatmapActive = false;
       if (startBtn) {
         startBtn.textContent = 'Start Capture';
         startBtn.disabled = false;
       }
-      return;
     }
-    
-    connectToBackground();
-    safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource, tabStreamId: streamId }, response => {
-      if (response?.ok) {
-        updateUI(true);
-        // Show overlay in active tab directly from popup (more reliable than via background)
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (tabs.length > 0 && tabs[0].url && !tabs[0].url.startsWith('chrome://')) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }, () => {
-              // Silently ignore — content.js may not be loaded
-            });
-          }
-        });
-      } else {
-        log.error('Capture failed:', response?.error);
-        alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
-        captureActive = false;
-        heatmapActive = false;
-        if (startBtn) {
-          startBtn.textContent = 'Start Capture';
-          startBtn.disabled = false;
-        }
-      }
-    });
   });
 });
 
