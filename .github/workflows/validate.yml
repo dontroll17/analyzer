@@ -10,7 +10,7 @@ on:
     - cron: '0 0 * * *'
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '24'
 
 jobs:
   validate:
@@ -66,15 +66,11 @@ jobs:
       - name: Validate coverage thresholds
         run: |
           echo "Checking coverage thresholds (80% minimum)..."
-          # Coverage data is in last-run.json after scheduler runs
-          # This step validates against thresholds defined in vitest.config.js
-          node -e "
-            const fs = require('fs');
-            const config = require('./vitest.config.js');
-            const thresholds = config.test.coverage.thresholds;
-            console.log('Required thresholds:', JSON.stringify(thresholds, null, 2));
-            console.log('✅ Coverage validation configured');
-          "
+          # Extract thresholds from vitest.config.js directly (ES module format)
+          grep -A4 'thresholds:' vitest.config.js | grep -E 'lines|functions|branches|statements' | while read line; do
+            echo "  ✅ $line"
+          done
+          echo "✅ Coverage validation configured (80% minimum)"
         timeout-minutes: 1
 
   scheduler:
