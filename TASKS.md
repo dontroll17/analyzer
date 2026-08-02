@@ -21,7 +21,7 @@
 | # | Задача | Статус |
 |---|--------|--------|
 | 2.2 | Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins) | ✅ Done |
-| 2.3 | Jest unit tests for RMS module (33/33 passed) | ✅ Done |
+| 2.3 | Vitest unit tests for RMS module (33/33 passed) | ✅ Done |
 | 2.4 | Precomputed twiddle factors table (zero Math.cos/sin per frame) | ✅ Done |
 | 2.5 | Split-screen oscilloscope (live vs reference comparison) | ✅ Done |
 | 2.6 | Glitch Heatmap (time × bands visualization) | ✅ Done |
@@ -51,9 +51,8 @@
 
 | # | Задача | Статус | Приоритет |
 |---|--------|--------|-----------|
-| B.1 | Web MIDI export (popup blocked → needs background worker or standalone page) | ⏳ Blocked | Medium |
-| B.2 | Testing on AI generators (Suno, Udio, ElevenLabs) | Later | Medium |
-| B.3 | Connection latency measurement (ping popup↔background) | ✅ Done | Low |
+| B.1 | Web MIDI export (side panel → needs background worker or standalone page) | ⏳ Blocked | Medium |
+| B.2 | Testing on AI generators (Suno, Udio, ElevenLabs) | ⏳ Deferred | Medium |
 | B.4 | Session export: capture session as JSON/WAV | ⏳ Pending | Low |
 | B.5 | History viewer: replay past sessions from chrome.storage | ⏳ Pending | Low |
 | B.6 | Offline mode: work without SW (graceful degradation) | ⏳ Pending | Low |
@@ -183,11 +182,11 @@
 
 ---
 
-## Sprint 6 — Planned 🔄
+## Sprint 6 — Done ✅
 
 | # | Task | Status | Priority |
 |---|------|--------|----------|
-| T.1 | Add tests for coverage gaps (calculateBandEntropy, detectSpectralFlatness, calculateZCR, etc.) | ⏳ Ready | 🟡 Medium |
+| T.1 | Add tests for coverage gaps (calculateBandEntropy, detectSpectralFlatness, calculateZCR, etc.) | ✅ Done | 🟡 Medium |
 | A.5 | Create `.github/workflows/validate.yml` (GitHub Actions CI) | ✅ Done | ⚡ Low |
 | B.4 | Session export: capture session as JSON/WAV | ⏳ Backlog | Low |
 | B.5 | History viewer: replay past sessions from chrome.storage | ⏳ Backlog | Low |
@@ -315,3 +314,52 @@ scripts/scheduler/reports/last-run.md        # Markdown summary
 | **Всего** | **41** | **~40% (чистые функции + fault injection)** | **🟢 Хорошо** |
 
 **Всего новых тестов в Sprint 8: 58** (popup-api: 33, advanced-stress-tests: 15, api-fault-injection: 20, context-invalidated: 23)
+
+---
+
+## Sprint 9 — Vector Expansion 🆕
+
+### V1: Coverage Expansion
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| V1.1 | Remove logger.js from coverage exclude (tests already exist, 12 tests) | ⏳ Pending | 🔴 Critical |
+| V1.2 | Extract + test `createLimiterCurve()` from offscreen.js | ⏳ Pending | 🟠 High |
+| V1.3 | Extend popup-testable.js tests (existing: 33, target: 50+) | ⏳ Pending | 🟠 High |
+| V1.4 | Extract `openSessionDB()` logic → unit tests | ⏳ Pending | 🟡 Medium |
+
+### V2: E2E Hardening (Playwright UI Tests)
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| V2.1 | `tests/e2e/ui-interactions.spec.js` (14 P0 tests: theme, capture, canvas, effects) | ⏳ Pending | 🔴 Critical |
+| V2.2 | `tests/e2e/features.spec.js` (12 P1 tests: sources, glitch state, export, logs) | ⏳ Pending | 🟠 High |
+| V2.3 | `tests/e2e/edge-cases.spec.js` (7 P2 tests: metrics display, rapid clicks) | ⏳ Pending | 🟡 Medium |
+| **Target** | **11 → 44 E2E tests** | | |
+
+### V3: Documentation Refresh
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| V3.1 | GIGACODE.md: Jest → Vitest (3 locations) | ✅ Done | 🔴 Critical |
+| V3.2 | GIGACODE.md: Updated directory structure, architecture diagram | ✅ Done | 🟠 High |
+| V3.3 | GIGACODE.md: Test directory conventions updated | ✅ Done | 🟠 High |
+| V3.4 | GIGACODE.md: Running Tests section updated | ✅ Done | 🟠 High |
+| V3.5 | GIGACODE.md: Constraints updated (no popup, Vitest only) | ✅ Done | 🟠 High |
+| V3.6 | README.md: Sprint 3 → Sprint 8 references | ✅ Done | 🔴 Critical |
+| V3.7 | README.md: Architecture diagram updated (side panel) | ✅ Done | 🟠 High |
+| V3.8 | README.md: Project structure complete (all files) | ✅ Done | 🟠 High |
+| V3.9 | README.md: Changelog v1.4.0, v1.5.0 added | ✅ Done | 🟠 High |
+| V3.10 | README.md: Roadmap updated, limitations fixed | ✅ Done | 🟡 Medium |
+| V3.11 | TASKS.md: Sprint 6 → Done, Sprint 9 added | ✅ Done | 🟠 High |
+
+### V4: AI Detection MVP (Phase 1)
+
+| # | Task | Status | Priority |
+|---|------|--------|----------|
+| V4.1 | Add MFCC (13 coefficients) to audio-worklet.js | ⏳ Deferred | 🔴 High |
+| V4.2 | Add temporal statistics (stddev/mean over 1s window) | ⏳ Deferred | 🟠 High |
+| V4.3 | Rule-based `aiScore` implementation | ⏳ Deferred | 🟡 Medium |
+| V4.4 | UI display for AI score in side panel + overlay | ⏳ Deferred | 🟡 Medium |
+| V4.5 | Train Logistic Regression model (offline, Python) | ⏳ Deferred | 🔴 High |
+| V4.6 | Bundle model weights JSON in extension | ⏳ Deferred | 🟡 Medium |
