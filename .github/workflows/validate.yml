@@ -102,33 +102,17 @@ jobs:
         if: always()
         continue-on-error: true
 
-      - name: Apply scheduler recommendations
-        run: |
-          echo "📊 Scheduler Analysis Summary"
-          if [ -f scripts/scheduler/reports/agent-report.json ]; then
-            echo "Agent report generated successfully"
-            cat scripts/scheduler/reports/agent-report.json | node -e "
-              let data = '';
-              process.stdin.on('data', chunk => data += chunk);
-              process.stdin.on('end', () => {
-                const report = JSON.parse(data);
-                console.log('Health Score:', report.health.score + '/100 (' + report.health.status + ')');
-                console.log('Critical Issues:', report.health.critical);
-                console.log('High Issues:', report.health.high);
-                console.log('Medium Issues:', report.health.medium);
-                if (report.recommendations.length > 0) {
-                  console.log('\\n📋 Top Recommendations:');
-                  report.recommendations.slice(0, 3).forEach((rec, i) => {
-                    console.log((i+1) + '. [' + rec.priority + '] ' + rec.title);
-                  });
-                }
-              });
-            "
-          else
-            echo "⚠️  No agent report found (scheduler may not have run)"
-          fi
-        timeout-minutes: 2
+      - name: Apply scheduler recommendations to TASKS.md
+        run: node scripts/scheduler/generate-tasks.js --apply --dry-run
+        timeout-minutes: 1
         if: always()
+        continue-on-error: true
+
+      - name: Apply scheduler recommendations to TASKS.md
+        run: node scripts/scheduler/generate-tasks.js --apply
+        timeout-minutes: 1
+        if: always()
+        continue-on-error: true
 
       - name: Upload reports
         if: always()

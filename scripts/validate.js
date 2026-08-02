@@ -35,7 +35,7 @@ const DEPRECATED_API_PARAMS = {
   },
 };
 
-// ==================== CHECK 1: Jest Tests ====================
+// ==================== CHECK 1: Vitest Tests ====================
 function checkTests() {
   console.log('\n🧪 Checking tests...');
   try {

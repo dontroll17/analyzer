@@ -97,7 +97,7 @@ function analyzeTestFailures(report) {
   
   const output = testsResult.output || '';
   
-  // Parse test failures from Jest output
+  // Parse test failures from Vitest output
   const failedTests = parseFailedTests(output);
   
   for (const failure of failedTests) {
@@ -254,7 +254,7 @@ function generateSuggestion(failure) {
   
   // Check for common failure patterns
   if (/timeout|timed?\s*out/i.test(message)) {
-    return 'Test timed out — check for missing async/await or jest.setTimeout()';
+    return 'Test timed out — check for missing async/await or vitest.setTimeout()';
   }
   
   if (/mock|not?\s*mock/i.test(message)) {

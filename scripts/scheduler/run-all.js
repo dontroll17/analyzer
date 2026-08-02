@@ -4,7 +4,7 @@
  * Запускается: node scripts/scheduler/run-all.js
  *
  * Порядок проверок:
- * 1. npm test — Jest unit tests
+ * 1. npm test — Vitest unit tests
  * 2. npm run check:syntax — Syntax check all .js files
  * 3. npm run lint:logs — Production logging audit
  * 4. node scripts/validate.js — Full validation suite
@@ -149,39 +149,77 @@ function checkFullValidation() {
 }
 
 function checkCoverage() {
-  return runCheck('Coverage Report', 'npm run test:coverage', {
+  // Generate Vitest JSON coverage report
+  const coverageJsonPath = path.join(__dirname, '..', '..', 'coverage', 'coverage-final.json');
+  
+  // Ensure coverage directory exists
+  const coverageDir = path.join(__dirname, '..', '..', 'coverage');
+  ensureDirectoryExists(coverageDir);
+  
+  return runCheck('Coverage Report', `npm run test:coverage`, {
     timeout: 60000,
     onOutput: (output) => {
-      // Parse coverage from Vitest JSON output or console summary
-      // Vitest v3 outputs percentage values like "85.23%" or just numbers
-      
-      // Try to match percentages from console output
-      const stmtsMatch = output.match(/Statements\s*\|[^|]*\|(\d+\.?\d*)%/);
-      const funcsMatch = output.match(/Functions\s*\|[^|]*\|(\d+\.?\d*)%/);
-      const branchesMatch = output.match(/Branches\s*\|[^|]*\|(\d+\.?\d*)%/);
-      const linesMatch = output.match(/Lines\s*\|[^|]*\|(\d+\.?\d*)%/);
-      
-      // Fallback: look for "X% (Y/Z)" patterns
-      if (!stmtsMatch) {
-        const stmtFallback = output.match(/(\d+\.?\d*)%\s*\(\d+\/\d+\)\s*statements/);
-        if (stmtFallback) stmtsMatch[1] = stmtFallback[1];
-      }
-      
-      if (stmtsMatch) {
-        global.coverage = global.coverage || {};
-        global.coverage.statements = parseFloat(stmtsMatch[1]);
-      }
-      if (funcsMatch) {
-        global.coverage = global.coverage || {};
-        global.coverage.functions = parseFloat(funcsMatch[1]);
-      }
-      if (branchesMatch) {
-        global.coverage = global.coverage || {};
-        global.coverage.branches = parseFloat(branchesMatch[1]);
-      }
-      if (linesMatch) {
-        global.coverage = global.coverage || {};
-        global.coverage.lines = parseFloat(linesMatch[1]);
+      // Vitest v8 outputs coverage to coverage/coverage-final.json
+      // Parse from JSON file directly (more reliable than stdout parsing)
+      try {
+        if (fs.existsSync(coverageJsonPath)) {
+          const jsonCoverage = JSON.parse(fs.readFileSync(coverageJsonPath, 'utf8'));
+          
+          // Aggregate metrics from all files
+          let totalStatements = 0, totalExecutedStatements = 0;
+          let totalFunctions = 0, totalExecutedFunctions = 0;
+          let totalBranches = 0, totalExecutedBranches = 0;
+          let totalLines = 0, totalExecutedLines = 0;
+          
+          for (const [filePath, fileCoverage] of Object.entries(jsonCoverage)) {
+            // Istanbul/V8 format: s, f are objects { id: executionCount }
+            // b is { branchId: [outcomeCount, outcomeCount, ...] }
+            if (fileCoverage.s && typeof fileCoverage.s === 'object') {
+              const stmtValues = Object.values(fileCoverage.s);
+              totalStatements += stmtValues.length;
+              totalExecutedStatements += stmtValues.filter(v => v > 0).length;
+            }
+            if (fileCoverage.f && typeof fileCoverage.f === 'object') {
+              const fnValues = Object.values(fileCoverage.f);
+              totalFunctions += fnValues.length;
+              totalExecutedFunctions += fnValues.filter(v => v > 0).length;
+            }
+            if (fileCoverage.b && typeof fileCoverage.b === 'object') {
+              const branchValues = Object.values(fileCoverage.b);
+              branchValues.forEach(arr => {
+                if (Array.isArray(arr)) {
+                  totalBranches += arr.length;
+                  totalExecutedBranches += arr.filter(v => v > 0).length;
+                }
+              });
+            }
+            if (fileCoverage.l) {
+              const lineValues = Array.isArray(fileCoverage.l) 
+                ? fileCoverage.l 
+                : Object.values(fileCoverage.l);
+              totalLines += lineValues.length;
+              totalExecutedLines += lineValues.filter(v => v > 0).length;
+            }
+          }
+          
+          if (totalStatements > 0) global.coverage.statements = (totalExecutedStatements / totalStatements * 100).toFixed(1) * 1;
+          if (totalFunctions > 0) global.coverage.functions = (totalExecutedFunctions / totalFunctions * 100).toFixed(1) * 1;
+          if (totalBranches > 0) global.coverage.branches = (totalExecutedBranches / totalBranches * 100).toFixed(1) * 1;
+          if (totalLines > 0) global.coverage.lines = (totalExecutedLines / totalLines * 100).toFixed(1) * 1;
+        } else {
+          // Fallback: try to parse from console output (Vitest v8 format)
+          const stmtsMatch = output.match(/Statements\s*\|[^|]*\|(\d+\.?\d*)%/);
+          const funcsMatch = output.match(/Functions\s*\|[^|]*\|(\d+\.?\d*)%/);
+          const branchesMatch = output.match(/Branches\s*\|[^|]*\|(\d+\.?\d*)%/);
+          const linesMatch = output.match(/Lines\s*\|[^|]*\|(\d+\.?\d*)%/);
+          
+          if (stmtsMatch) global.coverage.statements = parseFloat(stmtsMatch[1]);
+          if (funcsMatch) global.coverage.functions = parseFloat(funcsMatch[1]);
+          if (branchesMatch) global.coverage.branches = parseFloat(branchesMatch[1]);
+          if (linesMatch) global.coverage.lines = parseFloat(linesMatch[1]);
+        }
+      } catch (error) {
+        console.warn('[scheduler] Coverage parsing failed:', error.message);
       }
     },
   });
@@ -310,8 +348,8 @@ function compareWithHistory(currentReport) {
   }
   
   // Compare test counts
-  const prevTests = previousReport.results.find(r => r.checkName === 'Jest Unit Tests');
-  const currTests = currentReport.results.find(r => r.checkName === 'Jest Unit Tests');
+  const prevTests = previousReport.results.find(r => r.checkName === 'Vitest Unit Tests');
+  const currTests = currentReport.results.find(r => r.checkName === 'Vitest Unit Tests');
   
   if (prevTests && currTests && prevTests.output && currTests.output) {
     const prevPass = (prevTests.output.match(/Tests:\s+(\d+)\s+passed/g) || []).length;
