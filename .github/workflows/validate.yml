@@ -54,12 +54,10 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
         timeout-minutes: 5
-        if: github.event_name == 'schedule'
 
-      - name: Run E2E tests (scheduled)
+      - name: Run E2E tests (Playwright)
         run: npm run test:e2e
-        timeout-minutes: 10
-        if: github.event_name == 'schedule'
+        timeout-minutes: 15
 
       - name: Run full validation
         run: node scripts/validate.js

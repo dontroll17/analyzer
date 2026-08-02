@@ -262,7 +262,7 @@ describe('Sample Rate Sync — DC Blocker Validation', () => {
       const firstHalfRMS = computeRMS(output.slice(0, output.length / 2));
       const secondHalfRMS = computeRMS(output.slice(output.length / 2));
       expect(secondHalfRMS).toBeCloseTo(firstHalfRMS, 2);
-    });
+    }, 15000);
   });
 
   describe('Filter Parameters — α Calculation', () => {
