@@ -104,7 +104,7 @@ if (typeof global.chrome === 'undefined') {
     storage: {
       local: {
         _data: {},
-        get: vi.fn((keys) => {
+        get: vi.fn((keys, cb) => {
           const result = {};
           const keyArr = Array.isArray(keys) ? keys : [keys];
           for (const k of keyArr) {
@@ -112,23 +112,36 @@ if (typeof global.chrome === 'undefined') {
               result[k] = chrome.storage.local._data[k];
             }
           }
+          // Support both callback and Promise styles
+          if (typeof cb === 'function') {
+            cb(result);
+          }
           return Promise.resolve(result);
         }),
-        set: vi.fn((obj) => {
+        set: vi.fn((obj, cb) => {
           if (obj && typeof obj === 'object') {
             Object.assign(chrome.storage.local._data, obj);
           }
+          if (typeof cb === 'function') {
+            cb();
+          }
           return Promise.resolve();
         }),
-        remove: vi.fn((keys) => {
+        remove: vi.fn((keys, cb) => {
           const keyArr = Array.isArray(keys) ? keys : [keys];
           for (const k of keyArr) {
             delete chrome.storage.local._data[k];
           }
+          if (typeof cb === 'function') {
+            cb();
+          }
           return Promise.resolve();
         }),
-        clear: vi.fn(() => {
+        clear: vi.fn((cb) => {
           chrome.storage.local._data = {};
+          if (typeof cb === 'function') {
+            cb();
+          }
           return Promise.resolve();
         }),
       },

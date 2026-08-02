@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
@@ -199,7 +199,7 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
   });
 
   describe('_pushStorage() — lines 35-47 (chrome path)', () => {
-    it('saves log entry to chrome.storage', (done) => {
+    it('saves log entry to chrome.storage', async () => {
       const log = getLogger();
       
       // Ensure storage is clean
@@ -208,14 +208,14 @@ describe('Logger — Unit Tests (coverage for uncovered functions)', () => {
       const logger = log.forModule('test');
       logger.info('storage push test');
       
-      // _pushStorage is async (chrome.storage callback)
-      setTimeout(() => {
-        const saved = chrome.storage.local._data[STORAGE_KEY];
-        expect(Array.isArray(saved)).toBe(true);
-        expect(saved.length).toBeGreaterThan(0);
-        expect(saved[0].level).toBe('info');
-        done();
-      }, 100);
+      // Wait for the async chrome.storage.set() Promise to resolve
+      await Promise.resolve();
+      await Promise.resolve();
+      
+      const saved = chrome.storage.local._data[STORAGE_KEY];
+      expect(Array.isArray(saved)).toBe(true);
+      expect(saved.length).toBeGreaterThan(0);
+      expect(saved[0].level).toBe('info');
     });
   });
 
