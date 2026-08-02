@@ -19,6 +19,7 @@ export default defineConfig({
         'dsp-engine/midi-export.js',
         'dsp-engine/defensive-processors.js',
         'popup/popup-testable.js',
+        'dsp-engine/limiter.js', // ← NEW: extracted from offscreen.js
       ],
       // Exclude files not covered by unit tests
       exclude: [
@@ -32,7 +33,6 @@ export default defineConfig({
         'background.js',
         'content.js',
         'offscreen.js',
-        'logger.js',
         'dsp-engine/audio-worklet.js',
         'dsp-engine/frequency-bands.js',
         'dsp-engine/real-speech.js',

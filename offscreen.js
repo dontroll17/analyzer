@@ -136,41 +136,6 @@ function _updateCompressor(params) {
   if (params.release !== undefined && _effectsState.compressor.enabled) comp.release.value = params.release / 1000;
 }
 
-// C.3.3: Soft-clipping limiter curve (4x oversample)
-function createLimiterCurve(thresholdDb, oversampleRate) {
-  // Convert dB threshold to linear
-  const threshold = Math.pow(10, thresholdDb / 20);
-  const samples = 441 * oversampleRate; // 10ms at oversampled rate
-  const curve = new Float32Array(samples);
-  
-  // Soft-knee: smooth transition at threshold
-  const knee = 0.05; // ±0.05 linear range
-  
-  for (let i = 0; i < samples; i++) {
-    const x = (i * 2 / samples) - 1; // -1 to 1
-    let y;
-    
-    if (Math.abs(x) > threshold + knee) {
-      // Hard limiting beyond knee
-      y = threshold + Math.sign(x) * (Math.abs(x) - threshold) * 0.1;
-    } else if (Math.abs(x) > threshold - knee) {
-      // Soft clipping region
-      const t = (Math.abs(x) - (threshold - knee)) / (2 * knee); // 0-1
-      y = Math.sign(x) * (threshold - knee + t * t * knee);
-    } else {
-      // Pass-through below knee
-      y = x;
-    }
-    
-    // Clamp to avoid DC offset
-    curve[i] = Math.max(-1, Math.min(1, y));
-  }
-  
-  // Final sample must mirror first for smooth interpolation
-  curve[curve.length - 1] = -curve[0];
-  
-  return curve;
-}
 
 // C.3.3: Update limiter settings
 function _updateLimiter(params) {

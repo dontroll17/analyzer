@@ -45,10 +45,5 @@
       "timestamp": "2026-08-02T16:30:19.834Z",
       "checkName": "Coverage Report"
     }
-  ],
-  "comparison": {
-    "hasHistory": true,
-    "previousFile": "run-2026-08-02T16-30-19-836Z.json",
-    "comparisons": []
-  }
+  ]
 }
