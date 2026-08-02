@@ -1845,7 +1845,7 @@ startBtn.addEventListener('click', () => {
   const captureSource = captureSourceSelect?.value || 'tab';
 
   // Get tab capture stream ID (requires user gesture — provided by button click)
-  chrome.tabCapture.getMediaStreamId({ targetTab: null, audio: true, video: false }, (streamId) => {
+  chrome.tabCapture.getMediaStreamId({ audio: true, video: false }, (streamId) => {
     if (chrome.runtime.lastError) {
       log.error('Tab capture failed:', chrome.runtime.lastError.message);
       alert('Ошибка захвата вкладки: ' + chrome.runtime.lastError.message);

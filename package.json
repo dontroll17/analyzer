@@ -7,7 +7,14 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js --coverage",
     "validate": "node scripts/validate.js",
     "lint:logs": "node scripts/lint-logs.js",
-    "check:syntax": "node --check background.js content.js offscreen.js logger.js dsp-engine/audio-worklet.js dsp-engine/delay-processor.js dsp-engine/rms.js popup/popup.js popup/config.js"
+    "lint:api": "node scripts/validate.js --check=api",
+    "check:syntax": "node --check background.js content.js offscreen.js logger.js dsp-engine/audio-worklet.js dsp-engine/delay-processor.js dsp-engine/rms.js popup/popup.js popup/config.js",
+    "scheduler:run": "node scripts/scheduler/run-all.js",
+    "scheduler:analyze": "node scripts/scheduler/analyze-results.js",
+    "scheduler:generate": "node scripts/scheduler/generate-tasks.js",
+    "scheduler:all": "node scripts/scheduler/run-all.js && node scripts/scheduler/analyze-results.js",
+    "scheduler:history": "node scripts/scheduler/analyze-results.js --compare-history",
+    "scheduler:quick": "node --check background.js content.js offscreen.js logger.js && npm test -- --silent"
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",

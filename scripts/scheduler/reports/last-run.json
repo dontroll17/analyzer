@@ -1,0 +1,88 @@
+{
+  "version": "1.0.0",
+  "timestamp": "2026-07-31T19:40:48.520Z",
+  "duration": 14375,
+  "overall": "PASS",
+  "coverage": {
+    "statements": 91.82,
+    "branches": 91.82,
+    "functions": 79.21,
+    "lines": 91.13
+  },
+  "results": [
+    {
+      "status": "PASS",
+      "name": "npm test",
+      "output": null,
+      "duration": 6936,
+      "timestamp": "2026-07-31T19:40:41.087Z",
+      "checkName": "Jest Unit Tests"
+    },
+    {
+      "status": "PASS",
+      "name": "node --check background.js content.js offscreen.js logger.js dsp-engine/audio-worklet.js dsp-engine/delay-processor.js dsp-engine/rms.js popup/popup.js popup/config.js",
+      "output": null,
+      "duration": 64,
+      "timestamp": "2026-07-31T19:40:41.151Z",
+      "checkName": "Syntax Check"
+    },
+    {
+      "status": "PASS",
+      "name": "npm run lint:logs",
+      "output": null,
+      "duration": 419,
+      "timestamp": "2026-07-31T19:40:41.570Z",
+      "checkName": "Production Log Lint"
+    },
+    {
+      "status": "PASS",
+      "name": "node scripts/validate.js",
+      "output": null,
+      "duration": 3544,
+      "timestamp": "2026-07-31T19:40:45.114Z",
+      "checkName": "Full Validation Suite"
+    },
+    {
+      "status": "PASS",
+      "name": "npm run test:coverage",
+      "output": "\n> ssa-tests@1.0.0 test:coverage\n> node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js --coverage\n\n---------------------------|---------|----------|---------|---------|-----------------------------\nFile                       | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s           \n---------------------------|---------|----------|---------|---------|-----------------------------\nAll files                  |   91.82 |    79.21 |   91.13 |   94.38 |                             \n analyzer                  |   66.32 |    45.28 |   75.86 |   77.21 |                             \n  logger.js                |   66.32 |    45.28 |   75.86 |   77.21 | 13-14,41-57,109,135,158-159 \n analyzer/dsp-engine/tests |   99.16 |     88.7 |     100 |   98.95 |                             \n  dsp-engine-testable.js   |   99.16 |     88.7 |     100 |   98.95 | 237,269                     \n analyzer/tests            |     100 |    98.41 |     100 |     100 |                             \n  content-testable.js      |     100 |    98.41 |     100 |     100 | 12                          \n---------------------------|---------|----------|---------|---------|-----------------------------\n",
+      "duration": 3405,
+      "timestamp": "2026-07-31T19:40:48.520Z",
+      "checkName": "Coverage Report"
+    }
+  ],
+  "comparison": {
+    "hasHistory": true,
+    "previousFile": "run-2026-07-31T19-40-48-521Z.json",
+    "comparisons": [
+      {
+        "metric": "statements",
+        "previous": 91.82,
+        "current": 91.82,
+        "diff": "0.00",
+        "status": "PASS"
+      },
+      {
+        "metric": "branches",
+        "previous": 91.82,
+        "current": 91.82,
+        "diff": "0.00",
+        "status": "PASS"
+      },
+      {
+        "metric": "functions",
+        "previous": 79.21,
+        "current": 79.21,
+        "diff": "0.00",
+        "status": "PASS"
+      },
+      {
+        "metric": "lines",
+        "previous": 91.13,
+        "current": 91.13,
+        "diff": "0.00",
+        "status": "PASS"
+      }
+    ]
+  }
+}

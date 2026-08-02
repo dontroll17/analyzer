@@ -8,6 +8,7 @@
  * 2. node --check — Syntax check all .js files
  * 3. Production logging audit — console.warn/log/debug in production code
  * 4. Manifest validation — MV3 compliance
+ * 5. Chrome Extension API validation — no deprecated params
  */
 
 const { execSync } = require('child_process');
@@ -21,6 +22,18 @@ const PRODUCTION_LOG_PATTERNS = [
   /console\.debug\(/g,
 ];
 const SKIP_FILES = ['node_modules/', '.git/', 'tests/'];
+
+// ============================================
+// Deprecated Chrome API params
+// ============================================
+const DEPRECATED_API_PARAMS = {
+  tabCapture: {
+    getMediaStreamId: ['targetTab'], // targetTab is not valid in MV3
+  },
+  tabs: {
+    update: ['highlight'], // use selected instead
+  },
+};
 
 // ==================== CHECK 1: Jest Tests ====================
 function checkTests() {
@@ -147,6 +160,76 @@ function checkProductionLogs() {
     console.error(
       '\n💡 Fix: Use logger.js (log.info, log.warn, log.error) instead of console.*'
     );
+    return false;
+  }
+}
+
+// ==================== CHECK 5: Chrome API Validation ====================
+function checkApiCalls() {
+  console.log('\n🔍 Checking Chrome API calls...');
+  const coreFiles = getMainJSFiles().filter(f => 
+    f.includes('popup/popup.js') || 
+    f.includes('background.js') || 
+    f.includes('content.js') ||
+    f.includes('offscreen.js')
+  );
+  
+  let violations = [];
+  
+  for (const file of coreFiles) {
+    try {
+      const content = fs.readFileSync(file, 'utf8');
+      const lines = content.split('\n');
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const lineNum = i + 1;
+        
+        // Check for deprecated targetTab parameter in tabCapture.getMediaStreamId
+        if (/chrome\.tabCapture\.getMediaStreamId\s*\(\s*\{[^}]*targetTab/.test(line)) {
+          violations.push({
+            file: path.relative(process.cwd(), file),
+            line: lineNum,
+            content: line.trim().substring(0, 100),
+            message: 'targetTab is not valid in Chrome MV3 API for getMediaStreamId'
+          });
+        }
+        
+        // Check for chrome.tabCapture.get with targetTab
+        if (/chrome\.tabCapture\.get\s*\(\s*\{[^}]*targetTab/.test(line)) {
+          violations.push({
+            file: path.relative(process.cwd(), file),
+            line: lineNum,
+            content: line.trim().substring(0, 100),
+            message: 'targetTab is deprecated in tabCapture.get()'
+          });
+        }
+        
+        // Check for old MV2 browser_action
+        if (/browser_action\s*:/i.test(line) && !line.trim().startsWith('//')) {
+          violations.push({
+            file: path.relative(process.cwd(), file),
+            line: lineNum,
+            content: line.trim().substring(0, 100),
+            message: 'browser_action is MV2, use action (MV3)'
+          });
+        }
+      }
+    } catch (e) {
+      // Skip files we can't read
+    }
+  }
+  
+  if (violations.length === 0) {
+    console.log('✅ No deprecated Chrome API calls found');
+    return true;
+  } else {
+    console.error(`❌ Found ${violations.length} deprecated Chrome API calls:`);
+    violations.forEach((v) => {
+      console.error(`  - ${v.file}:${v.line} ${v.message}`);
+      console.error(`    ${v.content}`);
+    });
+    console.error('\n💡 Fix: Remove deprecated parameters or update to MV3 API');
     return false;
   }
 }
@@ -300,6 +383,7 @@ function main() {
     checkSyntax(),
     checkProductionLogs(),
     checkManifest(),
+    checkApiCalls(),
   ];
 
   const passed = results.filter((r) => r).length;
