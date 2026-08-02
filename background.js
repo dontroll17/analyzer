@@ -573,33 +573,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-// === Side Panel Support ===
-// Use chrome.storage to persist user preference for side panel mode
-const SIDE_PANEL_MODE_KEY = 'sidePanelMode'; // 'popup' | 'sidePanel'
-
-// Set default side panel behavior (respects per-tab overrides via setOptions)
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
-
-// Handle extension icon click — route to popup or side panel based on user preference
-chrome.action.onClicked.addListener(async (tab) => {
-  const mode = await new Promise((resolve) => {
-    chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
-      resolve(result[SIDE_PANEL_MODE_KEY] || 'popup');
-    });
-  });
-  
-  if (mode === 'sidePanel') {
-    // Ensure side panel shows the correct page for this tab
-    await chrome.sidePanel.setOptions({
-      tabId: tab.id,
-      path: 'popup/popup.html'
-    }).catch(() => {});
-    
-    // Open side panel
-    await chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
-  }
-  // If mode is 'popup', Chrome shows the default popup automatically
-});
-
 // Note: offscreen document is created lazily via ensureOffscreenReady() when capture starts.
 // Do NOT create on install/startup — Chrome requires justification and only one offscreen doc allowed.

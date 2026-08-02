@@ -19,7 +19,7 @@ Thumbs.db
 
 # Node modules (если будут использоваться)
 node_modules/
-
+playwright-report/
 # Distribution files
 dist/
 build/

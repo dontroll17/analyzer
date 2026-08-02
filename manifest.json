@@ -18,9 +18,5 @@
   "host_permissions": [],
   "background": {
     "service_worker": "background.js"
-  },
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_title": "Stream Sensation Analyzer"
   }
 }

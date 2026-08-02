@@ -568,6 +568,9 @@ async function startCapture(source, tabStreamId) {
     delayWetGain.gain.value = 0; // Silent initially
     const delayDryGain = audioContext.createGain();
     delayDryGain.gain.value = 1; // Silent initially
+    // Analysis tap: always connected to delayNode output, independent of wet/dry mix
+    const delayAnalysisGain = audioContext.createGain();
+    delayAnalysisGain.gain.value = 1;
     
     const waveShaperNode = audioContext.createWaveShaper();
     waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
@@ -590,6 +593,7 @@ async function startCapture(source, tabStreamId) {
     audioChain.delay = delayNode;
     audioChain.delayWetGain = delayWetGain;
     audioChain.delayDryGain = delayDryGain;
+    audioChain.delayAnalysisGain = delayAnalysisGain;
     audioChain.waveShaper = waveShaperNode;
     audioChain.effectGain = effectGainNode;
     audioChain.masterGain = masterGainNode;
@@ -615,11 +619,12 @@ async function startCapture(source, tabStreamId) {
     peakingWetGain.connect(delayNode);
     peakingDryGain.connect(delayNode);
     
-    // Delay Wet/Dry → workletNode(analysis, pre-limiter) AND → waveShaper(limiter) → master → output
-    // Metrics are captured BEFORE limiter so effects don't corrupt the measurements
+    // Delay Wet/Dry → waveShaper(limiter) → master → output
+    // Metrics: delayNode → delayAnalysisGain → workletNode (always active, independent of wet/dry)
     delayNode.connect(delayWetGain);
     delayNode.connect(delayDryGain);
-    delayDryGain.connect(workletNode); // Analysis tap: clean signal before any processing
+    delayNode.connect(delayAnalysisGain);
+    delayAnalysisGain.connect(workletNode); // Analysis tap: signal after delay effect
     delayWetGain.connect(waveShaperNode);
     delayDryGain.connect(waveShaperNode);
     waveShaperNode.connect(effectGainNode);

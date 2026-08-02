@@ -2502,43 +2502,6 @@ if (themeToggle) {
 }
 
 // ============================================
-// Side Panel Toggle
-// ============================================
-const SIDE_PANEL_MODE_KEY = 'sidePanelMode'; // 'popup' | 'sidePanel'
-const sidePanelToggle = document.getElementById('sidePanelToggle');
-
-// Load saved side panel mode and apply to button
-chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
-  const mode = result[SIDE_PANEL_MODE_KEY] || 'popup';
-  if (sidePanelToggle) {
-    sidePanelToggle.textContent = mode === 'sidePanel' ? 'Side Panel: ON' : 'Side Panel: OFF';
-    sidePanelToggle.title = mode === 'sidePanel' ? 'Switch to popup mode' : 'Open side panel on icon click';
-    sidePanelToggle.style.borderColor = mode === 'sidePanel' ? 'rgba(0, 229, 255, 0.6)' : '';
-    sidePanelToggle.style.background = mode === 'sidePanel' ? 'rgba(0, 229, 255, 0.15)' : '';
-  }
-});
-
-if (sidePanelToggle) {
-  sidePanelToggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    chrome.storage.local.get([SIDE_PANEL_MODE_KEY], (result) => {
-      const currentMode = result[SIDE_PANEL_MODE_KEY] || 'popup';
-      const newMode = currentMode === 'popup' ? 'sidePanel' : 'popup';
-      
-      chrome.storage.local.set({ [SIDE_PANEL_MODE_KEY]: newMode }, () => {
-        if (sidePanelToggle) {
-          sidePanelToggle.textContent = newMode === 'sidePanel' ? 'Side Panel: ON' : 'Side Panel: OFF';
-          sidePanelToggle.title = newMode === 'sidePanel' ? 'Switch to popup mode' : 'Open side panel on icon click';
-          sidePanelToggle.style.borderColor = newMode === 'sidePanel' ? 'rgba(0, 229, 255, 0.6)' : '';
-          sidePanelToggle.style.background = newMode === 'sidePanel' ? 'rgba(0, 229, 255, 0.15)' : '';
-        }
-        log.info(`Side panel mode switched to: ${newMode}`);
-      });
-    });
-  });
-}
-
-// ============================================
 // Oscilloscope Redraw
 // ============================================
 
