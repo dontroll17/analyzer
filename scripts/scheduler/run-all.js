@@ -18,6 +18,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { writeFileSync, writeJSONSync } = require('../utils/fs-safe');
 
 // ==================== CONFIG ====================
 const REPORTS_DIR = path.join(__dirname, 'reports');
@@ -282,7 +283,7 @@ function saveHistory(report) {
   const historyFile = path.join(HISTORY_DIR, `run-${now.toISOString().replace(/[:.]/g, '-')}.json`);
   
   // Save full report to history
-  fs.writeFileSync(historyFile, JSON.stringify(report, null, 2), 'utf8');
+  writeJSONSync(historyFile, report);
   
   // Cleanup old reports
   cleanupOldReports();
@@ -403,11 +404,11 @@ function main() {
   };
   
   // Save last run
-  fs.writeFileSync(LAST_RUN_FILE, JSON.stringify(report, null, 2), 'utf8');
+  writeJSONSync(LAST_RUN_FILE, report);
   
   // Generate Markdown
   const md = generateMarkdownReport(report);
-  fs.writeFileSync(LAST_RUN_MD_FILE, md, 'utf8');
+  writeFileSync(LAST_RUN_MD_FILE, md);
   
   // Save to history
   saveHistory(report);
@@ -416,7 +417,7 @@ function main() {
   const comparison = compareWithHistory(report);
   if (comparison.hasHistory) {
     report.comparison = comparison;
-    fs.writeFileSync(LAST_RUN_FILE, JSON.stringify(report, null, 2), 'utf8');
+    writeJSONSync(LAST_RUN_FILE, report);
   }
   
   // Print summary

@@ -278,7 +278,9 @@ chrome.runtime.onConnect.addListener((port) => {
     // Request fresh metrics immediately
     if (isCapturing) {
       log.info('Requesting fresh metrics from offscreen');
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
+      chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {
+        void chrome.runtime.lastError;
+      });
     }
   }
   
@@ -573,7 +575,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === P.6: Popup ready signal — relay to offscreen so it can connect directly ===
   if (message && message.type === '_SSA_POPUP_READY') {
     // Forward to all extension contexts; offscreen will handle it
-    chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {});
+    chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {
+      void chrome.runtime.lastError; // consume to prevent "Unchecked runtime.lastError" spam
+    });
     sendResponse({ ok: true });
     return false;
   }

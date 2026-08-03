@@ -3,6 +3,9 @@ const path = require('path');
 
 const EXTENSION_PATH = path.resolve(__dirname, '.');
 const FIXTURES_DIR = path.join(__dirname, 'tests', 'e2e', 'fixtures');
+const GLITCH_WAV = path.join(FIXTURES_DIR, 'glitch.wav');
+const SILENCE_WAV = path.join(FIXTURES_DIR, 'silence.wav');
+const SINE_WAV = path.join(FIXTURES_DIR, '1kHz_sine.wav');
 
 module.exports = defineConfig({
   testDir: './tests/e2e',
@@ -21,6 +24,10 @@ module.exports = defineConfig({
       args: [
         '--use-fake-device-for-media-stream',
         '--use-fake-ui-for-media-stream',
+        // Preload test audio fixture for fake audio capture
+        `--use-file-for-fake-audio-capture=${SILENCE_WAV}`,
+        // Enable memory profiling for Phase 5
+        '--enable-precise-memory-info',
       ],
     },
   },
@@ -28,6 +35,14 @@ module.exports = defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+    },
+    // Extended timeout project for long-running stability tests
+    {
+      name: 'chromium-longrunning',
+      use: {
+        ...devices['Desktop Chrome'],
+        timeout: 120000, // 2 minutes per test
+      },
     },
   ],
   webServer: {

@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONSync } = require('../utils/fs-safe');
 
 // ==================== CONFIG ====================
 const DEFAULT_REPORT = path.join(__dirname, 'reports', 'last-run.json');
@@ -416,7 +417,11 @@ function main() {
   const agentReport = generateAgentReport(testAnalysis, coverageAnalysis);
   
   // Save agent report
-  fs.writeFileSync(AGENT_REPORT, JSON.stringify(agentReport, null, 2), 'utf8');
+  const saved = writeJSONSync(AGENT_REPORT, agentReport);
+  if (!saved) {
+    console.error('❌ Failed to save agent report');
+    process.exit(1);
+  }
   
   // Print summary
   printAgentSummary(agentReport);

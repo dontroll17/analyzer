@@ -207,6 +207,8 @@ Use these agents for specialized tasks:
 - **audio-worklet-dsp** — DSP engine, FFT, glitch detection, effects chain
 - **chrome-extension-testing** — Unit, integration, and E2E testing
 - **realtime-audio-overlay** — Shadow DOM overlay, canvas rendering, drag/drop
+- **todo** — Task tracking (TASKS.md), sprint planning, personal todo management
+- **write** — Context and metadata writing to project files
 
 ## Important Constraints
 

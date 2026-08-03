@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeFileSync, writeJSONSync } = require('../utils/fs-safe');
 
 // ==================== CONFIG ====================
 const DEFAULT_REPORT = path.join(__dirname, 'reports', 'agent-report.json');
@@ -318,7 +319,7 @@ function main() {
     console.log('─'.repeat(60));
     console.log('\n💡 To apply: run with --apply flag');
   } else {
-    fs.writeFileSync(TASKS_FILE, newContent, 'utf8');
+    writeFileSync(TASKS_FILE, newContent);
     console.log('\n✅ TASKS.md updated with new tasks.');
   }
   
@@ -337,7 +338,7 @@ function main() {
   };
   
   const taskReportPath = path.join(__dirname, 'reports', `tasks-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-  fs.writeFileSync(taskReportPath, JSON.stringify(taskReport, null, 2), 'utf8');
+  writeJSONSync(taskReportPath, taskReport);
   console.log(`📁 Task report saved to: ${taskReportPath}`);
 }
 

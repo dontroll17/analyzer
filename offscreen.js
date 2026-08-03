@@ -140,10 +140,11 @@ let _lastWorkletTimestamp = 0;
 
 // Suppress runtime.lastError spam when background is unavailable
 // Chrome throws on sendMessage when SW/background is dead — suppress silently
+// Must consume lastError inside callback to prevent console "Unchecked runtime.lastError" spam
 function safeSendMessage(msg) {
-  chrome.runtime.sendMessage(msg, () => {
-    // Silently ignore — background may be dead during SW restart, popup disconnected, etc.
-    // These are expected and non-critical.
+  chrome.runtime.sendMessage(msg, (resp) => {
+    // Consume lastError inside callback to prevent console spam
+    void chrome.runtime.lastError;
   });
 }
 
@@ -233,11 +234,21 @@ function _updateCompressor(params) {
   // Smooth gain transition for crossfading
   if (_effectsState.compressor.enabled) {
     // Activate compressor: wet→1, dry→0 — equal-power crossfade to prevent -3dB power dip
-    comp.ratio.value = _effectsState.compressor.ratio;
-    comp.threshold.value = _effectsState.compressor.threshold;
-    comp.knee.value = _effectsState.compressor.knee;
-    comp.attack.value = _effectsState.compressor.attack / 1000;
-    comp.release.value = _effectsState.compressor.release / 1000;
+    // M.2: Use setTargetAtTime for exponential smoothing of compressor parameters
+    // τ=15ms prevents clicks from abrupt parameter changes (ratio, threshold, knee)
+    const ratio = _effectsState.compressor.ratio;
+    const threshold = _effectsState.compressor.threshold;
+    const knee = _effectsState.compressor.knee;
+    const attack = _effectsState.compressor.attack / 1000;
+    const release = _effectsState.compressor.release / 1000;
+    
+    // Smooth parameter transitions (exponential: G(t) = G_final ± (G_final - G_initial) · e^(-αΔt))
+    comp.ratio.setTargetAtTime(ratio, t, CROSSFADE_TAU);
+    comp.threshold.setTargetAtTime(threshold, t, CROSSFADE_TAU);
+    comp.knee.setTargetAtTime(knee, t, CROSSFADE_TAU);
+    comp.attack.setTargetAtTime(attack, t, CROSSFADE_TAU);
+    comp.release.setTargetAtTime(release, t, CROSSFADE_TAU);
+    
     // Cancel previous automation to prevent InvalidStateError (P.5)
     wetGain.gain.cancelScheduledValues(t);
     dryGain.gain.cancelScheduledValues(t);
@@ -246,10 +257,18 @@ function _updateCompressor(params) {
     dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
   } else {
     // Bypass compressor: wet→0, dry→1
+    // Also reset compressor parameters to bypass state with smoothing
     wetGain.gain.cancelScheduledValues(t);
     dryGain.gain.cancelScheduledValues(t);
     wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
     dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    
+    // Smoothly return compressor to bypass state (ratio=1, threshold=-100, knee=0)
+    comp.ratio.setTargetAtTime(1, t, CROSSFADE_TAU);
+    comp.threshold.setTargetAtTime(-100, t, CROSSFADE_TAU);
+    comp.knee.setTargetAtTime(0, t, CROSSFADE_TAU);
+    comp.attack.setTargetAtTime(0.003, t, CROSSFADE_TAU);
+    comp.release.setTargetAtTime(0.250, t, CROSSFADE_TAU);
   }
 }
 

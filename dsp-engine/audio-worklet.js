@@ -130,6 +130,76 @@ function fftReal1024(input) {
   return magnitude;
 }
 
+/**
+ * In-place radix-2 IFFT (DIT) — complex input → complex output
+ * Reuses same Cooley-Tukey butterfly with conjugated twiddle (+wIm instead of -wIm)
+ * Output: Float32Array of size 2*N interleaved [re0, im0, re1, im1, ..., reN-1, imN-1]
+ * Normalization: divide all outputs by N for proper IFFT scaling
+ * 
+ * @param {Float32Array} input — [re0, im0, re1, im1, ..., reN-1, imN-1]
+ * @returns {Float32Array} — IFFT output (real signal)
+ */
+function ifftComplex1024(input) {
+  const N = FFT_SIZE;
+  const tmp = new Float32Array(2 * N); // [re, im] interleaved
+
+  // Copy input with conjugated twiddle (flip sign of imaginary part)
+  // For IFFT: we conjugate the input, run FFT, then conjugate output and divide by N
+  for (let i = 0; i < N; i++) {
+    tmp[2 * i] = input[2 * i];      // re: unchanged
+    tmp[2 * i + 1] = -input[2 * i + 1]; // im: conjugate
+  }
+
+  // Bit-reversal permutation
+  const perm = new Float32Array(2 * N);
+  for (let i = 0; i < N; i++) {
+    const j = BIT_REVERSE[i];
+    perm[2 * i] = tmp[2 * j];
+    perm[2 * i + 1] = tmp[2 * j + 1];
+  }
+
+  // Cooley-Tukey DIT FFT with CONJUGATED twiddle (+wIm instead of -wIm)
+  for (let s = 0; s < TWIDDLE_DEPTH; s++) {
+    const m = 1 << (s + 1);
+    const halfM = m >> 1;
+    const twiddleBase = s * TWIDDLE_PER_STAGE * 2;
+
+    for (let k = 0; k < N; k += m) {
+      for (let j = 0; j < halfM; j++) {
+        // Load precomputed twiddle (cos, -sin) — negate to get (+sin) for IFFT
+        const twIdx = twiddleBase + j * 2;
+        const wRe = TWIDDLE_TABLE[twIdx];
+        const wIm = -TWIDDLE_TABLE[twIdx + 1]; // flip sign: -(-sin) = +sin
+
+        const idxU = 2 * (k + j);
+        const idxT = 2 * (k + halfM + j);
+
+        const uRe = perm[idxU];
+        const uIm = perm[idxU + 1];
+        const tReOrig = perm[idxT];
+        const tImOrig = perm[idxT + 1];
+
+        // Butterfly with conjugated twiddle
+        const tRe = wRe * tReOrig - wIm * tImOrig;
+        const tIm = wRe * tImOrig + wIm * tReOrig;
+
+        perm[idxU] = uRe + tRe;
+        perm[idxU + 1] = uIm + tIm;
+        perm[idxT] = uRe - tRe;
+        perm[idxT + 1] = uIm - tIm;
+      }
+    }
+  }
+
+  // Extract real parts, conjugate back, and normalize by N
+  const output = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    output[i] = perm[2 * i] / N; // real part / N, imag part should be ~0
+  }
+
+  return output;
+}
+
 class AudioAnalyzer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -145,8 +215,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     // Pre-allocate combinedFFT buffer (512 bins for 1024-point FFT — zero GC per frame)
     this.combinedFFT = new Float32Array(HALF_N);
     
-    // Pre-allocate buffers for HNR autocorrelation (zero GC per frame)
+    // Pre-allocate buffers for HNR (zero GC per frame)
     this._hnrAutocorr = new Float32Array(HALF_N);
+    this._hnrPower = new Float32Array(HALF_N);  // PSD buffer for Wiener–Khinchin
+    this._hnrIFFTInput = new Float32Array(FFT_SIZE); // Complex buffer for IFFT (real-only → 512 unique)
     
     // Pre-allocate buffers for Spectral Flux onset detection
     this._prevFFT = new Float32Array(HALF_N);
@@ -387,30 +459,51 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   /**
-   * C.2.4: Harmonic-to-Noise Ratio (HNR) approximation
-   * Uses autocorrelation peak-to-valley ratio as proxy.
-   * Optimized: computes on pre-allocated buffer, O(N²/2) but N=1024 is manageable.
+   * C.2.4: Harmonic-to-Noise Ratio (HNR) via Wiener–Khinchin theorem
+   * 
+   * Uses the theorem: autocorrelation r(τ) = IFFT{|X(k)|²}
+   * This reduces O(N²) direct autocorrelation to O(N log N) via FFT/IFFT.
+   * 
+   * Steps:
+   *   1. FFT(buffer) → X(k) [complex spectrum]
+   *   2. P(k) = |X(k)|² = re² + im² → Power Spectral Density
+   *   3. IFFT(P(k)) → r(τ) [autocorrelation]
+   *   4. HNR = 10·log₁₀(r(0) / min(r[1..maxLag/2]))
+   * 
+   * Expected speedup: ~95% fewer MAC operations (N·log₂(N) vs N²/2)
+   * For N=1024: ~10K MAC vs ~524K MAC
    * Returns HNR in dB (higher = more harmonic).
-   * NOTE: Compute every 2nd frame to stay within DSP budget.
    */
   calculateHNR(buffer) {
-    const N = buffer.length;
-    const maxLag = Math.floor(N / 4); // Limit search range
-    const autocorr = this._hnrAutocorr;
+    const N = FFT_SIZE;
+    const maxLag = Math.floor(N / 4); // Limit search range (0..256 lags)
     
-    // Compute autocorrelation (lag 0 to maxLag)
-    for (let lag = 0; lag <= maxLag; lag++) {
-      let sum = 0;
-      for (let i = 0; i < N - lag; i++) {
-        sum += buffer[i] * buffer[i + lag];
-      }
-      autocorr[lag] = sum / (N - lag);
+    // Step 1: FFT of input buffer (applies Hanning window internally)
+    const spectrum = fftReal1024(buffer);
+    
+    // Step 2: Compute Power Spectral Density: P(k) = |X(k)|²
+    const power = this._hnrPower;
+    for (let k = 0; k < HALF_N; k++) {
+      power[k] = spectrum[k] * spectrum[k];
     }
     
-    // Find max at lag 0 (should be the maximum)
+    // Step 3: IFFT of PSD → autocorrelation r(τ)
+    // Wiener–Khinchin theorem: r(τ) = IFFT{|X(k)|²}
+    // IFFT input: create complex array [P(0), 0, P(1), 0, ..., P(N/2-1), 0]
+    // (real-only PSD because autocorrelation is real-valued)
+    const ifftInput = this._hnrIFFTInput;
+    for (let k = 0; k < HALF_N; k++) {
+      ifftInput[2 * k] = power[k];   // real part = PSD
+      ifftInput[2 * k + 1] = 0;      // imaginary part = 0
+    }
+    
+    const autocorr = ifftComplex1024(ifftInput);
+    
+    // Step 4: HNR from autocorrelation peak-to-valley ratio
+    // r(0) = total signal power, r(lag>0) = correlation component (harmonic)
     const maxCorr = Math.abs(autocorr[0]);
     
-    // Find first valley after lag 0 (min in range [1, maxLag/2])
+    // Find minimum in valley range [1, maxLag/2]
     let minCorr = Infinity;
     const valleyEnd = Math.floor(maxLag / 2);
     for (let lag = 1; lag <= valleyEnd; lag++) {
@@ -814,12 +907,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       combinedZCR = leftData ? leftData.zcr : (rightData ? rightData.zcr : 0);
     }
     
-    // C.2.4: HNR (compute every 2nd frame to stay within DSP budget)
+    // C.2.4: HNR via Wiener–Khinchin (O(N log N) — compute every frame)
     let hnr = 0;
-    if (this.frameCount % 2 === 0) {
-      const buffer = leftData ? this.waveformLeft : this.waveformRight;
-      hnr = this.calculateHNR(buffer);
-    }
+    const buffer = leftData ? this.waveformLeft : this.waveformRight;
+    hnr = this.calculateHNR(buffer);
     
     // C.2.8: Dynamic Range (Peak - RMS in dB)
     const peakdB = peakRMS > 0 ? 20 * Math.log10(peakRMS) : -Infinity;
@@ -891,11 +982,19 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       const mfccStdSum = mfccStd.reduce((s, v) => s + v, 0);
       const mfccMeanSum = Math.abs(mfccMean.reduce((s, v) => s + v, 0));
       
-      // Heuristic features
-      const lowTemporalVariance = mfccStdSum < 2.0 ? 1 : 0; // AI: smoother
-      const lowHighFreq = combinedHighFreqAnomaly < 0.15 ? 1 : 0; // AI: less HF content
-      const moderateZCR = combinedZCR > 2000 && combinedZCR < 6000 ? 1 : 0; // AI: constrained ZCR
-      const moderateEntropy = entropy > 1.2 && entropy < 1.8 ? 1 : 0; // AI: mid entropy range
+      // Heuristic features — tuned for real speech (M.3: wider thresholds to reduce FP)
+      // AI-generated audio has distinct MFCC patterns:
+      // - Lower temporal variance in coefficients (smoother transitions)
+      // - Lower high-frequency content (anti-aliasing filters in TTS)
+      // - Constrained ZCR range (synthetic voices less variable)
+      // - Mid-range entropy (neither fully tonal nor fully noisy)
+      //
+      // M.3 thresholds: widened to reduce false positives on processed human speech
+      // (professional voiceover, EQ/compressor chains, de-essers)
+      const lowTemporalVariance = mfccStdSum < 3.5 ? 1 : 0;       // widened from 2.0 (processed speech has low variance)
+      const lowHighFreq = combinedHighFreqAnomaly < 0.25 ? 1 : 0;  // widened from 0.15 (de-essers cut HF)
+      const moderateZCR = combinedZCR > 1500 && combinedZCR < 8000 ? 1 : 0; // widened (human variation)
+      const moderateEntropy = entropy > 0.8 && entropy < 2.0 ? 1 : 0;  // widened from 1.2-1.8
       
        // Weighted score
        aiScore = 0;

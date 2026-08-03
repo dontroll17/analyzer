@@ -1637,9 +1637,12 @@ function _bgPortDisconnectHandler() {
 bgPortDisconnectHandlerRef = _bgPortDisconnectHandler;
 
 // Send message to runtime with lastError suppression
+// Must consume lastError inside callback to prevent console "Unchecked runtime.lastError" spam
 function safeSendMessage(msg, callback) {
   chrome.runtime.sendMessage(msg, (response) => {
-    if (chrome.runtime.lastError) {
+    // Consume lastError inside callback to prevent console spam
+    const err = chrome.runtime.lastError;
+    if (err) {
       // SW may have terminated — ignore, will reconnect
       if (callback) callback(null);
       return;
@@ -1934,7 +1937,8 @@ function ensureBackgroundPort() {
     
     // P.6: Signal offscreen that popup is ready — triggers direct port connection
     chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {
-      // Silently ignore — offscreen may not be listening
+      // Consume lastError to prevent console spam
+      void chrome.runtime.lastError;
     });
     
     return true;
@@ -2000,7 +2004,7 @@ stopBtn.addEventListener('click', () => {
 });
 
 chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
-  // Ignore lastError — SW may have terminated
+  void chrome.runtime.lastError; // consume to prevent "Unchecked runtime.lastError" spam
   if (chrome.runtime.lastError) {
     updateUI(false);
     return;
@@ -2119,7 +2123,7 @@ function sendDelaySettings() {
       feedback: effectsSettings.delay.feedback,
       mix: effectsSettings.delay.mix
     }
-  }).catch(() => {});
+  }, () => { void chrome.runtime.lastError; });
 }
 
 /**

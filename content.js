@@ -865,6 +865,8 @@ function connectToMetrics() {
     hideOverlay();
     return;
   }
+  // Always consume lastError to prevent console spam
+  void chrome.runtime.lastError;
   
   log.info('connectToMetrics()');
   log.info('overlayPort connected');
