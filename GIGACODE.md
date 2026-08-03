@@ -192,6 +192,7 @@ Use these agents for specialized tasks:
 - **chrome-extension-dev** — General MV3 development, extension architecture
 - **dsp-audio-analyst** — DSP optimization, AudioWorklet performance
 - **extension-tester** — Testing strategy, test coverage, E2E tests
+- **file-writer** — Reliable file writing via `scripts/write.js` when built-in Write/Edit tools fail
 
 ## GigaCode Commands
 

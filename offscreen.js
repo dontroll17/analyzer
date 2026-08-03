@@ -8,27 +8,37 @@ const log = (self.__logger?.forModule('offscreen')) || {
   error: (m, ...a) => console.error('[OFFSCREEN]', m, ...a),
 };
 
-// Centralized audio chain state (replaces window._ssaX to prevent race conditions)
-// Vector crossfading: each effect has Wet and Dry GainNode pair with exponential smoothing
-// G_wet(t) = 1 - e^(-α(t-t_curr)), G_dry(t) = e^(-α(t-t_curr))
-// where α = 1/τ (tau = 15ms for 0dB transition at 44.1kHz)
+// Centralized audio chain state — Linear-Cascaded Topology
+// Each stage: isolated splitter → wet/dry gains → stage summer
+// Equal-power crossfade: sin/cos → constant power P_wet + P_dry = P_total
 const audioChain = {
   compressor: null,
   compressorWetGain: null,
   compressorDryGain: null,
   dcBlocker: null,
+  // EQ stage
+  eqStageInputSplitter: null,
   lpf: null,
   peaking: null,
-  peakingWetGain: null,
-  peakingDryGain: null,
+  eqWetGain: null,
+  eqDryGain: null,
+  eqStageSummer: null,
+  // Delay stage
+  delayStageSplitter: null,
   delay: null,
   delayWetGain: null,
   delayDryGain: null,
+  delayCompensatorNode: null,
+  delayStageSummer: null,
+  // Limiter stage
+  limiterInputGain: null,
   waveShaper: null,
-  effectGain: null,
+  limiterWetGain: null,
+  limiterDryGain: null,
   masterGain: null,
   source: null,
   worklet: null,
+  analysisTap: null,
   ready: false
 };
 
@@ -41,7 +51,7 @@ let cleanupScheduled = false;
 let lastMetrics = null;
 let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
 
-// Crossfade constants: τ = 15ms, α = 1/τ for exponential smoothing
+// Crossfade constants: τ = 15ms for equal-power trig crossfade
 const CROSSFADE_TAU = 0.015; // 15ms time constant in seconds
 
 // Silent Masking flag: blocks METRICS during Warm-up phase
@@ -95,26 +105,40 @@ function _loadEffectsFromStorage() {
   });
 }
 
-// === Equal-Power Crossfade helpers (fixes P.4 and P.5) ===
-// Exponential crossfade (g_wet=1-e^(-t/τ), g_dry=e^(-t/τ)) has sum=1 but power dips:
-// At midpoint (g=0.5): P=0.25+0.25=0.5 → -3dB volume drop.
-// Equal-power uses sin/cos: g_wet=sin(θ), g_dry=cos(θ), where θ∈[0,π/2].
-// This ensures g²_wet + g²_dry = 1 at all times → constant power.
+// === Equal-Power Crossfade — Trig sin/cos (Section 2) ===
+// sin²(θ) + cos²(θ) = 1 → constant power at all crossfade positions
+// θ ∈ [0, π/2]: wet goes 0→1, dry goes 1→0
+
+const FADE_STEPS = 64;
+const EQUAL_POWER_IN = new Float32Array(FADE_STEPS);
+const EQUAL_POWER_OUT = new Float32Array(FADE_STEPS);
+
+for (let i = 0; i < FADE_STEPS; i++) {
+  const alpha = i / (FADE_STEPS - 1);
+  EQUAL_POWER_IN[i] = Math.sin((Math.PI / 2) * alpha);
+  EQUAL_POWER_OUT[i] = Math.cos((Math.PI / 2) * alpha);
+}
 
 /**
- * Create equal-power crossfade curve (sin/cos).
- * @param {number} steps - Number of samples in the curve
- * @returns {{ dryCurve: Float32Array, wetCurve: Float32Array }}
+ * Atomic trig crossfade toggle for a cascade stage.
+ * @param {AudioParam} wetParam — GainNode.gain for wet channel
+ * @param {AudioParam} dryParam — GainNode.gain for dry channel
+ * @param {boolean} engage — true = Engage (wet→1), false = Bypass (wet→0)
+ * @param {AudioContext} ctx — Active audio context
+ * @param {number} duration — Crossfade duration in seconds (default 0.015)
  */
-function createEqualPowerCurve(steps) {
-  const dryCurve = new Float32Array(steps);
-  const wetCurve = new Float32Array(steps);
-  for (let i = 0; i < steps; i++) {
-    const theta = (Math.PI * i) / (2 * steps);
-    dryCurve[i] = Math.cos(theta);
-    wetCurve[i] = Math.sin(theta);
+function setStageBypassState(wetParam, dryParam, engage, ctx, duration = 0.015) {
+  const startTime = ctx.currentTime;
+  wetParam.cancelScheduledValues(startTime);
+  dryParam.cancelScheduledValues(startTime);
+
+  if (engage) {
+    wetParam.setValueCurveAtTime(EQUAL_POWER_IN, startTime, duration);
+    dryParam.setValueCurveAtTime(EQUAL_POWER_OUT, startTime, duration);
+  } else {
+    wetParam.setValueCurveAtTime(EQUAL_POWER_OUT, startTime, duration);
+    dryParam.setValueCurveAtTime(EQUAL_POWER_IN, startTime, duration);
   }
-  return { dryCurve, wetCurve };
 }
 
 // Audio Drop Counter
@@ -211,6 +235,7 @@ let _silenceLogCounter = 0;
 // Uses setTargetAtTime for exponential smoothing: G(t) = G_final ± (G_final - G_initial) * e^(-αΔt)
 // τ = 15ms ensures 0dB transition with no audible clicks
 // ALWAYS updates _effectsState (for pre-capture parameter setting); only applies audio graph when ready
+// C.3.2: Compressor update — equal-power trig crossfade
 function _updateCompressor(params) {
   if (!audioContext) return;
   const t = audioContext.currentTime;
@@ -231,39 +256,25 @@ function _updateCompressor(params) {
   const dryGain = audioChain.compressorDryGain;
   const wetGain = audioChain.compressorWetGain;
   
-  // Smooth gain transition for crossfading
   if (_effectsState.compressor.enabled) {
-    // Activate compressor: wet→1, dry→0 — equal-power crossfade to prevent -3dB power dip
-    // M.2: Use setTargetAtTime for exponential smoothing of compressor parameters
-    // τ=15ms prevents clicks from abrupt parameter changes (ratio, threshold, knee)
+    // Activate compressor: smooth parameter transitions + equal-power crossfade
     const ratio = _effectsState.compressor.ratio;
     const threshold = _effectsState.compressor.threshold;
     const knee = _effectsState.compressor.knee;
     const attack = _effectsState.compressor.attack / 1000;
     const release = _effectsState.compressor.release / 1000;
     
-    // Smooth parameter transitions (exponential: G(t) = G_final ± (G_final - G_initial) · e^(-αΔt))
     comp.ratio.setTargetAtTime(ratio, t, CROSSFADE_TAU);
     comp.threshold.setTargetAtTime(threshold, t, CROSSFADE_TAU);
     comp.knee.setTargetAtTime(knee, t, CROSSFADE_TAU);
     comp.attack.setTargetAtTime(attack, t, CROSSFADE_TAU);
     comp.release.setTargetAtTime(release, t, CROSSFADE_TAU);
     
-    // Cancel previous automation to prevent InvalidStateError (P.5)
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
-    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
-    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
+    setStageBypassState(wetGain.gain, dryGain.gain, true, audioContext, CROSSFADE_TAU);
   } else {
-    // Bypass compressor: wet→0, dry→1
-    // Also reset compressor parameters to bypass state with smoothing
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    // Bypass compressor: reset to neutral + equal-power crossfade to dry
+    setStageBypassState(wetGain.gain, dryGain.gain, false, audioContext, CROSSFADE_TAU);
     
-    // Smoothly return compressor to bypass state (ratio=1, threshold=-100, knee=0)
     comp.ratio.setTargetAtTime(1, t, CROSSFADE_TAU);
     comp.threshold.setTargetAtTime(-100, t, CROSSFADE_TAU);
     comp.knee.setTargetAtTime(0, t, CROSSFADE_TAU);
@@ -275,7 +286,9 @@ function _updateCompressor(params) {
 
 // C.3.3: Update limiter settings
 // ALWAYS updates _effectsState; only applies waveShaper when ready
+// C.3.3: Limiter update — equal-power trig crossfade (no dynamic bypass)
 function _updateLimiter(params) {
+  if (!audioContext) return;
   const threshold = params.threshold !== undefined ? params.threshold : _effectsState.limiter.threshold;
   
   if (params.enabled !== undefined) _effectsState.limiter.enabled = params.enabled;
@@ -285,15 +298,18 @@ function _updateLimiter(params) {
   if (!audioChain.ready || !audioChain.waveShaper) return;
   
   const ws = audioChain.waveShaper;
+  ws.curve = createLimiterCurve(threshold, 4);
+  
   if (_effectsState.limiter.enabled) {
-    ws.curve = createLimiterCurve(threshold, 4);
+    setStageBypassState(audioChain.limiterWetGain.gain, audioChain.limiterDryGain.gain, true, audioContext, CROSSFADE_TAU);
   } else {
+    // Reset curve to linear identity when bypassed
     ws.curve = new Float32Array([0, 1]);
+    setStageBypassState(audioChain.limiterWetGain.gain, audioChain.limiterDryGain.gain, false, audioContext, CROSSFADE_TAU);
   }
 }
 
-// C.3.4: Parametric EQ update (vector crossfading after DC Blocker)
-// Smooth transitions: LPF+Peaking use wet/dry crossfading with τ=15ms
+// C.3.4: EQ update — equal-power trig crossfade with stage summer
 function _updateEQ(params) {
   if (!audioContext) return;
   const t = audioContext.currentTime;
@@ -314,10 +330,8 @@ function _updateEQ(params) {
   const dc = audioChain.dcBlocker;
   const lpf = audioChain.lpf;
   const peak = audioChain.peaking;
-  const dryGain = audioChain.peakingDryGain;
-  const wetGain = audioChain.peakingWetGain;
   
-  // Apply parameter values from state (always active) — use smooth transitions to prevent IIR transients
+  // Apply filter parameters with smooth transitions
   if (_effectsState.eq.enabled) {
     dc.frequency.setTargetAtTime(_effectsState.eq.hpfFreq, t, 0.01);
     lpf.frequency.setTargetAtTime(_effectsState.eq.lpfFreq, t, 0.01);
@@ -326,33 +340,21 @@ function _updateEQ(params) {
     peak.Q.setTargetAtTime(_effectsState.eq.peakQ, t, 0.01);
   }
   
-  // Smooth gain transition for crossfading — equal-power to prevent -3dB dip
+  // Equal-power crossfade via stage wet/dry gains
   if (_effectsState.eq.enabled) {
-    // Cancel previous automation to prevent InvalidStateError (P.5)
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
-    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
-    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
+    setStageBypassState(audioChain.eqWetGain.gain, audioChain.eqDryGain.gain, true, audioContext, CROSSFADE_TAU);
   } else {
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    setStageBypassState(audioChain.eqWetGain.gain, audioChain.eqDryGain.gain, false, audioContext, CROSSFADE_TAU);
   }
 }
 
-// C.3.5: Delay update (vector crossfading with smooth transitions)
-// τ = 15ms ensures smooth fade without clicks
+// C.3.5: Delay update — equal-power trig crossfade (no dynamic bypass)
 function _updateDelay(params) {
   if (!audioContext) return;
-  const t = audioContext.currentTime;
   
   // ALWAYS update state (for pre-capture parameter setting)
   if (params.enabled !== undefined) {
     _effectsState.delay.enabled = !!params.enabled;
-  } else {
-    _effectsState.delay.enabled = _effectsState.delay.enabled || false;
   }
   if (params.delayTime !== undefined) _effectsState.delay.delayTime = params.delayTime;
   if (params.feedback !== undefined) _effectsState.delay.feedback = params.feedback;
@@ -361,25 +363,11 @@ function _updateDelay(params) {
   // Only apply audio graph changes when capture is active
   if (!audioChain.ready || !audioChain.delay) return;
   
-  const wetGain = audioChain.delayWetGain;
-  const dryGain = audioChain.delayDryGain;
-  
-  // Smooth gain transition for crossfading — equal-power (cos/sin) to prevent -3dB dip
-  // NOTE: cos²/sin² was removed because P = cos⁴+sin⁴ still dips to 0.5 (-3dB)
-  // Equal power requires g_wet = sin(θ), g_dry = cos(θ) so that g²_wet + g²_dry = 1
+  // Equal-power crossfade via stage wet/dry gains
   if (_effectsState.delay.enabled) {
-    // Cancel previous automation to prevent InvalidStateError (P.5)
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    const { dryCurve, wetCurve } = createEqualPowerCurve(Math.ceil(audioContext.sampleRate * CROSSFADE_TAU));
-    wetGain.gain.setValueCurveAtTime(wetCurve, t, CROSSFADE_TAU);
-    dryGain.gain.setValueCurveAtTime(dryCurve, t, CROSSFADE_TAU);
+    setStageBypassState(audioChain.delayWetGain.gain, audioChain.delayDryGain.gain, true, audioContext, CROSSFADE_TAU);
   } else {
-    // Bypass delay
-    wetGain.gain.cancelScheduledValues(t);
-    dryGain.gain.cancelScheduledValues(t);
-    wetGain.gain.setTargetAtTime(0, t, CROSSFADE_TAU);
-    dryGain.gain.setTargetAtTime(1, t, CROSSFADE_TAU);
+    setStageBypassState(audioChain.delayWetGain.gain, audioChain.delayDryGain.gain, false, audioContext, CROSSFADE_TAU);
   }
   
   // Send delay parameters to worklet (popup sends delayTime in ms, feedback/mix in 0-100)
@@ -636,127 +624,159 @@ async function startCapture(source, tabStreamId) {
       channelInterpretation: 'discrete' // No automatic spatial mixing — L/R preserved independently
     });
     
-    // === Phase Protocol: Vector Crossfading Audio Graph ===
-    // All effects use Wet/Dry GainNode pairs with exponential smoothing (τ=15ms)
-    // No connect()/disconnect() during runtime — only gain automation
+    // === Linear-Cascaded Topology: Node Initialization ===
+    // Each stage: splitter (wet/dry) → wet/dry gains → summer → next stage
     
-    // NOTE: Since Sample Rate Sync (Step 3), audioContext.sampleRate === track.sampleRate
-    // No SRC → no gain shift → no compensation needed. effectGainNode = unity gain.
-    // masterGain corrected from 0.5 to 1.0 — bypass effects now report correct RMS/bands
-    const effectGainNode = audioContext.createGain();
-    effectGainNode.gain.value = 1.0; // Unity gain — no SRC compensation needed
-    
-    // === Compressor stage: Wet/Dry crossfading ===
+    // === Compressor stage ===
     const compressorNode = audioContext.createDynamicsCompressor();
     compressorNode.ratio.value = 1;
     compressorNode.threshold.value = -100;
     compressorNode.knee.value = 0;
-    compressorNode.attack.value = 0.003; // 3ms default attack (was 0 — caused unstable behaviour)
-    compressorNode.release.value = 0.250; // 250ms default release (was 0 — compressed to 1.0s by processor)
+    compressorNode.attack.value = 0.003;
+    compressorNode.release.value = 0.250;
     
     const compressorWetGain = audioContext.createGain();
-    compressorWetGain.gain.value = 0; // Silent initially — handled by Silent Masking phase
+    compressorWetGain.gain.value = 0;
     const compressorDryGain = audioContext.createGain();
-    compressorDryGain.gain.value = 1; // Silent initially — handled by Silent Masking phase
+    compressorDryGain.gain.value = 1;
     
-    // === DC Blocker: 20Hz High-Pass Filter (H(z) = (1-αz⁻¹)/(1-z⁻¹)) ===
-    // Always in chain — removes DC offset and subsonic rumble
-    // α = e^(-2π·fc/fs) where fc=20Hz, fs=sampleRate
+    // === DC Blocker ===
     const dcBlocker = audioContext.createBiquadFilter();
     dcBlocker.type = 'highpass';
-    dcBlocker.frequency.value = 20; // 20Hz cutoff — standard DC blocker
-    dcBlocker.Q.value = 0.707; // Butterworth response for flat passband
+    dcBlocker.frequency.value = 20;
+    dcBlocker.Q.value = 0.707;
     
-    // === EQ stage: LPF + Peaking with Wet/Dry crossfading ===
+    // === EQ stage: splitter → LPF → Peaking → summer ===
+    const eqStageInputSplitter = audioContext.createGain();
+    eqStageInputSplitter.gain.value = 1.0;
+    
     const lpfNode = audioContext.createBiquadFilter();
     lpfNode.type = 'lowpass';
-    lpfNode.frequency.value = 22050; // Nyquist — effectively bypassed initially
+    lpfNode.frequency.value = 22050;
     
     const peakingNode = audioContext.createBiquadFilter();
     peakingNode.type = 'peaking';
-    peakingNode.frequency.value = 1000; // 1kHz center
-    peakingNode.gain.value = 0; // 0dB — bypassed initially
+    peakingNode.frequency.value = 1000;
+    peakingNode.gain.value = 0;
     peakingNode.Q.value = 1;
     
-    const peakingWetGain = audioContext.createGain();
-    peakingWetGain.gain.value = 0; // Silent initially
-    const peakingDryGain = audioContext.createGain();
-    peakingDryGain.gain.value = 1; // Silent initially
+    const eqWetGain = audioContext.createGain();
+    eqWetGain.gain.value = 0;
+    const eqDryGain = audioContext.createGain();
+    eqDryGain.gain.value = 1;
     
-    // === Delay stage: Wet/Dry crossfading ===
+    const eqStageSummer = audioContext.createGain();
+    eqStageSummer.gain.value = 1.0;
+    
+    // === Delay stage: splitter → worklet + compensator → summer ===
     const delayWorkletPath = chrome.runtime.getURL('dsp-engine/delay-processor.js');
     await audioContext.audioWorklet.addModule(delayWorkletPath);
     
     const delayNode = new AudioWorkletNode(audioContext, 'delay-effect', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 2,       // Fixed to 2 channels — explicit mode prevents runtime channel count changes
-      channelCountMode: 'explicit', // Strict enforcement of channelCount = 2
-      channelInterpretation: 'discrete' // L/R channels processed independently
+      channelCount: 2,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'discrete'
     });
     
-    // Send sample rate to delay processor for accurate delay calculation
     delayNode.port.postMessage({ sampleRate: audioContext.sampleRate });
     
+    const delayStageSplitter = audioContext.createGain();
+    delayStageSplitter.gain.value = 1.0;
+    
     const delayWetGain = audioContext.createGain();
-    delayWetGain.gain.value = 0; // Silent initially
+    delayWetGain.gain.value = 0;
     const delayDryGain = audioContext.createGain();
-    delayDryGain.gain.value = 1; // Silent initially
+    delayDryGain.gain.value = 1;
     
+    // Delay compensation: native DelayNode matches AudioWorklet quantum
+    const sampleRate = audioContext.sampleRate;
+    const quantumDelaySeconds = 128 / sampleRate;
+    const delayCompensatorNode = audioContext.createDelay(quantumDelaySeconds + 0.01);
+    delayCompensatorNode.delayTime.setValueAtTime(quantumDelaySeconds, audioContext.currentTime);
+    
+    const delayStageSummer = audioContext.createGain();
+    delayStageSummer.gain.value = 1.0;
+    
+    // === Limiter stage: splitter → waveshaper + bypass → master ===
     const waveShaperNode = audioContext.createWaveShaper();
-    waveShaperNode.curve = new Float32Array([0, 1]); // Linear (identity) — bypassed
-    waveShaperNode.oversample = '4x'; // Always on: prevents aliasing from soft-clipping harmonics above Nyquist
+    waveShaperNode.curve = new Float32Array([0, 1]);
+    waveShaperNode.oversample = '4x';
     
-    // Master gain for graceful shutdown (ramp to 0 before close)
-    // Unity gain (1.0): Wet/Dry crossfades sum to 1.0 mathematically
+    const limiterInputGain = audioContext.createGain();
+    limiterInputGain.gain.value = 1.0;
+    
+    const limiterWetGain = audioContext.createGain();
+    limiterWetGain.gain.value = 0;
+    const limiterDryGain = audioContext.createGain();
+    limiterDryGain.gain.value = 1;
+    
+    // Master gain
     const masterGainNode = audioContext.createGain();
-    masterGainNode.gain.value = 1.0; // Unity gain — correct reference level
+    masterGainNode.gain.value = 1.0;
     
-    // Store effect references in centralized audioChain object
+    // Store references in audioChain
     audioChain.compressor = compressorNode;
     audioChain.compressorWetGain = compressorWetGain;
     audioChain.compressorDryGain = compressorDryGain;
     audioChain.dcBlocker = dcBlocker;
+    audioChain.eqStageInputSplitter = eqStageInputSplitter;
     audioChain.lpf = lpfNode;
     audioChain.peaking = peakingNode;
-    audioChain.peakingWetGain = peakingWetGain;
-    audioChain.peakingDryGain = peakingDryGain;
+    audioChain.eqWetGain = eqWetGain;
+    audioChain.eqDryGain = eqDryGain;
+    audioChain.eqStageSummer = eqStageSummer;
+    audioChain.delayStageSplitter = delayStageSplitter;
     audioChain.delay = delayNode;
     audioChain.delayWetGain = delayWetGain;
     audioChain.delayDryGain = delayDryGain;
+    audioChain.delayCompensatorNode = delayCompensatorNode;
+    audioChain.delayStageSummer = delayStageSummer;
+    audioChain.limiterInputGain = limiterInputGain;
     audioChain.waveShaper = waveShaperNode;
-    audioChain.effectGain = effectGainNode;
+    audioChain.limiterWetGain = limiterWetGain;
+    audioChain.limiterDryGain = limiterDryGain;
     audioChain.masterGain = masterGainNode;
     audioChain.source = audioSource;
     
-    // === Vector Crossfading Routing (fixed, no runtime connect/disconnect) ===
-    // Compressor stage: BOTH paths always connected, gain crossfades determine path
+    // === Linear-Cascaded Routing ===
+    
+    // Compressor: source → compressor → wet/dry gains → DC blocker
+    audioSource.connect(compressorNode);
     compressorNode.connect(compressorWetGain);
     compressorNode.connect(compressorDryGain);
-    audioSource.connect(compressorNode);
-    
-    // Compressor Wet/Dry → DC Blocker → LPF+Peaking
     compressorWetGain.connect(dcBlocker);
     compressorDryGain.connect(dcBlocker);
     
-    // DC Blocker → LPF+Peaking (Wet/Dry routing after HPF)
-    dcBlocker.connect(lpfNode);
+    // EQ stage: DC blocker → splitter → wet(lpf→peaking) + dry → summer
+    dcBlocker.connect(eqStageInputSplitter);
+    eqStageInputSplitter.connect(lpfNode);
     lpfNode.connect(peakingNode);
-    peakingNode.connect(peakingWetGain);
-    peakingNode.connect(peakingDryGain);
+    peakingNode.connect(eqWetGain);
+    eqWetGain.connect(eqStageSummer);
+    eqStageInputSplitter.connect(eqDryGain);
+    eqDryGain.connect(eqStageSummer);
+    eqStageSummer.connect(delayStageSplitter);
     
-    // Peaking Wet/Dry → Delay
-    // Wet path: peaking → delayNode → delayWetGain
-    peakingWetGain.connect(delayNode);
+    // Delay stage: splitter → wet(worklet) + dry(compensator) → summer
+    delayStageSplitter.connect(delayNode);
     delayNode.connect(delayWetGain);
-    // Dry path: peaking → delayDryGain (bypasses delayNode completely)
-    peakingDryGain.connect(delayDryGain);
-
-    // Delay Wet/Dry → waveShaper(limiter) → master → output
-    delayWetGain.connect(waveShaperNode);
-    delayDryGain.connect(waveShaperNode);
-    waveShaperNode.connect(effectGainNode);
-    effectGainNode.connect(masterGainNode);
+    delayWetGain.connect(delayStageSummer);
+    delayStageSplitter.connect(delayCompensatorNode);
+    delayCompensatorNode.connect(delayDryGain);
+    delayDryGain.connect(delayStageSummer);
+    delayStageSummer.connect(limiterInputGain);
+    
+    // Limiter stage: splitter → wet(waveshaper) + dry → master
+    limiterInputGain.connect(waveShaperNode);
+    waveShaperNode.connect(limiterWetGain);
+    limiterWetGain.connect(masterGainNode);
+    limiterInputGain.connect(limiterDryGain);
+    limiterDryGain.connect(masterGainNode);
+    
+    // Output to destination
+    masterGainNode.connect(audioContext.destination);
     
     // Analysis tap: signal BEFORE effects (input level, always active)
     const analysisTap = audioContext.createGain();
@@ -770,7 +790,7 @@ async function startCapture(source, tabStreamId) {
     // audioContext.currentTime freezes, worklet metrics stop, automation freezes.
     // Even if output is muted, a connected destination is required for the graph
     // to keep processing. masterGain is already at unity (1.0).
-    masterGainNode.connect(audioContext.destination);
+    // masterGainNode already connected above.
     
     // Legacy toggle (kept for backward compat)
     window._ssaSetEffectsActive = function(active) {
@@ -1069,12 +1089,19 @@ function _performCleanup() {
     
     // Disconnect entire chain in reverse order (output → input)
     if (audioChain.waveShaper) audioChain.waveShaper.disconnect();
-    if (audioChain.effectGain) audioChain.effectGain.disconnect();
     if (audioChain.masterGain) audioChain.masterGain.disconnect();
+    if (audioChain.limiterWetGain) audioChain.limiterWetGain.disconnect();
+    if (audioChain.limiterDryGain) audioChain.limiterDryGain.disconnect();
+    if (audioChain.limiterInputGain) audioChain.limiterInputGain.disconnect();
     if (audioChain.delayWetGain) audioChain.delayWetGain.disconnect();
     if (audioChain.delayDryGain) audioChain.delayDryGain.disconnect();
-    if (audioChain.peakingWetGain) audioChain.peakingWetGain.disconnect();
-    if (audioChain.peakingDryGain) audioChain.peakingDryGain.disconnect();
+    if (audioChain.delayCompensatorNode) audioChain.delayCompensatorNode.disconnect();
+    if (audioChain.delayStageSummer) audioChain.delayStageSummer.disconnect();
+    if (audioChain.delayStageSplitter) audioChain.delayStageSplitter.disconnect();
+    if (audioChain.eqWetGain) audioChain.eqWetGain.disconnect();
+    if (audioChain.eqDryGain) audioChain.eqDryGain.disconnect();
+    if (audioChain.eqStageSummer) audioChain.eqStageSummer.disconnect();
+    if (audioChain.eqStageInputSplitter) audioChain.eqStageInputSplitter.disconnect();
     if (audioChain.dcBlocker) audioChain.dcBlocker.disconnect();
     if (audioChain.analysisTap) audioChain.analysisTap.disconnect();
     if (audioChain.compressor) audioChain.compressor.disconnect();
@@ -1088,16 +1115,23 @@ function _performCleanup() {
   audioChain.compressorWetGain = null;
   audioChain.compressorDryGain = null;
   audioChain.dcBlocker = null;
+  audioChain.eqStageInputSplitter = null;
   audioChain.lpf = null;
   audioChain.peaking = null;
-  audioChain.peakingWetGain = null;
-  audioChain.peakingDryGain = null;
+  audioChain.eqWetGain = null;
+  audioChain.eqDryGain = null;
+  audioChain.eqStageSummer = null;
+  audioChain.delayStageSplitter = null;
   audioChain.delay = null;
   audioChain.delayWetGain = null;
   audioChain.delayDryGain = null;
-  audioChain.analysisTap = null;
+  audioChain.delayCompensatorNode = null;
+  audioChain.delayStageSummer = null;
+  audioChain.limiterInputGain = null;
   audioChain.waveShaper = null;
-  audioChain.effectGain = null;
+  audioChain.limiterWetGain = null;
+  audioChain.limiterDryGain = null;
+  audioChain.analysisTap = null;
   audioChain.masterGain = null;
   audioChain.source = null;
   audioChain.worklet = null;

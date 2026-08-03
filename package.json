@@ -27,7 +27,8 @@
     "scheduler:generate": "node scripts/scheduler/generate-tasks.js",
     "scheduler:all": "node scripts/scheduler/run-all.js && node scripts/scheduler/analyze-results.js",
     "scheduler:history": "node scripts/scheduler/analyze-results.js --compare-history",
-    "scheduler:quick": "node --check background.js content.js offscreen.js logger.js && npm test -- --silent"
+    "scheduler:quick": "node --check background.js content.js offscreen.js logger.js && npm test -- --silent",
+    "write": "node scripts/write.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",

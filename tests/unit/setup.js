@@ -280,19 +280,28 @@ if (typeof global.AudioContext === 'undefined') {
     audioWorklet: { addModule: vi.fn() },
     createGain: vi.fn().mockReturnValue({
       connect: vi.fn(), disconnect: vi.fn(),
-      gain: { value: 1, set: vi.fn() },
+      gain: {
+        value: 1,
+        set: vi.fn(),
+        cancelScheduledValues: vi.fn(),
+        setValueCurveAtTime: vi.fn(),
+        setTargetAtTime: vi.fn(),
+        setValueAtTime: vi.fn(),
+      },
     }),
     createBiquadFilter: vi.fn().mockReturnValue({
       connect: vi.fn(), disconnect: vi.fn(),
-      type: 'highpass', frequency: { value: 5, set: vi.fn() },
+      type: 'highpass',
+      frequency: { value: 20, set: vi.fn(), setValueAtTime: vi.fn() },
+      Q: { value: 0.707, set: vi.fn(), setValueAtTime: vi.fn() },
     }),
     createDynamicsCompressor: vi.fn().mockReturnValue({
       connect: vi.fn(), disconnect: vi.fn(),
-      threshold: { value: -24, set: vi.fn() },
-      knee: { value: 30, set: vi.fn() },
-      ratio: { value: 12, set: vi.fn() },
-      attack: { value: 0.003, set: vi.fn() },
-      release: { value: 0.250, set: vi.fn() },
+      threshold: { value: -100, set: vi.fn(), setValueAtTime: vi.fn() },
+      knee: { value: 0, set: vi.fn(), setValueAtTime: vi.fn() },
+      ratio: { value: 1, set: vi.fn(), setValueAtTime: vi.fn() },
+      attack: { value: 0.003, set: vi.fn(), setValueAtTime: vi.fn() },
+      release: { value: 0.250, set: vi.fn(), setValueAtTime: vi.fn() },
     }),
     createScriptProcessor: vi.fn().mockReturnValue({
       connect: vi.fn(), disconnect: vi.fn(),
@@ -309,8 +318,25 @@ if (typeof global.AudioContext === 'undefined') {
     createOscillator: vi.fn().mockReturnValue({
       connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(),
     }),
+    createDelay: vi.fn().mockReturnValue({
+      connect: vi.fn(), disconnect: vi.fn(),
+      delayTime: {
+        value: 0,
+        set: vi.fn(),
+        setValueAtTime: vi.fn(),
+        cancelScheduledValues: vi.fn(),
+      },
+    }),
+    createWaveShaper: vi.fn().mockReturnValue({
+      connect: vi.fn(), disconnect: vi.fn(),
+      curve: new Float32Array([0, 1]),
+      oversample: 'none',
+      setBuffer: vi.fn(),
+    }),
     close: vi.fn(() => Promise.resolve()),
     state: 'running',
+    currentTime: 0,
+    sampleRate: 44100,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });

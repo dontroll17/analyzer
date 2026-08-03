@@ -217,19 +217,67 @@ const OVERLAY_CSS = `
   }
 `;
 
+// Safe chrome.storage wrapper — guard against undefined in invalid contexts
+function safeStorageGet(keys, callback) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.get(keys, callback);
+}
+
+function safeStorageSet(obj) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.set(obj);
+}
+
+// === Context Guard ===
+function _isContextValid() {
+  return !!(chrome.runtime?.id && chrome.storage?.local);
+}
+
+function safeChromeAPI(fn, fallback) {
+  if (!_isContextValid()) {
+    hideOverlay();
+    return;
+  }
+  try {
+    return fn();
+  } catch (e) {
+    if (e.message?.includes('Extension context invalidated')) {
+      hideOverlay();
+    }
+    if (fallback) fallback(e);
+  }
+}
+
+// === Safe DOM operations wrapper (YouTube compatibility) ===
+// YouTube aggressively manipulates DOM which can invalidate extension context
+// This wrapper catches all errors and hides overlay on context invalidation
+function safeDOM(fn, fallback) {
+  try {
+    return fn();
+  } catch (e) {
+    if (e.message?.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      log.warn('Extension context invalidated during DOM operation, hiding overlay');
+      hideOverlay();
+    } else {
+      log.warn('DOM operation failed:', e.message);
+    }
+    if (fallback) return fallback();
+  }
+}
+
 // Save position to storage with debounce
 let savePositionTimer = null;
 function savePositionDebounce() {
   if (savePositionTimer) clearTimeout(savePositionTimer);
   savePositionTimer = setTimeout(() => {
-    chrome.storage.local.set({ [STORAGE_KEY]: overlayPosition });
+    safeStorageSet({ [STORAGE_KEY]: overlayPosition });
   }, 500);
 }
 
 // Load saved position
 function loadPosition() {
-  chrome.storage.local.get([STORAGE_KEY], (result) => {
-    if (result[STORAGE_KEY] && typeof result[STORAGE_KEY] === 'object') {
+  safeStorageGet([STORAGE_KEY], (result) => {
+    if (result && result[STORAGE_KEY] && typeof result[STORAGE_KEY] === 'object') {
       overlayPosition = { ...overlayPosition, ...result[STORAGE_KEY] };
     }
   });
@@ -457,7 +505,7 @@ function cycleOverlayMode() {
   overlayMode = modes[(currentIndex + 1) % modes.length];
   
   // Save mode to storage
-  chrome.storage.local.set({ [MODE_STORAGE_KEY]: overlayMode });
+  safeStorageSet({ [MODE_STORAGE_KEY]: overlayMode });
   
   applyOverlayMode();
   updateModeBtn();
@@ -465,20 +513,21 @@ function cycleOverlayMode() {
 
 // Apply overlay mode to DOM
 function applyOverlayMode() {
-  if (!overlayEl) return;
-  
-  // Remove all mode classes
-  overlayEl.classList.remove('ssa-expanded', 'ssa-compact', 'ssa-sidebar');
-  
-  switch (overlayMode) {
-    case 'expanded':
-      overlayEl.classList.add('ssa-expanded');
-      overlayEl.style.display = 'flex';
-      overlayEl.style.width = '';
-      overlayEl.style.height = '';
-      overlayEl.style.flexDirection = '';
-      overlayEl.style.minWidth = '200px';
-      overlayEl.style.top = '';
+  try {
+    if (!overlayEl) return;
+    
+    // Remove all mode classes
+    overlayEl.classList.remove('ssa-expanded', 'ssa-compact', 'ssa-sidebar');
+    
+    switch (overlayMode) {
+      case 'expanded':
+        overlayEl.classList.add('ssa-expanded');
+        overlayEl.style.display = 'flex';
+        overlayEl.style.width = '';
+        overlayEl.style.height = '';
+        overlayEl.style.flexDirection = '';
+        overlayEl.style.minWidth = '200px';
+        overlayEl.style.top = '';
       overlayEl.style.left = '';
       overlayEl.style.borderRadius = '6px';
       overlayEl.style.borderLeft = '';
@@ -574,21 +623,28 @@ function applyOverlayMode() {
       ctx = canvas.getContext('2d');
     }
   }
+  } // end try
+  catch (e) {
+    if (e.message?.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      hideOverlay();
+    }
+  }
 }
 
 // Inject overlay widget into the page using Shadow DOM (site cannot destroy it)
 function injectOverlay() {
-  if (overlayEl) return; // Already injected
-  
-  // Pin state — declared at top to avoid TDZ ReferenceError
-  let isPinned = false;
-  
-  // Load saved mode
-  chrome.storage.local.get([MODE_STORAGE_KEY], (result) => {
-    if (result[MODE_STORAGE_KEY] && ['expanded', 'compact', 'sidebar', 'mini'].includes(result[MODE_STORAGE_KEY])) {
-      overlayMode = result[MODE_STORAGE_KEY];
-    }
-  });
+  try {
+    if (overlayEl) return; // Already injected
+    
+    // Pin state — declared at top to avoid TDZ ReferenceError
+    let isPinned = false;
+    
+    // Load saved mode
+    safeStorageGet([MODE_STORAGE_KEY], (result) => {
+      if (result && result[MODE_STORAGE_KEY] && ['expanded', 'compact', 'sidebar', 'mini'].includes(result[MODE_STORAGE_KEY])) {
+        overlayMode = result[MODE_STORAGE_KEY];
+      }
+    });
   
   // Create overlay element
   overlayEl = document.createElement('div');
@@ -684,7 +740,7 @@ function injectOverlay() {
   miniBadgeEl.addEventListener('click', () => {
     if (overlayMode === 'mini') {
       overlayMode = 'expanded';
-      chrome.storage.local.set({ [MODE_STORAGE_KEY]: overlayMode });
+      safeStorageSet({ [MODE_STORAGE_KEY]: overlayMode });
       applyOverlayMode();
       showOverlay();
     }
@@ -767,38 +823,51 @@ function injectOverlay() {
       hideOverlay();
     });
   }
+  } // end try
+  catch (e) {
+    if (e.message?.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      hideOverlay();
+    }
+  }
 }
 
 // Save position to storage
 function savePosition() {
-  chrome.storage.local.set({ [STORAGE_KEY]: overlayPosition });
+  safeStorageSet({ [STORAGE_KEY]: overlayPosition });
 }
 
 // Show overlay
 function showOverlay() {
-  log.info('showOverlay() called');
-  if (overlayVisible) return;
-  
-  loadPosition();
-  injectOverlay();
-  overlayVisible = true;
-  
-  applyOverlayMode();
-  
-  // Apply position based on mode
-  if (overlayMode === 'sidebar') {
-    overlayPosition.x = 0;
-    overlayPosition.y = 20;
-  }
-  overlayEl.style.left = overlayPosition.x + 'px';
-  overlayEl.style.top = overlayPosition.y + 'px';
-  
-  // Connect to background for metrics
-  connectToMetrics();
-  
-  // Schedule mini badge auto-hide if in mini mode
-  if (overlayMode === 'mini') {
-    scheduleMiniBadgeHide();
+  try {
+    log.info('showOverlay() called');
+    if (overlayVisible) return;
+    
+    loadPosition();
+    injectOverlay();
+    overlayVisible = true;
+    
+    applyOverlayMode();
+    
+    // Apply position based on mode
+    if (overlayMode === 'sidebar') {
+      overlayPosition.x = 0;
+      overlayPosition.y = 20;
+    }
+    overlayEl.style.left = overlayPosition.x + 'px';
+    overlayEl.style.top = overlayPosition.y + 'px';
+    
+    // Connect to background for metrics
+    connectToMetrics();
+    
+    // Schedule mini badge auto-hide if in mini mode
+    if (overlayMode === 'mini') {
+      scheduleMiniBadgeHide();
+    }
+  } // end try
+  catch (e) {
+    if (e.message?.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      hideOverlay();
+    }
   }
 }
 
@@ -808,27 +877,71 @@ function hideOverlay() {
   
   overlayVisible = false;
   
-  if (overlayEl) {
-    overlayEl.style.display = 'none';
+  // Full cleanup on hide: cancel rAF, remove DOM, clear all references
+  destroyOverlay();
+}
+
+// === Full overlay destruction (Section 4 — Content.js Context Guard) ===
+// Called on context invalidation, hide, or max reconnect attempts.
+// Performs complete cleanup: cancels rAF, removes Shadow DOM, nulls all cached refs.
+function destroyOverlay() {
+  // Cancel any pending rAF (waveform draw timers)
+  // Note: we don't have a stored rAF handle, but we clear the flag
+  pendingOscDraw = null;
+  pendingWaveformUpdate = false;
+  
+  // Disconnect metrics port
+  if (overlayPort) {
+    try { overlayPort.disconnect(); } catch (_) {}
+    overlayPort = null;
   }
   
-  // Hide mini badge
-  if (miniBadgeEl) {
-    miniBadgeEl.classList.remove('visible', 'hidden');
-    miniBadgeEl.style.display = 'none';
+  // Remove Shadow DOM overlay from page
+  if (overlayEl) {
+    try { overlayEl.remove(); } catch (_) {}
+    overlayEl = null;
   }
-
+  overlayShadow = null;
+  
+  // Remove mini badge
+  if (miniBadgeEl) {
+    try { miniBadgeEl.remove(); } catch (_) {}
+    miniBadgeEl = null;
+  }
+  
+  // Remove global style (if still present)
+  const styleEl = document.getElementById('ssa-overlay-style');
+  if (styleEl) {
+    try { styleEl.remove(); } catch (_) {}
+  }
+  
   // Clear hide timer
   if (miniBadgeHideTimer) {
     clearTimeout(miniBadgeHideTimer);
     miniBadgeHideTimer = null;
   }
   
-  // Disconnect metrics port
-  if (overlayPort) {
-    overlayPort.disconnect();
-    overlayPort = null;
-  }
+  // Null all cached DOM references to prevent stale access
+  canvasEl = null;
+  ctx = null;
+  statusDotEl = null;
+  statusTextEl = null;
+  rmsValueEl = null;
+  rmsMiniBarEl = null;
+  modeToggleBtnEl = null;
+  pinBtnEl = null;
+  closeBtnEl = null;
+  metricGlitchEl = null;
+  metricEntropyEl = null;
+  metricFlatnessEl = null;
+  metricRttEl = null;
+  metricDropsEl = null;
+  metricEntropyStateEl = null;
+  metricAiScoreEl = null;
+  
+  // Clear state
+  captureActive = false;
+  reconnectAttempts = 0;
 }
 
 // Toggle overlay visibility
@@ -851,7 +964,8 @@ function disconnectMetrics() {
 // Connect to background for metrics
 function connectToMetrics() {
   // Guard: extension context invalidated (SW restart / extension update)
-  if (!chrome.runtime?.id) {
+  if (!_isContextValid()) {
+    log.warn('Context invalid, not connecting');
     hideOverlay();
     return;
   }
@@ -882,23 +996,28 @@ function connectToMetrics() {
   overlayPort.onDisconnect.addListener(() => {
     overlayPort = null;
     
-    // Don't reconnect if extension context was invalidated
-    if (!chrome.runtime?.id) {
-      log.warn('Extension context invalidated, not reconnecting');
+    // Context invalidated — perform full cleanup, do NOT reconnect
+    if (!_isContextValid()) {
+      log.warn('Context invalidated on disconnect — performing full cleanup');
+      destroyOverlay();
       return;
     }
     
+    // Otherwise, try reconnect with exponential backoff
     if (overlayVisible && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
       const delay = 2000 * reconnectAttempts; // Exponential backoff
       setTimeout(() => {
-        if (overlayVisible && chrome.runtime?.id) {
+        if (overlayVisible && chrome.runtime?.id && _isContextValid()) {
           connectToMetrics();
         }
       }, delay);
     } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       log.error('Max reconnect attempts reached, hiding overlay');
-      hideOverlay();
+      destroyOverlay();
+    } else {
+      // Disconnect for unknown reason — hide overlay
+      destroyOverlay();
     }
   });
 }
@@ -924,6 +1043,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // Also listen for extension icon click to toggle overlay
+// Also listen for extension icon click to toggle overlay
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'overlay-toggle') {
     port.onMessage.addListener((data) => {
@@ -931,6 +1051,14 @@ chrome.runtime.onConnect.addListener((port) => {
         toggleOverlay();
       }
     });
+  }
+  
+  // Detect orphan overlay after extension reload (TK-6)
+  // If overlay still exists when new connection is established,
+  // it means the old content.js didn't clean up properly
+  if (port.name === 'overlay-metrics' && overlayEl) {
+    log.info('Orphan overlay detected after reload, destroying');
+    destroyOverlay();
   }
 });
 
@@ -956,14 +1084,29 @@ window.addEventListener('beforeunload', () => {
 });
 
 // === Extension context invalidation handling (Phase 2.4) ===
-// Catches uncaught errors from DOM operations after extension update/restart
+// Suppresses uncaught errors from DOM operations after extension update/restart
+// Hides overlay silently — no console spam
 window.addEventListener('error', (event) => {
   const msg = event.message || '';
   if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
-    log.warn('Extension context invalidated (uncaught error), hiding overlay');
+    // destroyOverlay() (via hideOverlay()) already removes style element — no duplicate cleanup
     hideOverlay();
-    // Remove global style if present
-    const styleEl = document.getElementById('ssa-overlay-style');
-    if (styleEl) styleEl.remove();
   }
 });
+
+// === YouTube-specific error handling ===
+// YouTube's aggressive DOM manipulation can cause errors when we access shadow DOM
+// Wrap all overlay operations in try-catch to prevent uncaught errors
+function safeOverlayOperation(fn, fallback) {
+  try {
+    return fn();
+  } catch (e) {
+    if (e.message?.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      log.warn('Extension context invalidated during overlay operation');
+      hideOverlay();
+    } else {
+      log.warn('Safe operation failed:', e.message);
+    }
+    if (fallback) return fallback();
+  }
+}

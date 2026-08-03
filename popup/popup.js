@@ -18,6 +18,16 @@ let bgPortReconnectTimer = null; // Debounce timer for reconnect
 // Storage key for persisting drop count across popup reconnects
 const DROP_COUNT_KEY = 'ssa_audio_drop_count';
 
+// Keys matching background.js for force-reset recovery
+const CAPTURING_KEY = 'ssa_capturing';
+const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue';
+
+// === Force reset stale state immediately on popup open ===
+// This is the first line of defense against stale capture state
+chrome.runtime.sendMessage({ type: 'FORCE_RESET' }, () => {
+  void chrome.runtime.lastError;
+});
+
 // ============================================
 // Theme Colors
 // ============================================
@@ -226,6 +236,7 @@ let referenceBufferRight = null;
 
 const OSC_SPLIT_KEY = 'oscSplit';
 const OSC_REF_KEY = 'oscReferenceSet';
+const OSC_OPTIONS_KEY = 'oscOptions';
 
 // rAF throttle for Canvas rendering
 let pendingOscDraw = null;
@@ -308,7 +319,7 @@ function togglePerfMonitor() {
     togglePerfBtn.textContent = perfVisible ? 'Hide' : 'Perf';
   }
   
-  chrome.storage.local.set({ [PERF_KEY]: perfVisible });
+  safeStorageSet({ [PERF_KEY]: perfVisible });
   
   // Start rAF loop when enabling
   if (perfVisible && !perfRunning) {
@@ -520,8 +531,8 @@ function perfAwareDraw(leftSamples, rightSamples) {
 }
 
 // Load perf monitor state on startup
-chrome.storage.local.get([PERF_KEY], (result) => {
-  if (result[PERF_KEY]) {
+safeStorageGet([PERF_KEY], (result) => {
+  if (result && result[PERF_KEY]) {
     perfVisible = true;
     perfActive = true;
     if (perfMonitor) perfMonitor.style.display = 'block';
@@ -1215,7 +1226,7 @@ function drawHeatmap() {
     if (avgDrawMs > HEATMAP_PERF_MAX_AVG_MS) {
       log.warn(`Heatmap avg draw ${avgDrawMs.toFixed(1)}ms > ${HEATMAP_PERF_MAX_AVG_MS}ms threshold — auto-disabling`);
       heatmapActive = false;
-      chrome.storage.local.set({ [HEATMAP_KEY]: false });
+      safeStorageSet({ [HEATMAP_KEY]: false });
       heatmapDrawTimes = [];
     }
   }
@@ -1636,17 +1647,27 @@ function _bgPortDisconnectHandler() {
 // Assign the named handler to module-level ref for cleanup
 bgPortDisconnectHandlerRef = _bgPortDisconnectHandler;
 
+// Safe chrome.storage wrapper — guard against undefined in invalid contexts
+function safeStorageGet(keys, callback) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.get(keys, callback);
+}
+
+function safeStorageSet(obj) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.set(obj);
+}
+
 // Send message to runtime with lastError suppression
 // Must consume lastError inside callback to prevent console "Unchecked runtime.lastError" spam
 function safeSendMessage(msg, callback) {
+  if (!chrome.runtime?.id) {
+    if (callback) callback(null);
+    return;
+  }
   chrome.runtime.sendMessage(msg, (response) => {
-    // Consume lastError inside callback to prevent console spam
-    const err = chrome.runtime.lastError;
-    if (err) {
-      // SW may have terminated — ignore, will reconnect
-      if (callback) callback(null);
-      return;
-    }
+    // Always consume lastError to prevent console spam
+    void chrome.runtime.lastError;
     if (callback) callback(response);
   });
 }
@@ -1919,12 +1940,11 @@ function ensureBackgroundPort() {
     bgPort.onDisconnect.addListener(bgPortDisconnectHandlerRef);
     
     // Restore drop count from storage
-    chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
-      if (result[DROP_COUNT_KEY] && result[DROP_COUNT_KEY] > 0) {
-        dropCount = result[DROP_COUNT_KEY];
-        if (captureActive) {
-          updateDropCounter(dropCount);
-        }
+    safeStorageGet([DROP_COUNT_KEY], (result) => {
+      if (!result || !result[DROP_COUNT_KEY] || result[DROP_COUNT_KEY] <= 0) return;
+      dropCount = result[DROP_COUNT_KEY];
+      if (captureActive) {
+        updateDropCounter(dropCount);
       }
     });
     
@@ -1936,10 +1956,7 @@ function ensureBackgroundPort() {
     }, 100);
     
     // P.6: Signal offscreen that popup is ready — triggers direct port connection
-    chrome.runtime.sendMessage({ type: '_SSA_POPUP_READY' }, () => {
-      // Consume lastError to prevent console spam
-      void chrome.runtime.lastError;
-    });
+    safeSendMessage({ type: '_SSA_POPUP_READY' });
     
     return true;
   } catch (e) {
@@ -2003,19 +2020,9 @@ stopBtn.addEventListener('click', () => {
   safeSendMessage({ type: 'STOP_CAPTURE' }, () => {});
 });
 
-chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
-  void chrome.runtime.lastError; // consume to prevent "Unchecked runtime.lastError" spam
-  if (chrome.runtime.lastError) {
-    updateUI(false);
-    return;
-  }
-
-  if (response && response.isCapturing) {
-    updateUI(true);
-  } else {
-    updateUI(false);
-  }
-});
+// === Popup always starts inactive — no status check on open ===
+// This prevents stale state from hanging the UI
+updateUI(false);
 
 // ============================================
 // Slider & Sensitivity Controls
@@ -2025,7 +2032,8 @@ const SENSITIVITY_KEY = 'glitchSensitivity';
 const SENSITIVITY_DEFAULT = 85;
 
 // Load saved sensitivity on startup
-chrome.storage.local.get([SENSITIVITY_KEY], (result) => {
+safeStorageGet([SENSITIVITY_KEY], (result) => {
+  if (!result) return;
   const saved = result[SENSITIVITY_KEY];
   if (typeof saved === 'number' && saved >= 60 && saved <= 90) {
     if (thresholdSlider) thresholdSlider.value = saved;
@@ -2046,7 +2054,7 @@ if (thresholdSlider) {
     // Отправляем настройку в AudioWorklet в реальном времени
     sendSensitivityToWorklet(parseInt(value));
     // Сохраняем настройку
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: parseInt(value) });
+    safeStorageSet({ [SENSITIVITY_KEY]: parseInt(value) });
   });
 }
 
@@ -2056,7 +2064,7 @@ if (resetSensitivityBtn) {
     if (thresholdSlider) thresholdSlider.value = SENSITIVITY_DEFAULT;
     if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
     sendSensitivityToWorklet(SENSITIVITY_DEFAULT);
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT });
+    safeStorageSet({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT });
   });
 }
 
@@ -2068,7 +2076,7 @@ if (resetSensitivityBtn) {
  * Send compressor settings to offscreen (direct via runtime)
  */
 function sendCompressorSettings() {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: '_SSA_SET_COMPRESSOR',
     active: effectsSettings.compressor.active,
     params: {
@@ -2078,14 +2086,14 @@ function sendCompressorSettings() {
       attack: effectsSettings.compressor.attack,
       release: effectsSettings.compressor.release
     }
-  }).catch(() => {});
+  });
 }
 
 /**
  * Send EQ settings to offscreen (direct via runtime)
  */
 function sendEQSettings() {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: '_SSA_SET_EQ',
     active: effectsSettings.eq.active,
     params: {
@@ -2095,27 +2103,27 @@ function sendEQSettings() {
       peakGain: effectsSettings.eq.peakGain,
       peakQ: effectsSettings.eq.peakQ
     }
-  }).catch(() => {});
+  });
 }
 
 /**
  * Send limiter settings to offscreen (direct via runtime)
  */
 function sendLimiterSettings() {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: '_SSA_SET_LIMITER',
     active: effectsSettings.limiter.active,
     params: {
       threshold: effectsSettings.limiter.threshold
     }
-  }).catch(() => {});
+  });
 }
 
 /**
  * Send delay settings to offscreen (direct via runtime)
  */
 function sendDelaySettings() {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: '_SSA_SET_DELAY',
     active: effectsSettings.delay.active,
     params: {
@@ -2123,38 +2131,39 @@ function sendDelaySettings() {
       feedback: effectsSettings.delay.feedback,
       mix: effectsSettings.delay.mix
     }
-  }, () => { void chrome.runtime.lastError; });
+  });
 }
 
 /**
  * Save all effects settings to chrome.storage
  */
 function saveEffectsSettings() {
-  chrome.storage.local.set({ [EFFECTS_STORAGE_KEY]: effectsSettings });
+  safeStorageSet({ [EFFECTS_STORAGE_KEY]: effectsSettings });
 }
 
 /**
  * Load effects settings from chrome.storage
  */
 function loadEffectsSettings() {
-  chrome.storage.local.get([EFFECTS_STORAGE_KEY], (result) => {
-    if (result[EFFECTS_STORAGE_KEY] && typeof result[EFFECTS_STORAGE_KEY] === 'object') {
-      const saved = result[EFFECTS_STORAGE_KEY];
-      // Merge with defaults
-      if (saved.compressor && typeof saved.compressor === 'object') {
-        Object.assign(effectsSettings.compressor, saved.compressor);
-      }
-      if (saved.eq && typeof saved.eq === 'object') {
-        Object.assign(effectsSettings.eq, saved.eq);
-      }
-      if (saved.limiter && typeof saved.limiter === 'object') {
-        Object.assign(effectsSettings.limiter, saved.limiter);
-      }
-      if (saved.delay && typeof saved.delay === 'object') {
-        Object.assign(effectsSettings.delay, saved.delay);
-      }
-      applyEffectsUIValues();
+  safeStorageGet([EFFECTS_STORAGE_KEY], (result) => {
+    if (!result || !result[EFFECTS_STORAGE_KEY]) return;
+    if (typeof result[EFFECTS_STORAGE_KEY] !== 'object') return;
+    
+    const saved = result[EFFECTS_STORAGE_KEY];
+    // Merge with defaults
+    if (saved.compressor && typeof saved.compressor === 'object') {
+      Object.assign(effectsSettings.compressor, saved.compressor);
     }
+    if (saved.eq && typeof saved.eq === 'object') {
+      Object.assign(effectsSettings.eq, saved.eq);
+    }
+    if (saved.limiter && typeof saved.limiter === 'object') {
+      Object.assign(effectsSettings.limiter, saved.limiter);
+    }
+    if (saved.delay && typeof saved.delay === 'object') {
+      Object.assign(effectsSettings.delay, saved.delay);
+    }
+    applyEffectsUIValues();
   });
 }
 
@@ -2555,7 +2564,8 @@ function applyTheme(theme) {
   }
   
   // Load heatmap storage key
-  chrome.storage.local.get([HEATMAP_KEY], (result) => {
+  safeStorageGet([HEATMAP_KEY], (result) => {
+    if (!result) return;
     if (heatmapSection) {
       heatmapActive = result[HEATMAP_KEY] ?? true;
     }
@@ -2589,7 +2599,7 @@ if (themeToggle) {
     const nextIndex = (currentIndex + 1) % THEME_CYCLE.length;
     const next = THEME_CYCLE[nextIndex];
     applyTheme(next);
-    chrome.storage.local.set({ [THEME_KEY]: next });
+    safeStorageSet({ [THEME_KEY]: next });
   });
 }
 
@@ -2619,10 +2629,9 @@ function redrawOscilloscope() {
 // Oscilloscope Options (Freeze, Zoom, Log Scale)
 // ============================================
 
-const OSC_OPTIONS_KEY = 'oscOptions';
-
 // Load saved oscilloscope options
-chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
+safeStorageGet([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
+  if (!result) return;
   if (result[OSC_OPTIONS_KEY] && typeof result[OSC_OPTIONS_KEY] === 'object') {
     const opts = result[OSC_OPTIONS_KEY];
     if (opts.freeze) oscFreeze = true;
@@ -2637,7 +2646,7 @@ chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result)
 });
 
 function saveOscOptions() {
-  chrome.storage.local.set({
+  safeStorageSet({
     [OSC_OPTIONS_KEY]: {
       freeze: oscFreeze,
       zoom: oscZoom,
@@ -2841,14 +2850,17 @@ window.addEventListener('beforeunload', async () => {
       await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
           stopPending = true;
-          // Ignore lastError — page unloading
+          // Always consume lastError — page unloading
+          void chrome.runtime.lastError;
           resolve(response);
         });
       });
     } catch (_) {
       // Fallback: if sendMessage fails, retry with setTimeout
       setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, () => {});
+        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, () => {
+          void chrome.runtime.lastError;
+        });
       }, 50);
     }
   }
@@ -3017,3 +3029,13 @@ if (logsFilterRow) {
     renderLogs();
   });
 }
+
+// === Extension context invalidation handler for popup ===
+window.addEventListener('error', (event) => {
+  const msg = event.message || '';
+  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
+    log.warn('Popup: Extension context invalidated');
+    safeStorageSet({ [CAPTURING_KEY]: false, [PERSISTENT_METRICS_KEY]: [], [DROP_COUNT_KEY]: 0 });
+    updateUI(false);
+  }
+});
