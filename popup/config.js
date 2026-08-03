@@ -27,6 +27,9 @@ const DEFAULTS = Object.freeze({
 const KEYS = Object.freeze({
   theme: 'ssa_theme',
   glitchSensitivity: 'ssa_glitchSensitivity',
+  oscFreeze: 'ssa_oscFreeze',
+  oscZoom: 'ssa_oscZoom',
+  oscLogScale: 'ssa_oscLogScale',
   oscOptions: 'ssa_oscOptions',
   oscSplit: 'ssa_oscSplit',
   oscRefSet: 'ssa_oscRefSet',
@@ -87,7 +90,7 @@ export async function saveSetting(key, value) {
     payload = { [storageKey]: value };
   }
 
-  chrome.storage.local.set(payload);
+  await chrome.storage.local.set(payload);
 }
 
 /**

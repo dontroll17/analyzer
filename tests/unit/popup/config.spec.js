@@ -1,9 +1,11 @@
+import '../setup';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { loadSettings, saveSetting, getSettings, resetSettings } from '../../popup/config.js';
+import { loadSettings, saveSetting, getSettings, resetSettings } from '../../../popup/config.js';
 
 describe('popup/config.js — Settings Manager', () => {
   beforeEach(() => {
     chrome.storage.local._data = {};
+    // Don't clear mocks for storage functions — we need them to exist
     vi.clearAllMocks();
   });
 
