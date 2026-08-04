@@ -238,6 +238,13 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.frameCount = 0;
     this.waveformFrameCounter = 0;
     this.WAVEFORM_THROTTLE = 4; // ~10fps waveform — reduces MessagePort serialization by ~75% without visible quality loss
+    
+    // === P.2 DSP DECIMATION: Two-level quantization ===
+    // K=8: heavy spectral analysis runs every 8th quantum (~43 Hz vs ~344 Hz)
+    // Light frame: RMS/peak every quantum (~344 Hz, <1ms)
+    // Heavy frame: FFT/MFCC/HNR every K=8 quanta (~43 Hz, <1.5ms)
+    this.DECIMATION_K = 8;
+    this._quantumInCycle = 0; // 0..K-1 counter
     this.warmupFrames = 15; // skip first N frames — buffers empty
     
     // Используем штатную глобальную переменную sampleRate воркета
@@ -811,7 +818,16 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       // Mono (channelCount=1): достаточно левого
       // Stereo (channelCount=2): нужны оба канала — иначе мерцает MONO/STEREO
       if (this.leftReady && (this.channelCount === 1 || this.rightReady)) {
-        this.processFrame();
+        // === P.2: Two-level DSP quantization ===
+        // Increment decimation counter
+        this._quantumInCycle = (this._quantumInCycle + 1) % this.DECIMATION_K;
+        const isHeavyFrame = (this._quantumInCycle === 0); // Every K-th quantum
+        
+        if (isHeavyFrame) {
+          this.processHeavyFrame(); // FFT/MFCC/HNR/AI every K quanta
+        } else {
+          this.processLightFrame(); // RMS/peak/glitch every quantum
+        }
         this.leftReady = false;
         this.rightReady = false;
         this.leftFrameData = null;
@@ -828,11 +844,182 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     } else {
       this.lastDspTimeMs += (processElapsed - this.lastDspTimeMs) * 0.1;
     }
-    
     return true;
   }
 
-  processFrame() {
+  /**
+   * P.2: Light frame — runs EVERY quantum (~344 Hz)
+   * Only fast metrics from processChannelFrame(): RMS, peak, bands, ZCR, HFA
+   * No FFT, no MFCC, no HNR — those are deferred to heavy frame
+   * Budget: < 1ms per frame
+   */
+  processLightFrame() {
+    this.frameCount++;
+    this.waveformFrameCounter++;
+
+    // Skip warmup frames — buffers empty, metrics are garbage (Infinity, 0)
+    if (this.frameCount <= this.warmupFrames) {
+      return;
+    }
+
+    const leftData = this.leftFrameData;
+    const rightData = this.rightFrameData;
+
+    // Combined RMS: max peak for stereo
+    const combinedRMS = leftData ? leftData.rms : (rightData ? rightData.rms : 0);
+    const leftPeak = leftData ? leftData.peak : 0;
+    const rightPeak = rightData ? rightData.peak : 0;
+    const peakRMS = Math.max(leftPeak, rightPeak);
+
+    // Combined FFT for entropy/flatness (sum of energies — just add arrays)
+    if (leftData && rightData) {
+      for (let i = 0; i < leftData.fft.length; i++) {
+        this.combinedFFT[i] = leftData.fft[i] + rightData.fft[i];
+      }
+    } else {
+      const src = leftData ? leftData.fft : rightData.fft;
+      for (let i = 0; i < src.length; i++) {
+        this.combinedFFT[i] = src[i];
+      }
+    }
+
+    // Frequency bands for combo
+    let combinedBands;
+    if (leftData && rightData) {
+      combinedBands = {
+        bass: (leftData.bands.bass + rightData.bands.bass) / 2,
+        mid: (leftData.bands.mid + rightData.bands.mid) / 2,
+        treble: (leftData.bands.treble + rightData.bands.treble) / 2
+      };
+    } else {
+      combinedBands = leftData ? leftData.bands : rightData.bands;
+    }
+
+    // Glitch detection: max highFreqAnomaly from channels
+    const leftHFA = leftData ? leftData.highFreqAnomaly : 0;
+    const rightHFA = rightData ? rightData.highFreqAnomaly : 0;
+    const combinedHighFreqAnomaly = Math.max(leftHFA, rightHFA);
+    const glitchInfo = this.checkGlitchState(combinedRMS, combinedHighFreqAnomaly);
+
+    // Entropy/flatness on combined FFT (O(N) — fast, no heavy allocations)
+    const bandEnt = this.calculateBandEntropy(this.combinedFFT);
+    const flatness = this.detectSpectralFlatness(this.combinedFFT);
+    const entropy = bandEnt.entropy;
+
+    // Voice: concentrated in Voice+Speech bands, NOT flat → STABLE/DRIFT
+    // Noise: spread across all 4 bands + flat spectrum → GLITCH
+    // Music: Bass/Voice dominant → STABLE
+    let entropyState = 'STABLE';
+    if (entropy > 1.5 && flatness > 0.4) {
+      entropyState = 'GLITCH';
+    } else if (entropy > 1.0 || (flatness > 0.6 && entropy > 0.8)) {
+      entropyState = 'DRIFT';
+    }
+
+    // Combined ZCR (average of left/right)
+    let combinedZCR = 0;
+    if (leftData && rightData) {
+      combinedZCR = (leftData.zcr + rightData.zcr) / 2;
+    } else {
+      combinedZCR = leftData ? leftData.zcr : (rightData ? rightData.zcr : 0);
+    }
+
+    // C.2.8: Dynamic Range (Peak - RMS in dB)
+    const peakdB = peakRMS > 0 ? 20 * Math.log10(peakRMS) : -Infinity;
+    const rmsdB = combinedRMS > 0 ? 20 * Math.log10(combinedRMS) : -Infinity;
+    const dynamicRange = peakdB - rmsdB; // >= 0 dB
+
+    // C.2.10: Inter-band Energy Ratios (log-scaled, ~0dB = balanced)
+    const bassMidRatio = combinedBands.mid > 1e-10
+      ? 10 * Math.log10(combinedBands.bass / combinedBands.mid)
+      : -Infinity;
+    const midTrebleRatio = combinedBands.treble > 1e-10
+      ? 10 * Math.log10(combinedBands.mid / combinedBands.treble)
+      : -Infinity;
+
+    // C.2.9: Glitch Rate (glitches per second, sliding 1s window)
+    const now = Date.now();
+    if (this._glitchWindow) {
+      this._glitchWindow.push(now);
+      // Remove entries older than 1s
+      while (this._glitchWindow.length > 0 && this._glitchWindow[0] < now - 1000) {
+        this._glitchWindow.shift();
+      }
+    } else {
+      this._glitchWindow = [now];
+    }
+
+    // Throttle waveform to ~10 Hz (every 4 frames at 43 fps)
+    const includeWaveform = (this.waveformFrameCounter % this.WAVEFORM_THROTTLE === 0);
+
+    // Downsample 512 true FFT bins → 64 bins for popup visualization
+    const spectrumCopy = this._downsampleSpectrum(this.combinedFFT);
+
+    // === LIGHT FRAME DEFENSIVE GUARD ===
+    const lightCriticalMetrics = [combinedRMS, peakRMS, entropy, flatness,
+                                 combinedBands.bass, combinedBands.mid, combinedBands.treble,
+                                 combinedHighFreqAnomaly, combinedZCR,
+                                 dynamicRange, bassMidRatio, midTrebleRatio];
+
+    for (const val of lightCriticalMetrics) {
+      if (!Number.isFinite(val)) {
+        return;
+      }
+    }
+    // === END LIGHT GUARD ===
+
+    const payload = {
+      type: 'METRICS',
+      timestamp: Date.now(),
+      frame: this.frameCount,
+      rms: combinedRMS,
+      peakRMS: peakRMS,
+      spectrum: spectrumCopy,
+      bass: combinedBands.bass,
+      mid: combinedBands.mid,
+      treble: combinedBands.treble,
+      rmsRight: rightData ? rightData.rms : undefined,
+      bassRight: rightData ? rightData.bands.bass : undefined,
+      midRight: rightData ? rightData.bands.mid : undefined,
+      trebleRight: rightData ? rightData.bands.treble : undefined,
+      highFreqAnomaly: combinedHighFreqAnomaly,
+      entropy: entropy,
+      flatness: flatness,
+      entropyState: entropyState,
+      isGlitch: glitchInfo.isGlitch,
+      glitchState: glitchInfo.state,
+      glitchCount: this.glitchCount,
+      // C.2.3: ZCR
+      zcr: combinedZCR,
+      // C.2.8–C.2.10
+      dynamicRange: dynamicRange,
+      bassMidRatio: bassMidRatio,
+      midTrebleRatio: midTrebleRatio,
+      glitchRate: this._glitchWindow ? this._glitchWindow.length : 0,
+      // Light frame zeros (heavy frame fills these)
+      hnr: 0,
+      spectralCentroid: 0,
+      spectralRolloff: 0,
+      onsetDetected: false,
+      // V4: AI Detection (deferred to heavy frame)
+      aiScore: 0,
+      mfcc: [],
+      mfccStd: []
+    };
+
+    if (includeWaveform) {
+      payload.waveform = Object.values(this.waveformLeft);
+      if (rightData) {
+        payload.waveformRight = Object.values(this.waveformRight);
+      }
+    } else {
+      payload.waveformHold = true;
+    }
+
+    this.port.postMessage(payload);
+  }
+
+  processHeavyFrame() {
     this.frameCount++;
     this.waveformFrameCounter++;
     
@@ -917,7 +1104,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       combinedZCR = leftData ? leftData.zcr : (rightData ? rightData.zcr : 0);
     }
     
-    // C.2.4: HNR via Wiener–Khinchin (O(N log N) — compute every frame)
+    // C.2.4: HNR via Wiener–Khinchin (O(N log N) — HEAVY, every K frames)
+    // Skip in light frames — deferred via decimation
     let hnr = 0;
     const buffer = leftData ? this.waveformLeft : this.waveformRight;
     hnr = this.calculateHNR(buffer);
@@ -928,7 +1116,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     const rmsdB = combinedRMS > 0 ? 20 * Math.log10(combinedRMS) : -Infinity;
     const dynamicRange = peakdB - rmsdB; // >= 0 dB
     
-    // V4.1: MFCC extraction (13 coefficients) on combined FFT
+    // V4.1: MFCC extraction (13 coefficients) on combined FFT — HEAVY, every K frames
     _ensureMelBank(this.sampleRate);
     const mfcc = calculateMFCC(this.combinedFFT);
     

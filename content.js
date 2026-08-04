@@ -942,6 +942,21 @@ function destroyOverlay() {
   // Clear state
   captureActive = false;
   reconnectAttempts = 0;
+  
+  // === P.5: Full event listener cleanup to prevent memory leaks ===
+  // Remove page-level listeners
+  document.removeEventListener('visibilitychange', _visibilityHandler);
+  window.removeEventListener('beforeunload', _beforeUnloadHandler);
+  window.removeEventListener('error', _errorHandler);
+  
+  // Clear save position timer
+  if (savePositionTimer) {
+    clearTimeout(savePositionTimer);
+    savePositionTimer = null;
+  }
+  
+  // Log cleanup completion
+  log.info('P.5: Full overlay cleanup complete — all resources released');
 }
 
 // Toggle overlay visibility
@@ -1062,15 +1077,14 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
-// Auto-hide when page is hidden
-document.addEventListener('visibilitychange', () => {
+// === Named event handlers for cleanup (P.5) ===
+const _visibilityHandler = () => {
   if (document.hidden && overlayVisible) {
     hideOverlay();
   }
-});
+};
 
-// Cleanup on page unload
-window.addEventListener('beforeunload', () => {
+const _beforeUnloadHandler = () => {
   if (overlayEl) {
     overlayEl.remove();
     overlayEl = null;
@@ -1081,18 +1095,25 @@ window.addEventListener('beforeunload', () => {
   }
   const styleEl = document.getElementById('ssa-overlay-style');
   if (styleEl) styleEl.remove();
-});
+};
+
+const _errorHandler = (event) => {
+  const msg = event.message || '';
+  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
+    hideOverlay();
+  }
+};
+
+// Auto-hide when page is hidden
+document.addEventListener('visibilitychange', _visibilityHandler);
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', _beforeUnloadHandler);
 
 // === Extension context invalidation handling (Phase 2.4) ===
 // Suppresses uncaught errors from DOM operations after extension update/restart
 // Hides overlay silently — no console spam
-window.addEventListener('error', (event) => {
-  const msg = event.message || '';
-  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
-    // destroyOverlay() (via hideOverlay()) already removes style element — no duplicate cleanup
-    hideOverlay();
-  }
-});
+window.addEventListener('error', _errorHandler);
 
 // === YouTube-specific error handling ===
 // YouTube's aggressive DOM manipulation can cause errors when we access shadow DOM

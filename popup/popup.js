@@ -1268,6 +1268,35 @@ function applyMetrics(data) {
   if (applyMetrics._count === undefined) applyMetrics._count = 0;
   applyMetrics._count++;
   
+  // P.2 DSP DECIMATION: Cache heavy metrics between light payloads
+  // Light payloads (every ~2.9ms) have hnr:0, spectralCentroid:0, mfcc:[], aiScore:0
+  // Heavy payloads (every ~23ms) have real heavy metrics
+  // Only update heavy metrics when non-zero (i.e., from heavy frame)
+  if (!applyMetrics._cachedHeavy) {
+    applyMetrics._cachedHeavy = {
+      hnr: 0, zcr: 0, spectralCentroid: 0, spectralRolloff: 0,
+      onsetDetected: false, aiScore: 0, mfcc: [], mfccStd: [],
+      dynamicRange: 0, bassMidRatio: 0, midTrebleRatio: 0
+    };
+  }
+  
+  // Merge: always update light metrics, only update heavy when non-zero
+  const heavyData = data;
+  if (heavyData.hnr > 0 || heavyData.aiScore > 0 || heavyData.mfcc.length > 0) {
+    // Heavy frame — update cache
+    applyMetrics._cachedHeavy.hnr = heavyData.hnr;
+    applyMetrics._cachedHeavy.zcr = heavyData.zcr;
+    applyMetrics._cachedHeavy.spectralCentroid = heavyData.spectralCentroid;
+    applyMetrics._cachedHeavy.spectralRolloff = heavyData.spectralRolloff;
+    applyMetrics._cachedHeavy.onsetDetected = heavyData.onsetDetected;
+    applyMetrics._cachedHeavy.aiScore = heavyData.aiScore;
+    applyMetrics._cachedHeavy.mfcc = heavyData.mfcc;
+    applyMetrics._cachedHeavy.mfccStd = heavyData.mfccStd;
+    applyMetrics._cachedHeavy.dynamicRange = heavyData.dynamicRange;
+    applyMetrics._cachedHeavy.bassMidRatio = heavyData.bassMidRatio;
+    applyMetrics._cachedHeavy.midTrebleRatio = heavyData.midTrebleRatio;
+  }
+  
   try {
     // Update current metrics state
     currentMetrics = {
@@ -1330,22 +1359,24 @@ function applyMetrics(data) {
       }
     }
 
-    // Glitch detection display
+    // Glitch detection display — use cached heavy metrics (P.2 DSP decimation)
+    // Light payloads have 0 for heavy metrics; heavy payloads fill _cachedHeavy
+    const heavy = applyMetrics._cachedHeavy;
     updateGlitchDisplay(
       data.glitchState,
       data.glitchCount,
       data.entropy,
       data.entropyState,
       data.flatness,
-      data.hnr,
-      data.zcr,
-      data.spectralCentroid,
-      data.spectralRolloff,
-      data.onsetDetected,
+      heavy.hnr,
+      heavy.zcr,
+      heavy.spectralCentroid,
+      heavy.spectralRolloff,
+      heavy.onsetDetected,
       lastConnectionLatency,
-      data.dynamicRange,
-      data.bassMidRatio,
-      data.midTrebleRatio,
+      heavy.dynamicRange,
+      heavy.bassMidRatio,
+      heavy.midTrebleRatio,
       data.glitchRate
     );
   } catch (e) {
@@ -2026,6 +2057,36 @@ startBtn.addEventListener('click', async () => {
     capturedTabId = activeTab.id;
     log.info('Target tab:', capturedTabId, activeTab.title?.substring(0, 50), activeTab.url?.substring(0, 80));
 
+    connectToBackground();
+
+    // === MODERNIZED CAPTURE: chrome.tabCapture.getMediaStreamId() with user activation ===
+    // P.1: Obtain streamId via tabCapture (requires transient user activation from popup click)
+    // P.2: Pass streamId to offscreen.js for getUserMedia with chromeMediaSource constraints
+    // P.3: Mute active tab AFTER successful streamId acquisition (prevents double sound)
+    
+    // P.1: Call chrome.tabCapture.getMediaStreamId() — works only with user activation (popup click)
+    const requestStreamId = () => {
+      return new Promise((resolve) => {
+        if (!chrome.tabCapture || !chrome.tabCapture.getMediaStreamId) {
+          log.warn('chrome.tabCapture.getMediaStreamId() not available — falling back to offscreen dialog');
+          resolve(null);
+          return;
+        }
+        
+        chrome.tabCapture.getMediaStreamId(
+          { targetTabId: capturedTabId, allowCurrentTab: true },
+          (streamId) => {
+            if (chrome.runtime.lastError) {
+              log.warn('tabCapture.getMediaStreamId() failed:', chrome.runtime.lastError.message, '— falling back to offscreen dialog');
+              resolve(null); // Fallback: offscreen will show dialog
+            } else {
+              resolve(streamId); // streamId is a string token
+            }
+          }
+        );
+      });
+    };
+
     // Mute active tab when capturing tab audio (prevents double sound)
     if (captureSource === 'tab') {
       chrome.tabs.update(capturedTabId, { muted: true }, (tab) => {
@@ -2037,34 +2098,39 @@ startBtn.addEventListener('click', async () => {
       });
     }
 
-    connectToBackground();
-    safeSendMessage({
-      type: 'START_CAPTURE',
-      captureSource: captureSource,
-      capturedTabId: capturedTabId
-    }, response => {
-      if (response?.ok) {
-        updateUI(true);
-        // Show overlay in active tab
-        chrome.tabs.sendMessage(capturedTabId, { type: '_SSA_SHOW_OVERLAY' }, () => {
-          if (chrome.runtime.lastError) {
-            log.warn('Failed to show overlay in tab:', capturedTabId);
+    // Request streamId and start capture
+    requestStreamId().then((streamId) => {
+      log.info('Got streamId:', streamId ? 'OK (' + streamId.substring(0, 40) + '...)' : 'null');
+
+      safeSendMessage({
+        type: 'START_CAPTURE',
+        captureSource: captureSource,
+        capturedTabId: capturedTabId,
+        tabStreamId: streamId // Pass streamId to offscreen for getUserMedia
+      }, response => {
+        if (response?.ok) {
+          updateUI(true);
+          // Show overlay in active tab
+          chrome.tabs.sendMessage(capturedTabId, { type: '_SSA_SHOW_OVERLAY' }, () => {
+            if (chrome.runtime.lastError) {
+              log.warn('Failed to show overlay in tab:', capturedTabId);
+            }
+          });
+        } else {
+          log.error('Capture failed:', response?.error);
+          alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+          captureActive = false;
+          heatmapActive = false;
+          // Unmute on failure
+          if (captureSource === 'tab') {
+            chrome.tabs.update(capturedTabId, { muted: false });
           }
-        });
-      } else {
-        log.error('Capture failed:', response?.error);
-        alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
-        captureActive = false;
-        heatmapActive = false;
-        // Unmute on failure
-        if (captureSource === 'tab') {
-          chrome.tabs.update(capturedTabId, { muted: false });
+          if (startBtn) {
+            startBtn.textContent = 'Start Capture';
+            startBtn.disabled = false;
+          }
         }
-        if (startBtn) {
-          startBtn.textContent = 'Start Capture';
-          startBtn.disabled = false;
-        }
-      }
+      });
     });
   });
 });

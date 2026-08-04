@@ -446,7 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function startCapture(source, tabStreamId) {
-  log.info('startCapture called, source:', source);
+  log.info('startCapture called, source:', source, 'tabStreamId:', tabStreamId ? 'present' : 'null');
   try {
     if (mediaStream) { log.info('startCapture: already active'); return { ok: true, alreadyActive: true }; }
     
@@ -487,16 +487,33 @@ async function startCapture(source, tabStreamId) {
       
       case 'combined': {
         // Tab audio + microphone
-        // getDisplayMedia will prompt user to share tab with audio
+        // Use tabCapture streamId if available (popup initiated), otherwise fallback to getDisplayMedia
         try {
-          mediaStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { width: 1, height: 1, displaySurface: 'browser' },
-            audio: {
-              autoGainControl: false,
-              echoCancellation: false,
-              noiseSuppression: false
-            }
-          });
+          if (tabStreamId) {
+            // Modernized path: getUserMedia with chromeMediaSource from tabCapture streamId
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                mandatory: {
+                  chromeMediaSource: 'tab',
+                  chromeMediaSourceId: tabStreamId
+                },
+                autoGainControl: false,
+                echoCancellation: false,
+                noiseSuppression: false
+              },
+              video: { width: 1, height: 1, displaySurface: 'browser' }
+            });
+          } else {
+            // Fallback: getDisplayMedia dialog (offscreen initiated or tabCapture unavailable)
+            mediaStream = await navigator.mediaDevices.getDisplayMedia({
+              video: { width: 1, height: 1, displaySurface: 'browser' },
+              audio: {
+                autoGainControl: false,
+                echoCancellation: false,
+                noiseSuppression: false
+              }
+            });
+          }
           
           // Now also get microphone
           const micStream = await navigator.mediaDevices.getUserMedia({
@@ -532,38 +549,66 @@ async function startCapture(source, tabStreamId) {
       case 'tab':
       default: {
         // Tab audio only (default)
-        // Use getDisplayMedia with audio (replaces tabCapture API removed in Chrome 123+)
-        // This shows the native Chrome "Share tab audio" dialog
-        try {
-          mediaStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { width: 1, height: 1, displaySurface: 'browser' },
-            audio: {
-              autoGainControl: false,
-              echoCancellation: false,
-              noiseSuppression: false
-            }
-          });
-          
-          // User may have shared screen without audio - try to get tab audio only
-          if (mediaStream.getAudioTracks().length === 0) {
+        // P.1: Use tabCapture streamId if provided (popup initiated with user activation)
+        // P.2: Fallback to getDisplayMedia if streamId not available (offscreen initiated)
+        if (tabStreamId) {
+          // Modernized path: getUserMedia with chromeMediaSource constraints
+          // No dialog shown — streamId obtained via chrome.tabCapture in popup (user activation)
+          log.info('Using tabCapture streamId for getUserMedia');
+          try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                mandatory: {
+                  chromeMediaSource: 'tab',
+                  chromeMediaSourceId: tabStreamId
+                },
+                autoGainControl: false,
+                echoCancellation: false,
+                noiseSuppression: false
+              },
+              video: false
+            });
+          } catch (getUserMediaErr) {
             safeSendMessage({
               type: '_OFFSCREEN_ERROR',
-              error: 'Please enable "Share tab audio" in the dialog'
+              error: 'getUserMedia with tabCapture failed: ' + getUserMediaErr.message
             });
-            mediaStream.getTracks().forEach(t => t.stop());
-            cleanup();
-            return { ok: false, error: 'no_tab_audio' };
+            return { ok: false, error: 'tabCapture_getUserMedia_failed' };
           }
-        } catch (getDisplayErr) {
-          // getDisplayMedia may fail if user cancels or if extension context
-          if (getDisplayErr.name === 'NotAllowedError') {
-            return { ok: false, error: 'Tab capture denied by user' };
+        } else {
+          // Fallback: getDisplayMedia dialog (offscreen initiated or tabCapture unavailable)
+          log.info('No tabStreamId — using getDisplayMedia fallback');
+          try {
+            mediaStream = await navigator.mediaDevices.getDisplayMedia({
+              video: { width: 1, height: 1, displaySurface: 'browser' },
+              audio: {
+                autoGainControl: false,
+                echoCancellation: false,
+                noiseSuppression: false
+              }
+            });
+            
+            // User may have shared screen without audio - try to get tab audio only
+            if (mediaStream.getAudioTracks().length === 0) {
+              safeSendMessage({
+                type: '_OFFSCREEN_ERROR',
+                error: 'Please enable "Share tab audio" in the dialog'
+              });
+              mediaStream.getTracks().forEach(t => t.stop());
+              cleanup();
+              return { ok: false, error: 'no_tab_audio' };
+            }
+          } catch (getDisplayErr) {
+            // getDisplayMedia may fail if user cancels or if extension context
+            if (getDisplayErr.name === 'NotAllowedError') {
+              return { ok: false, error: 'Tab capture denied by user' };
+            }
+            safeSendMessage({
+              type: '_OFFSCREEN_ERROR',
+              error: 'getDisplayMedia failed: ' + getDisplayErr.message
+            });
+            return { ok: false, error: 'getDisplay_media_failed' };
           }
-          safeSendMessage({
-            type: '_OFFSCREEN_ERROR',
-            error: 'getDisplayMedia failed: ' + getDisplayErr.message
-          });
-          return { ok: false, error: 'getDisplay_media_failed' };
         }
         break;
       }

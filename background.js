@@ -15,6 +15,19 @@ function safeStorageSet(obj) {
   chrome.storage.local.set(obj);
 }
 
+// === Session storage for metrics (P.3: Storage separation) ===
+// chrome.storage.session has no meaningful quota and auto-cleans on session end
+// Metrics (PERSISTENT_METRICS_KEY) use session — UI settings (CAPTURING_KEY, DROP_COUNT_KEY) stay in local
+function safeStorageSessionGet(keys, callback) {
+  if (!chrome.storage?.session) return;
+  chrome.storage.session.get(keys, callback);
+}
+
+function safeStorageSessionSet(obj) {
+  if (!chrome.storage?.session) return;
+  chrome.storage.session.set(obj);
+}
+
 // Safe chrome.runtime.sendMessage wrapper
 function safeSendMessage(msg, callback) {
   if (!chrome.runtime?.id) {
@@ -137,12 +150,13 @@ function throttledPersistMetrics(data) {
   appendToSessionDB(data);
   
   // Throttle: only one flush per interval
+  // P.3: Use chrome.storage.session for metrics (no quota limits, auto-cleans on session end)
   if (_storageWriteTimer) return;
   _storageWriteTimer = setTimeout(() => {
     _storageWriteTimer = null;
     if (ringBuffer.length > 0) {
       // Atomic save: direct set, no read-before-write
-      safeStorageSet({ [PERSISTENT_METRICS_KEY]: ringBuffer });
+      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: ringBuffer });
       ringBuffer = []; // Clear after successful save
     }
   }, STORAGE_FLUSH_INTERVAL_MS);
@@ -302,7 +316,7 @@ chrome.runtime.onConnect.addListener((port) => {
       log.debug('Discarding stale metrics queue:', metricsQueue.length);
       metricsQueue = [];
     }
-    safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] });
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     log.info('Popup reconnected, queues cleared');
     
     // Replay last metrics from persistent queue for instant snapshot
@@ -432,7 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     offscreenReady = false;
     metricsQueue = [];
     persistentMetricsQueue = [];
-    safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] });
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     sendResponse({ ok: true });
     return false;
   }
@@ -443,7 +457,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         isCapturing = false;
         persistCapturing();
         metricsQueue = []; // Clear in-memory queue on stop
-        safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear storage queue
+        safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
         
         // Notify content script to hide overlay using saved tabId (popup may be focused)
         const tabId = _capturedTabId;
@@ -459,7 +473,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       isCapturing = false;
       persistCapturing();
       metricsQueue = []; // Clear in-memory queue on stop
-      safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear storage queue
+      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
       // Note: popupPort is cleared by popupPortDisconnectHandler
       // Notify content script to hide overlay (silent)
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -580,7 +594,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Also clear any lingering queues (including persistent replay buffer)
     metricsQueue = [];
     persistentMetricsQueue = [];
-    safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] });
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     // Notify content script to hide overlay (silent)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs.length > 0) {
@@ -659,11 +673,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     offscreenReady = false;
     metricsQueue = [];
     persistentMetricsQueue = [];
+    // P.3: UI settings stay in local, metrics move to session
     safeStorageSet({ 
       [CAPTURING_KEY]: false,
-      [PERSISTENT_METRICS_KEY]: [],
       [DROP_COUNT_KEY]: 0
     });
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     sendResponse({ ok: true });
     return false;
   }
