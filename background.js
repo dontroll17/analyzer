@@ -18,19 +18,25 @@ function safeStorageSet(obj) {
 // Safe chrome.runtime.sendMessage wrapper
 function safeSendMessage(msg, callback) {
   if (!chrome.runtime?.id) {
+    log.warn('safeSendMessage: no runtime.id, message not sent:', msg.type);
     if (callback) callback(null);
     return;
   }
+  log.info('safeSendMessage:', msg.type);
   chrome.runtime.sendMessage(msg, (response) => {
     // Always consume lastError to prevent console spam
     void chrome.runtime.lastError;
     if (callback) callback(response);
+    if (msg.type === '_OFFSCREEN_START') {
+      log.info('OFFSCREEN_START response:', response?.ok ? 'ok' : response?.error);
+    }
   });
 }
 
 let offscreenReady = false;
 let isCapturing = false;
 let popupPort = null;
+let _capturedTabId = null; // Track active tab for overlay show/hide
 let _lastMetricsSnapshot = null; // Cache latest metrics for instant replay on reconnect
 let overlayPort = null;
 let metricsQueue = []; // In-memory buffer (drained on reconnect)
@@ -357,66 +363,59 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {
-    log.warn('START_CAPTURE received from popup, captureSource:', message.captureSource);
-    if (!canUseOffscreen()) {
-      log.error('Offscreen API not available');
-      sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
-      return true;
-    }
-    
-    const captureSource = message.captureSource || 'tab';
-    
-    // Helper: inject content.js and show overlay (Phase 4.2)
-    async function showOverlayOnActiveTab() {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs.length === 0) return;
-      const tab = tabs[0];
-      if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) return;
-      
-      try {
-        // Inject content.js if not already loaded
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content.js']
-        });
-        log.info('content.js injected into tab', tab.id);
-      } catch (e) {
-        log.warn('Failed to inject content.js into tab', tab.id, ':', e.message);
+    try {
+      log.info('START_CAPTURE: checking canUseOffscreen...');
+      if (!canUseOffscreen()) {
+        log.error('Offscreen API not available');
+        sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
+        return true;
       }
       
-      // Send show overlay message after injection
-      try {
-        await chrome.tabs.sendMessage(tab.id, { type: '_SSA_SHOW_OVERLAY' });
-        log.info('Show overlay signal sent to tab', tab.id);
-      } catch (e) {
-        log.warn('Failed to send show overlay to tab', tab.id, ':', e.message);
-      }
-    }
-    
-    async function handleStartResponse(response) {
-      isCapturing = !!response?.ok;
+      // Set capturing immediately to prevent metrics drop during offscreen startup (~100ms)
+      log.info('START_CAPTURE: setting isCapturing=true');
+      isCapturing = true;
       persistCapturing();
-      log.info('START_CAPTURE response:', response?.ok ? 'ok' : response?.error);
-      if (isCapturing) {
-        await showOverlayOnActiveTab();
+      log.info('START_CAPTURE: persistCapturing done');
+      
+      const captureSource = message.captureSource || 'tab';
+      log.info('START_CAPTURE: captureSource=', captureSource);
+      
+      // Overlay is shown by popup.js with the correct capturedTabId
+      // background.js doesn't know the captured tab because popup is active when START_CAPTURE is called
+      async function handleStartResponse(response) {
+        // isCapturing already set above; only log response
+        log.warn('START_CAPTURE response:', response?.ok ? 'ok' : response?.error);
+        sendResponse(response);
       }
-      sendResponse(response);
-    }
-    
-    // Reset stale state if offscreen context was invalidated
-    offscreenReady = false;
-    
-    if (offscreenReady) {
-      safeSendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
-    } else {
-      // Try to create offscreen document — keep SW alive with async operation
-      createOffscreenDocument().then((success) => {
-        if (success) {
-          safeSendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
-        } else {
+      
+      // Reset stale state if offscreen context was invalidated
+      offscreenReady = false;
+      log.info('START_CAPTURE: creating offscreen document...');
+      
+      // Make async to prevent SW sleep during createDocument
+    (async () => {
+      if (!offscreenReady) {
+        log.info('START_CAPTURE: calling createOffscreenDocument...');
+        const success = await createOffscreenDocument();
+        log.info('createOffscreenDocument result:', success);
+        if (!success) {
+          log.error('createOffscreenDocument failed, sending error to popup');
           sendResponse({ ok: false, error: 'Failed to create offscreen document' });
+          return;
         }
-      });
+      }
+      
+      // Save capturedTabId for overlay hide later (passed by popup)
+      _capturedTabId = message.capturedTabId || null;
+      
+      log.info('START_CAPTURE: sending _OFFSCREEN_START to offscreen');
+      safeSendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
+    })();
+      
+      // Return true to keep channel open for async response
+    } catch (e) {
+      log.error('START_CAPTURE error:', e.message, e.stack);
+      sendResponse({ ok: false, error: e.message });
     }
     return true;
   }
@@ -445,14 +444,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         persistCapturing();
         metricsQueue = []; // Clear in-memory queue on stop
         safeStorageSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear storage queue
-        // Notify content script to hide overlay (silent)
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {
-              void chrome.runtime.lastError;
-            });
-          }
-        });
+        
+        // Notify content script to hide overlay using saved tabId (popup may be focused)
+        const tabId = _capturedTabId;
+        if (tabId) {
+          chrome.tabs.sendMessage(tabId, { type: '_SSA_HIDE_OVERLAY' }, () => {
+            // Silently ignore errors — tab may be closed/invalid
+          });
+        }
+        
         sendResponse(response);
       });
     } else {
@@ -465,7 +465,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs.length > 0) {
           chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {
-            void chrome.runtime.lastError;
+            // Silently ignore — tab may be closed/invalid
           });
         }
       });
@@ -480,16 +480,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     // Cache latest metrics for instant replay on popup reconnect
     _lastMetricsSnapshot = d;
-    
-    // Debug: log first 10 metrics frames
-    if (!_bgMetricsRecv) {
-      log.info('FIRST _OFFSCREEN_METRICS received, isCapturing=' + isCapturing);
-    }
     _bgMetricsRecv++;
     
     // Only queue/metrics forward if capture is active
     if (!isCapturing) {
-      log.warn('Dropping metrics: isCapturing=false (count=' + _bgMetricsRecv + ')');
       sendResponse({ ok: true });
       return false;
     }
@@ -537,19 +531,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         log.warn('Failed to forward metrics to overlay:', e.message);
       }
-      // Debug: log first forwarded metrics
-      if (_bgMetricsRecv <= 10) {
-        log.info('Forwarded metrics to overlay (count=' + _bgMetricsRecv + ')');
-      }
-    } else if (_bgMetricsRecv <= 10) {
-      log.warn('overlayPort is NULL — metrics not forwarded to content.js!');
     }
     sendResponse({ ok: true });
     return false;
   }
   
   if (message.type === 'GET_CAPTURE_STATUS') {
-    log.info('GET_CAPTURE_STATUS: isCapturing=' + isCapturing + ', offscreenReady=' + offscreenReady);
     sendResponse({ isCapturing });
     return false;
   }
@@ -598,7 +585,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs.length > 0) {
         chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {
-          void chrome.runtime.lastError;
+          // Silently ignore — tab may be closed/invalid
         });
       }
     });

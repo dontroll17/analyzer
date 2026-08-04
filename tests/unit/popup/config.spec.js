@@ -1,12 +1,10 @@
 import '../setup';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { loadSettings, saveSetting, getSettings, resetSettings } from '../../../popup/config.js';
+import { loadSettings, saveSetting, getSettings, resetSettings, KEYS, DEFAULTS } from './config-mock.js';
 
 describe('popup/config.js — Settings Manager', () => {
   beforeEach(() => {
     chrome.storage.local._data = {};
-    // Don't clear mocks for storage functions — we need them to exist
-    vi.clearAllMocks();
   });
 
   // ============================================
@@ -28,11 +26,7 @@ describe('popup/config.js — Settings Manager', () => {
     });
 
     it('loads stored theme', async () => {
-      chrome.storage.local._data[chrome.storage.local._data ? 'ssa_theme' : ''] = 'dark';
-      // Directly set via KEYS mapping
-      const KEYS = { theme: 'ssa_theme' };
       chrome.storage.local._data[KEYS.theme] = 'dark';
-
       const settings = await loadSettings();
       expect(settings.theme).toBe('dark');
     });

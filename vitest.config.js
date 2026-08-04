@@ -51,4 +51,7 @@ export default defineConfig({
       },
     },
   },
+  optimizeDeps: {
+    include: ['popup/config.js'],
+  },
 });

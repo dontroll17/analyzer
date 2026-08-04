@@ -2,37 +2,62 @@
 
 > Расширение Chrome (Manifest V3) для анализа аудиопотока в реальном времени и обнаружения аномалий генеративных аудиосистем.
 
+**🚀 MVP Release v1.6.0** (2026-08-04) — AI Detection MVP complete. 826 unit tests, 56 E2E tests, 10 Sprint releases.
+
 ## Возможности
 
+### Audio Capture & Analysis
 | Модуль | Описание | Статус |
 |--------|----------|--------|
-| **Захват аудио** | Перехват звука активной вкладки через `getDisplayMedia` в offscreen-документе | ✅ Реализовано |
-| **RMS анализ** | Расчёт энергии сигнала в реальном времени через AudioWorklet | ✅ Реализовано |
-| **Пиковый RMS** | Отслеживание пикового значения RMS | ✅ Реализовано |
-| **Спектральный анализ** | Radix-2 Cooley-Tukey FFT (1024 точки, 512 бинов Nyquist, Hanning window) → 3 частотных диапазона | ✅ Реализовано |
-| **Детектор глитча** | Обнаружение ВЧ-аномалий с state machine, debounce и счётчиком | ✅ Реализовано |
-| **Осциллограф** | Визуализация волны в реальном времени (2 канала L/R, Canvas) | ✅ Реализовано |
-| **Glitch Timeline** | Canvas-график состояния глитч-детектора во времени | ✅ Реализовано |
-| **Экспорт данных** | Сохранение осциллограммы в CSV (1024 сэмпла, 2 канала) | ✅ Реализовано |
-| **Чувствительность** | Настройка порогов детектора глитча через UI (слайдер 60–90%, persist в storage) | ✅ Реализовано |
-| **Экспорт лога** | Сохранение лога глитчей в JSON (FIFO, max 500 записей) | ✅ Реализовано |
-| **Sensation State** | Визуальный индикатор (STABLE / DRIFT / GLITCH) с цветным кружком | ✅ Реализовано |
-| **Спектральная энтропия** | Анализ равномерности распределения энергии по 4 спектральным полосам | ✅ Реализовано |
-| **Спектральная плоскостность** | Detection spectral flatness —区分 тонального и шумоподобного сигнала | ✅ Реализовано |
-| **Stereo разделение** | Отдельные L/R буферы, метрики и осциллограф для каждого канала | ✅ Реализовано |
-| **Тёмная/светлая тема** | CSS custom properties, persist в storage, автодетект системной темы | ✅ Реализовано |
-| **Waveform throttle** | Передача waveform с частотой ~10 Hz для снижения нагрузки | ✅ Реализовано |
-| **Осциллограф: Freeze** | Блокировка обновления осциллографа (toggle) | ✅ Реализовано |
-| **Осциллограф: Zoom** | Масштабирование 256 сэмплов (toggle) | ✅ Реализовано |
-| **Осциллограф: Log Scale** | Логарифмическая шкала Y-axis (toggle) | ✅ Реализовано |
-| **Осциллограф: Clear** | Очистка буферов + сброс freeze | ✅ Реализовано |
-| **Glitch Heatmap** | Canvas visualisation glitch frequency over time (X=time, Y=bands) | ✅ Реализовано |
-| **Multiple capture sources** | Tab Audio / Mic Audio / Tab + Mic (combined) | ✅ Реализовано |
-| **Overlay widget** | Draggable Canvas поверх страницы (content.js), position persistence | ✅ Реализовано |
-| **Performance Monitor** | FPS, Draw time, Queue length, Memory, Alerts (toggle) | ✅ Реализовано |
-| **Audio Effects** | Compressor, Parametric EQ (HPF/LPF/Peaking), Limiter, Delay — toggle + controls | ✅ Реализовано |
-| **Extended DSP Metrics** | HNR, ZCR, Spectral Centroid/Rolloff, Onset Detection, Dynamic Range, Glitch Rate, Band Ratios | ✅ Реализовано |
-| **Side Panel UI** | Полная миграция с popup на side panel (Chrome 114+) | ✅ Реализовано |
+| **Захват аудио** | `getDisplayMedia` в offscreen-документе | ✅ |
+| **RMS + Peak** | Энергия сигнала в реальном времени | ✅ |
+| **Спектральный анализ** | FFT-1024, Hanning window, 3 диапазона (Bass/Mid/Treble) | ✅ |
+| **Stereo L/R** | Отдельные буферы и метрики для каждого канала | ✅ |
+| **Multiple sources** | Tab Audio / Mic Audio / Tab + Mic | ✅ |
+
+### AI Detection (MVP 🆕)
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **MFCC extraction** | 13 коэффициентов + temporal stats | ✅ |
+| **aiScore** | Logistic Regression (88% accuracy on test set) | ✅ |
+
+### Glitch Detection
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Детектор глитча** | ВЧ-аномалии, state machine (STABLE→DRIFT→GLITCH), debounce | ✅ |
+| **Glitch Timeline** | График состояния во времени | ✅ |
+| **Glitch Heatmap** | Частота глитчей по_band_ам (X=time, Y=bands) | ✅ |
+| **Sensation State** | Цветной индикатор: 🟢 STABLE / 🟠 DRIFT / 🔴 GLITCH | ✅ |
+
+### DSP Metrics
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Entropy + Flatness** | Шеннон энтропия, spectral flatness (Wiener) | ✅ |
+| **Extended** | HNR, ZCR, Centroid, Rolloff, Onset, Dynamic Range, Band Ratios, Glitch Rate | ✅ |
+
+### UI & Visualization
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Осциллограф** | 2 канала L/R, Freeze/Zoom/LogScale/Clear | ✅ |
+| **Overlay widget** | Draggable Canvas поверх страницы | ✅ |
+| **Side Panel UI** | Chrome 114+ (popup deprecated) | ✅ |
+| **Темы** | Dark / Light / Neon, автодетект системной темы | ✅ |
+| **Performance Monitor** | FPS, Draw time, Memory, Alerts | ✅ |
+
+### Effects Chain
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Compressor** | threshold/ratio/knee/attack/release | ✅ |
+| **Parametric EQ** | HPF / LPF / Peaking | ✅ |
+| **Limiter** | WaveShaper soft clipping | ✅ |
+| **Delay** | time/feedback/mix (AudioWorkletProcessor) | ✅ |
+
+### Export & Logging
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **CSV Export** | Осциллограмма (1024 сэмпла, 2 канала) | ✅ |
+| **JSON Log** | Глитчи FIFO (max 500 записей) | ✅ |
+| **Centralized logging** | logger.js с level filtering | ✅ |
 
 ---
 
@@ -90,6 +115,7 @@
 - **Performance Monitor** — FPS, Draw time, Latency, DSP time, Drops, Memory, Alerts
 - **Audio Effects** — Compressor (threshold/ratio/knee/attack/release), Parametric EQ (HPF/LPF/Peaking), Limiter (threshold), Delay (time/feedback/mix) — toggle + 13 sliders
 - **Extended Metrics** — HNR, ZCR, Spectral Centroid/Rolloff, Onset, Dynamic Range, Band Ratios, Glitch Rate
+- **AI Score** — 0-100 индикатор AI-генерации (color-coded: cyan/yellow/red)
 - **Logs Panel** — Filter (all/error/warn/info/debug), Clear, Export, Real-time streaming
 
 ---
@@ -112,6 +138,7 @@
 | **Channel Indicator** | STEREO для многоканального ввода, MONO для одноканального |
 | **Overlay widget** | Появляется поверх страницы при активном захвате |
 | **Glitch Timeline** | Отображает RMS и состояние (STABLE/DRIFT/GLITCH) во времени |
+| **AI Score** | 0-100: низкий = естественный звук, высокий = возможная AI-генерация |
 
 ---
 
@@ -291,12 +318,14 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
+- ✅ AI Detection MVP (Logistic Regression, 88% accuracy)
 - ✅ Overlay widget поверх страницы (draggable, position persistent)
 - ✅ Side Panel UI (не закрывается при клике вне)
 - ⚠️ При добавлении/изменении permissions в manifest.json нужно **полностью удалить** расширение (`chrome://extensions` → 🗑️) и загрузить заново. Простое "перезагрузить" не обновит permissions.
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
 - ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии side panel (mitigated via setTimeout fallback)
 - ⚠️ Service Worker termination: capture может прерваться после 30s–5min idle (mitigated via keepalive alarm)
+- ⚠️ AI Score — rule-based + lightweight ML (не production-grade detector, нужен v2 с expanded training data)
 
 ### Troubleshooting: Overlay widget
 
@@ -322,6 +351,32 @@
 ---
 
 ## Changelog
+
+### v1.6.0-MVP (2026-08-04) — 🚀 AI Detection MVP Release
+
+**AI Detection Pipeline:**
+- ✅ MFCC extraction (13 coefficients) в AudioWorklet с temporal stats (mean/stddev over 100-frame window)
+- ✅ `aiScore` (0-100) — Logistic Regression с SGD (1000 epochs, ~88% test accuracy)
+- ✅ 17-фича вектор: MFCC[0:4] + MFCC_std[0:4] + highFreqAnomaly + ZCR + entropy + flatness + HNR + onset
+- ✅ UI: color-coded score bar (cyan/yellow/red) в popup, "AI:" метрика в overlay
+- ✅ JS inference engine (`ai-detector.js`) — zero dependencies, bundle weights (`ai-model-weights.json`)
+- ✅ Python training script (`scripts/ml/train_ai_detector.py`) — numpy-free
+- ✅ 34 новых unit теста (15 MFCC + 19 AI detector)
+
+**Infrastructure:**
+- ✅ 826 unit tests (24 файла), 56 E2E Playwright тестов
+- ✅ Coverage: ~93.7%
+- ✅ Scheduler pipeline: Health Score 100/100 EXCELLENT
+- ✅ Chrome Extension API validator (41 вызовов, 40% coverage)
+
+**Sprint Releases Summary:**
+- Sprint 1-6: Core DSP, FFT, overlay, effects, validation
+- Sprint 7: Scheduler & Test Agent
+- Sprint 8: Chrome Extension API Tests (58 тестов)
+- Sprint 9: Vector Expansion (coverage + E2E hardening + docs)
+- Sprint 10: AI Detection MVP
+
+---
 
 ### v1.5.0 (2026-08-02) — Scheduler, API Tests, Side Panel Migration
 
@@ -442,7 +497,7 @@
 
 Полный список задач с деталями: [TASKS.md](TASKS.md)
 
-> **Sprint 9 (текущий):** Coverage expansion, E2E hardening, Documentation refresh, AI Detection MVP
+> **Все спринты завершены:** 10 релизов, MVP v1.6.0 (AI Detection) complete
 
 ### Sprint 1-5
 - Все задачи выполнены — см. [TASKS.md](TASKS.md)
@@ -460,17 +515,25 @@
 - popup-testable.js extracted pure functions
 - Chrome API call detector (validate.js)
 
-### Sprint 9 — Vector Expansion 🆕
-- Coverage expansion: 4 → 8+ файлов
-- E2E hardening: 11 → 44+ тестов (Playwright UI)
-- Documentation refresh (current)
-- AI Detection MVP (rule-based score)
+### Sprint 9 — Vector Expansion ✅
+- ✅ Coverage expansion: 4 → 8+ файлов
+- ✅ E2E hardening: 11 → 56 тестов (Playwright UI)
+- ✅ Documentation refresh (README, GIGACODE, TASKS)
+- ✅ Coverage 93.7%, Health Score 100/100
 
-### Backlog
+### Sprint 10 — AI Detection MVP ✅ 🚀
+- ✅ MFCC extraction + temporal stats
+- ✅ Logistic Regression AI Detection (88% accuracy)
+- ✅ JS inference engine (zero dependencies)
+- ✅ 34 новых unit теста
+- ✅ **MVP Release v1.6.0**
+
+### Post-MVP Backlog
 - ⏳ Web MIDI export (blocked — popup API limitation)
 - ⏳ Session export (JSON/WAV)
 - ⏳ History viewer (replay past sessions)
-- ⏳ AI Detection v2 (ML classifier, training pipeline)
+- ⏳ AI Detection v2: retraining pipeline, expanded training data
+- ⏳ Offline mode (graceful degradation without Service Worker)
 
 ---
 
@@ -483,4 +546,4 @@
 
 ---
 
-**Версия:** 1.5.0  |  **Дата:** 2026-08-02  |  **Статус:** Sprint 9 — Vector Expansion (Scheduler 100/100)
+**Версия:** 1.6.0-MVP  |  **Дата:** 2026-08-04  |  **Статус:** 🚀 AI Detection MVP Complete (826 unit tests, 56 E2E)

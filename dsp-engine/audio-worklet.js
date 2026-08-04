@@ -723,9 +723,17 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   process(inputs, outputs, parameters) {
+    const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
+    
+    // Debug: log actual frame count per channel
+    if (!this._processCount) this._processCount = 0;
+    this._processCount++;
+    if (this._processCount === 1 || this._processCount === 100 || this._processCount % 500 === 0) {
+      // Debug logging removed for production
+    }
+    
     const input = inputs[0];
     const output = outputs[0];
-    const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
     
     // === DEFENSIVE GUARDS ===
     // Guard 1: If input is missing or empty, passthrough + return (no metrics this block)
@@ -829,7 +837,9 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     this.waveformFrameCounter++;
     
     // Skip warmup frames — buffers empty, metrics are garbage (Infinity, 0)
-    if (this.frameCount <= this.warmupFrames) return;
+    if (this.frameCount <= this.warmupFrames) {
+      return;
+    }
     
     // V4: declare aiScore variables hoisted via var
     var aiScore = 0, mfccTop4 = [], mfccStdTop4 = [];
@@ -911,6 +921,7 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     let hnr = 0;
     const buffer = leftData ? this.waveformLeft : this.waveformRight;
     hnr = this.calculateHNR(buffer);
+    if (!Number.isFinite(hnr)) hnr = 0;
     
     // C.2.8: Dynamic Range (Peak - RMS in dB)
     const peakdB = peakRMS > 0 ? 20 * Math.log10(peakRMS) : -Infinity;

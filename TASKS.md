@@ -2,6 +2,8 @@
 
 Единый трекинг задач проекта. Подробнее в [README.md](README.md).
 
+> **🚀 MVP Release v1.6.0** (2026-08-04): AI Detection MVP complete. 826 unit tests, 56 E2E tests. Full project status below.
+
 ---
 
 ## Sprint 1 — Done ✅
@@ -49,25 +51,37 @@
 
 ## Backlog — Pending ⏳
 
+### P0 — High Priority
 | # | Задача | Статус | Приоритет |
 |---|--------|--------|-----------|
 | B.1 | Web MIDI export (side panel → needs background worker or standalone page) | ⏳ Blocked | Medium |
+
+### P1 — Medium Priority
+| # | Задача | Статус | Приоритет |
+|---|--------|--------|-----------|
 | B.2 | Testing on AI generators (Suno, Udio, ElevenLabs) | ⏳ Deferred | Medium |
+
+### P2 — Low Priority
+| # | Задача | Статус | Приоритет |
+|---|--------|--------|-----------|
+| B.3 | Post-MVP: AI Detection v2 (ML classifier retraining pipeline) | ⏳ Pending | Low |
 | B.4 | Session export: capture session as JSON/WAV | ⏳ Pending | Low |
 | B.5 | History viewer: replay past sessions from chrome.storage | ⏳ Pending | Low |
 | B.6 | Offline mode: work without SW (graceful degradation) | ⏳ Pending | Low |
 
 ---
 
-## Bugs
+## Bugs — Fixed ✅
 
 | # | Описание | Статус |
 |---|----------|--------|
 | Bug-1 | MAX_SAFE_LOGS undefined → ReferenceError (offscreen.js:42) | ✅ Fixed |
 | Bug-2 | AudioWorklet console.log not using logger | ✅ Fixed |
-| Bug-3 | `isPinned` ReferenceError — TDZ in content.js (let declared after handler usage) | ✅ Fixed |
-| Bug-4 | Duplicate `fill(0)` calls in popup.js `stopAudioProcessing()` | ✅ Fixed |
-| Bug-5 | `METRICS_THROTTLE_MS = 0` — unthrottled metrics at ~43fps | ✅ Fixed |
+| Bug-3 | `isPinned` ReferenceError — TDZ in content.js | ✅ Fixed |
+| Bug-4 | Duplicate `fill(0)` calls in `stopAudioProcessing()` | ✅ Fixed |
+| Bug-5 | `METRICS_THROTTLE_MS = 0` — unthrottled metrics | ✅ Fixed |
+| Bug-6 | `targetTab` invalid in MV3 `getMediaStreamId()` | ✅ Fixed |
+| Bug-NEW | `chrome.tabCapture.getMediaId()` — method doesn't exist | ✅ Fixed |
 
 ---
 
@@ -362,38 +376,59 @@ scripts/scheduler/reports/last-run.md        # Markdown summary
 | V3: Documentation | 11/11 ✅ | N/A |
 | **Total Sprint 9** | **18/18** | **184 new tests + docs** |
 
-### Sprint 10 — AI Detection MVP (Phase 1) 🆕
+### Sprint 10 — AI Detection MVP 🆕 ✅
 
-| # | Task | Status | Tests Added |
-|---|------|--------|-------------|
-| V4.1 | MFCC extraction (13 coefficients) in audio-worklet.js | ✅ Done | — |
-| V4.2 | Temporal stats (mean/stddev over 100-frame window) | ✅ Done | — |
-| V4.3 | Rule-based aiScore computation (0-100) | ✅ Done | — |
-| V4.4 | UI display: overlay + popup + aiScore bar | ✅ Done | — |
-| V4.5 | Python ML model training (Logistic Regression, SGD) | ✅ Done | — |
-| V4.6 | Bundle model weights + JS inference engine + tests | ✅ Done | +19 |
+> **MVP Release v1.6.0** — 2026-08-04
 
-**V4 Summary:** 15 new MFCC tests + 19 AI detector tests = **34 new unit tests**
+| # | Task | Status | Tests | Priority |
+|---|------|--------|-------|----------|
+| V4.1 | MFCC extraction (13 coefficients) in audio-worklet.js | ✅ Done | — | 🔴 High |
+| V4.2 | Temporal stats (mean/stddev over 100-frame window) | ✅ Done | — | 🟠 High |
+| V4.3 | Rule-based aiScore computation (0-100) | ✅ Done | — | 🟡 Medium |
+| V4.4 | UI display: overlay + popup + aiScore bar | ✅ Done | — | 🟡 Medium |
+| V4.5 | Python ML model training (Logistic Regression, SGD) | ✅ Done | — | 🔴 High |
+| V4.6 | Bundle model weights + JS inference engine + tests | ✅ Done | +19 | 🟡 Medium |
 
-### New Artifacts
-- `dsp-engine/ai-detector.js` — JS inference engine (zero dependencies)
-- `dsp-engine/ai-model-weights.json` — bundled model weights
-- `scripts/ml/train_ai_detector.py` — Python training script (numpy-free)
-- `tests/unit/dsp/ai-detector.spec.js` — 19 tests for inference engine
-
-### Feature Details
-- **17 features**: MFCC[0:4] + MFCC_std[0:4] + highFreqAnomaly + ZCR + entropy + flatness + HNR + onset
+**Summary:**
+- **New files**: `ai-detector.js` (JS inference), `ai-model-weights.json` (model weights), `train_ai_detector.py` (training)
+- **Tests**: +34 unit tests (15 MFCC + 19 AI detector)
+- **Features**: 17-dimensional feature vector (MFCC[0:4] + MFCC_std[0:4] + highFreqAnomaly + ZCR + entropy + flatness + HNR + onset)
 - **Pipeline**: FFT → Mel filter bank → Log → DCT → MFCC → temporal stats → aiScore
-- **Model**: Logistic Regression with SGD (1000 epochs, test accuracy ~88%)
+- **Model**: Logistic Regression with SGD (1000 epochs, ~88% test accuracy)
 - **UI**: Color-coded score bar (cyan/yellow/red) in popup, "AI:" metric in overlay
 
-### V4: AI Detection MVP ✅
+---
 
-| # | Task | Status | Priority |
-|---|------|--------|----------|
-| V4.1 | Add MFCC (13 coefficients) to audio-worklet.js | ✅ Done | 🔴 High |
-| V4.2 | Add temporal statistics (stddev/mean over 100-frame window) | ✅ Done | 🟠 High |
-| V4.3 | Rule-based `aiScore` implementation | ✅ Done | 🟡 Medium |
-| V4.4 | UI display for AI score in side panel + overlay | ✅ Done | 🟡 Medium |
-| V4.5 | Train Logistic Regression model (offline, Python) | ✅ Done | 🔴 High |
-| V4.6 | Bundle model weights JSON in extension + tests | ✅ Done | 🟡 Medium |
+## Sprint Summary
+
+| Sprint | Focus | Tasks | Tests Added |
+|--------|-------|-------|-------------|
+| 1 | Overlay widget, Performance, Oscilloscope options | 6 | — |
+| 2 | FFT, RMS tests, Heatmap, Capture sources | 7 | 33 |
+| 3 | Logging, Profiling, Task tracking | 8 | — |
+| 4 | Effects routing, Extended DSP metrics, Overlay modes | 30+ | — |
+| 5 | Bug fixes, Validation automation | 7 | — |
+| 6 | Coverage gaps, CI pipeline | 2 | — |
+| 7 | Scheduler & Test Agent | 8 | — |
+| 8 | Chrome Extension API Tests | 7 | 58 |
+| 9 | Vector Expansion (coverage, E2E, docs) | 18 | 184 |
+| 10 | AI Detection MVP | 6 | 34 |
+| **Total** | | **8 sprint releases** | **314+ tests** |
+
+---
+
+## Final Project Stats
+
+| Metric | Value |
+|--------|-------|
+| **Unit Tests** | 826 total (across 24 test files) |
+| **E2E Tests** | 56 Playwright tests |
+| **Coverage** | ~93.7% (current target) |
+| **Files Tested** | popup.js, config.js, background.js, content.js, audio-worklet.js, offscreen.js, + 15 more |
+| **Chrome APIs** | 41 calls tracked, ~40% covered (pure functions + fault injection) |
+| **DSP Metrics** | RMS, Peak, Bands (B/M/T), HF Anomaly, Entropy, Flatness, Glitch State, Waveform, ZCR, HNR, Centroid, Rolloff, Onset, Dynamic Range, Glitch Rate, Band Ratios, MFCC(13), aiScore |
+| **Audio Effects** | Compressor, Limiter, HPF, LPF, Peaking EQ, Delay (all bypassed by default) |
+
+---
+
+## Backlog — Pending ⏳

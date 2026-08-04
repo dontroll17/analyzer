@@ -14,6 +14,8 @@ let captureActive = false;
 let gracefulStop = false;
 let isConnected = false;
 let bgPortReconnectTimer = null; // Debounce timer for reconnect
+let currentCaptureSource = 'tab'; // Track for unmute on stop
+let capturedTabId = null; // Track tab that was muted
 
 // Storage key for persisting drop count across popup reconnects
 const DROP_COUNT_KEY = 'ssa_audio_drop_count';
@@ -579,8 +581,7 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
         // Throttle to ~15fps (canvas is expensive — 30fps causes hangs)
         const now = perfNow();
         if (now - lastOscDrawTime < 66 && lastOscDrawTime > 0) {
-          // Skip draw but update buffer for next frame
-          // Buffer is already Float32Array — no copy overhead
+          // Skip draw — keep pendingOscDraw for next draw so we don't stale
         } else {
           lastOscDrawTime = now;
           if (perfActive) {
@@ -589,8 +590,6 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
             drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
           }
         }
-        // CRITICAL: Release reference to prevent memory leaks
-        pendingOscDraw = null;
       }
       
       if (pendingTimelineDraw) {
@@ -951,7 +950,7 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = 
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
-  // No waveform data — skip
+  // No waveform data and not hold — don't clear canvas, just skip
   if (!waveform || waveform.length === 0) return;
   
   if (frozen) {
@@ -1015,7 +1014,7 @@ function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness, h
   if (newMetricsSection) {
     newMetricsSection.style.display = 'block';
   }
-  if (hnrValue && hnr !== undefined && hnr !== 0) {
+  if (hnrValue && hnr !== undefined && Number.isFinite(hnr) && hnr !== 0) {
     hnrValue.textContent = hnr.toFixed(1) + ' dB';
   }
   if (zcrValue && zcr !== undefined) {
@@ -1825,6 +1824,9 @@ function ensureBackgroundPort() {
         
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) {
+          if (metricsRecvCount <= 5) {
+            log.warn('Metrics dropped: captureActive=false (count=' + metricsRecvCount + ')');
+          }
           return;
         }
         
@@ -1839,9 +1841,11 @@ function ensureBackgroundPort() {
         }
         metricsQueueDepth++;
         
-        // Throttle: skip if called faster than 15fps
+        // Throttle: skip if called faster than 15fps (33ms interval)
+        // EXCEPT: never throttle waveform frames — oscilloscope needs smooth updates
         const now = Date.now();
-        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) {
+        const hasWaveform = data.waveform && data.waveform.length > 0 && !data.waveformHold;
+        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS && !hasWaveform) {
           metricsDroppedThrottle++;
           metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
           return;
@@ -1980,30 +1984,88 @@ startBtn.addEventListener('click', async () => {
   heatmapActive = true;
 
   const captureSource = captureSourceSelect?.value || 'tab';
+  currentCaptureSource = captureSource;
 
-  connectToBackground();
-  safeSendMessage({
-    type: 'START_CAPTURE',
-    captureSource: captureSource
-  }, response => {
-    if (response?.ok) {
-      updateUI(true);
-      // Show overlay in active tab
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs.length > 0 && tabs[0].url && !tabs[0].url.startsWith('chrome://')) {
-          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }, () => {});
-        }
-      });
-    } else {
-      log.error('Capture failed:', response?.error);
-      alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+  // Popup is its own window. Need to find the active tab from the main browser window.
+  // chrome.windows.getLastFocused() returns the main window when called from a popup.
+  chrome.windows.getLastFocused({ populate: true }, (win) => {
+    if (!win || !win.tabs || win.tabs.length === 0) {
+      log.error('No tabs in last focused window');
       captureActive = false;
       heatmapActive = false;
       if (startBtn) {
         startBtn.textContent = 'Start Capture';
         startBtn.disabled = false;
       }
+      return;
     }
+    
+    const activeTab = win.tabs.find(t => t.active);
+    if (!activeTab) {
+      log.error('No active tab in last focused window');
+      captureActive = false;
+      heatmapActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+      return;
+    }
+    
+    if (activeTab.url?.startsWith('chrome://') || activeTab.url?.startsWith('chrome-extension://')) {
+      log.warn('Active tab is internal: ' + activeTab.url);
+      captureActive = false;
+      heatmapActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+      return;
+    }
+    
+    capturedTabId = activeTab.id;
+    log.info('Target tab:', capturedTabId, activeTab.title?.substring(0, 50), activeTab.url?.substring(0, 80));
+
+    // Mute active tab when capturing tab audio (prevents double sound)
+    if (captureSource === 'tab') {
+      chrome.tabs.update(capturedTabId, { muted: true }, (tab) => {
+        if (chrome.runtime.lastError) {
+          log.warn('Failed to mute tab:', chrome.runtime.lastError.message);
+        } else {
+          log.info('Tab muted:', capturedTabId);
+        }
+      });
+    }
+
+    connectToBackground();
+    safeSendMessage({
+      type: 'START_CAPTURE',
+      captureSource: captureSource,
+      capturedTabId: capturedTabId
+    }, response => {
+      if (response?.ok) {
+        updateUI(true);
+        // Show overlay in active tab
+        chrome.tabs.sendMessage(capturedTabId, { type: '_SSA_SHOW_OVERLAY' }, () => {
+          if (chrome.runtime.lastError) {
+            log.warn('Failed to show overlay in tab:', capturedTabId);
+          }
+        });
+      } else {
+        log.error('Capture failed:', response?.error);
+        alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+        captureActive = false;
+        heatmapActive = false;
+        // Unmute on failure
+        if (captureSource === 'tab') {
+          chrome.tabs.update(capturedTabId, { muted: false });
+        }
+        if (startBtn) {
+          startBtn.textContent = 'Start Capture';
+          startBtn.disabled = false;
+        }
+      }
+    });
   });
 });
 
@@ -2016,7 +2078,18 @@ stopBtn.addEventListener('click', () => {
     startBtn.disabled = false;
   }
   
-  // 2. Notify background/offscreen (non-blocking)
+  // 2. Unmute tab if it was muted (use saved tabId, not query)
+  if (currentCaptureSource === 'tab' && capturedTabId) {
+    chrome.tabs.update(capturedTabId, { muted: false }, (tab) => {
+      if (chrome.runtime.lastError) {
+        log.warn('Failed to unmute tab:', capturedTabId, chrome.runtime.lastError.message);
+      } else {
+        log.info('Tab unmuted:', capturedTabId);
+      }
+    });
+  }
+  
+  // 3. Notify background/offscreen (non-blocking)
   safeSendMessage({ type: 'STOP_CAPTURE' }, () => {});
 });
 
@@ -2072,20 +2145,37 @@ if (resetSensitivityBtn) {
 // Effects Helper Functions
 // ============================================
 
+// Effects send debounce — 100ms interval to prevent spamming offscreen
+let _effectsSendDebounce = null;
+let _pendingEffectsSend = null;
+
+function scheduleEffectsSend(type, active, params) {
+  const payload = { type, active, params };
+  _pendingEffectsSend = payload;
+  
+  if (_effectsSendDebounce) {
+    clearTimeout(_effectsSendDebounce);
+  }
+  
+  _effectsSendDebounce = setTimeout(() => {
+    _effectsSendDebounce = null;
+    if (_pendingEffectsSend) {
+      safeSendMessage(_pendingEffectsSend);
+      _pendingEffectsSend = null;
+    }
+  }, 100); // 10fps max for effects updates
+}
+
 /**
  * Send compressor settings to offscreen (direct via runtime)
  */
 function sendCompressorSettings() {
-  safeSendMessage({
-    type: '_SSA_SET_COMPRESSOR',
-    active: effectsSettings.compressor.active,
-    params: {
-      threshold: effectsSettings.compressor.threshold,
-      ratio: effectsSettings.compressor.ratio,
-      knee: effectsSettings.compressor.knee,
-      attack: effectsSettings.compressor.attack,
-      release: effectsSettings.compressor.release
-    }
+  scheduleEffectsSend('_SSA_SET_COMPRESSOR', effectsSettings.compressor.active, {
+    threshold: effectsSettings.compressor.threshold,
+    ratio: effectsSettings.compressor.ratio,
+    knee: effectsSettings.compressor.knee,
+    attack: effectsSettings.compressor.attack,
+    release: effectsSettings.compressor.release
   });
 }
 
@@ -2093,16 +2183,12 @@ function sendCompressorSettings() {
  * Send EQ settings to offscreen (direct via runtime)
  */
 function sendEQSettings() {
-  safeSendMessage({
-    type: '_SSA_SET_EQ',
-    active: effectsSettings.eq.active,
-    params: {
-      hpfFreq: effectsSettings.eq.hpfFreq,
-      lpfFreq: effectsSettings.eq.lpfFreq,
-      peakFreq: effectsSettings.eq.peakFreq,
-      peakGain: effectsSettings.eq.peakGain,
-      peakQ: effectsSettings.eq.peakQ
-    }
+  scheduleEffectsSend('_SSA_SET_EQ', effectsSettings.eq.active, {
+    hpfFreq: effectsSettings.eq.hpfFreq,
+    lpfFreq: effectsSettings.eq.lpfFreq,
+    peakFreq: effectsSettings.eq.peakFreq,
+    peakGain: effectsSettings.eq.peakGain,
+    peakQ: effectsSettings.eq.peakQ
   });
 }
 
@@ -2110,12 +2196,8 @@ function sendEQSettings() {
  * Send limiter settings to offscreen (direct via runtime)
  */
 function sendLimiterSettings() {
-  safeSendMessage({
-    type: '_SSA_SET_LIMITER',
-    active: effectsSettings.limiter.active,
-    params: {
-      threshold: effectsSettings.limiter.threshold
-    }
+  scheduleEffectsSend('_SSA_SET_LIMITER', effectsSettings.limiter.active, {
+    threshold: effectsSettings.limiter.threshold
   });
 }
 
@@ -2123,14 +2205,10 @@ function sendLimiterSettings() {
  * Send delay settings to offscreen (direct via runtime)
  */
 function sendDelaySettings() {
-  safeSendMessage({
-    type: '_SSA_SET_DELAY',
-    active: effectsSettings.delay.active,
-    params: {
-      delayTime: effectsSettings.delay.delayTime,
-      feedback: effectsSettings.delay.feedback,
-      mix: effectsSettings.delay.mix
-    }
+  scheduleEffectsSend('_SSA_SET_DELAY', effectsSettings.delay.active, {
+    delayTime: effectsSettings.delay.delayTime,
+    feedback: effectsSettings.delay.feedback,
+    mix: effectsSettings.delay.mix
   });
 }
 

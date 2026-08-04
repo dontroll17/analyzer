@@ -4,7 +4,8 @@
 const isBrowserEnv = typeof window !== 'undefined' || typeof chrome?.runtime?.id !== 'undefined';
 
 const log = (self.__logger?.forModule('offscreen')) || {
-  debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn('[OFFSCREEN]', m, ...a),
+  debug: () => {}, info: (m, ...a) => console.log('[OFFSCREEN]', m, ...a),
+  warn: (m, ...a) => console.warn('[OFFSCREEN]', m, ...a),
   error: (m, ...a) => console.error('[OFFSCREEN]', m, ...a),
 };
 
@@ -72,6 +73,7 @@ let _effectsState = {
 // === P.4: Load effects settings from chrome.storage (offscreen self-loading) ===
 // Elimimates the need for popup to send settings via setTimeout — offscreen reads directly.
 function _loadEffectsFromStorage() {
+  if (!chrome.storage?.local) return;
   chrome.storage.local.get(['ssa_effectsSettings'], (result) => {
     if (!result.ssa_effectsSettings || typeof result.ssa_effectsSettings !== 'object') return;
     const s = _effectsState;
@@ -393,17 +395,15 @@ function _handleEffectMessage(message) {
   }
 }
 
-function safeSendMessage(msg) {
-  chrome.runtime.sendMessage(msg, () => {
-    // Silently ignore — background may be dead during SW restart, popup disconnected, etc.
-  });
-}
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_START') {
+    log.info('OFFSCREEN_START received, captureSource:', message.captureSource);
     currentCaptureSource = message.captureSource || 'tab';
     const streamId = message.tabStreamId || null;
-    startCapture(currentCaptureSource, streamId).then(sendResponse);
+    startCapture(currentCaptureSource, streamId).then((response) => {
+      log.info('startCapture response:', response?.ok ? 'ok' : response?.error);
+      sendResponse(response);
+    });
     return true;
   }
   
@@ -446,8 +446,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function startCapture(source, tabStreamId) {
+  log.info('startCapture called, source:', source);
   try {
-    if (mediaStream) return { ok: true, alreadyActive: true };
+    if (mediaStream) { log.info('startCapture: already active'); return { ok: true, alreadyActive: true }; }
     
     let streamOptions;
     
@@ -457,7 +458,7 @@ async function startCapture(source, tabStreamId) {
     _loadEffectsFromStorage();
     
     // Start offscreen→BG keepalive to prevent SW sleep
-    // SW wake threshold ~30-60s, ping every 10s to keep BG alive
+    // SW wake threshold ~30-60s, ping every 5s to keep BG alive
     _keepaliveTimer = setInterval(() => {
       chrome.runtime.sendMessage({ type: '_OFFSCREEN_KEEPALIVE' }, () => {
         if (chrome.runtime.lastError) {
@@ -466,7 +467,7 @@ async function startCapture(source, tabStreamId) {
           _keepaliveTimer = null;
         }
       });
-    }, 10000); // 10s — well under SW 30s lifetime
+    }, 5000); // 5s — keepalive
     
     switch (source) {
       case 'mic': {
@@ -782,8 +783,12 @@ async function startCapture(source, tabStreamId) {
     const analysisTap = audioContext.createGain();
     analysisTap.gain.value = 1;
     audioSource.connect(analysisTap);
+    // Connect BOTH to worklet for direct input analysis
     analysisTap.connect(workletNode);
+    audioSource.connect(workletNode);
     audioChain.analysisTap = analysisTap;
+    
+    log.info('Graph built. mediaStream.active=' + mediaStream.active + ', tracks=' + mediaStream.getTracks().map(t => t.readyState).join(',') + ', src.connects: compressor, analysisTap, workletNode');
 
     // === P.1 CRITICAL: Connect graph to destination ===
     // Web Audio API uses Pull-Model — without destination, rendering stops,
@@ -840,8 +845,10 @@ async function startCapture(source, tabStreamId) {
     
     // Start DSP time polling: request DSP time from worklet every 2s
     _dspTimeTimer = setInterval(() => {
-      if (!audioChain.worklet || !audioChain.worklet.port) return;
-      audioChain.worklet.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+      if (!audioChain.worklet?.port) return;
+      try {
+        audioChain.worklet.port.postMessage({ type: 'REQUEST_DSP_TIME' });
+      } catch (_) { /* port may be closed */ }
     }, 2000);
     
     // Drop detection: poll MediaStream active state (reliable in MV3)
@@ -904,23 +911,11 @@ async function startCapture(source, tabStreamId) {
         lastMetrics.audioDrops = audioDropCount;
         _lastWorkletTimestamp = event.data.timestamp || Date.now();
         
-        // Log first 5 frames for debugging (RMS + bands)
-        if (_metricsCounter <= 5) {
-          log.info('Frame', _metricsCounter, 'RMS:', event.data.rms.toFixed(4), 'Peak:', event.data.peakRMS.toFixed(4), 'Bands[B/M/T]:', event.data.bass.toFixed(1), event.data.mid.toFixed(1), event.data.treble.toFixed(1));
-        }
-        
         // P.6: Send metrics directly to popup via port (bypass background relay)
-        const sentToPopup = _sendToPopup({ type: 'METRICS', ...event.data });
-        if (!sentToPopup && _metricsCounter <= 10) {
-          log.info('P.6: Popup not connected yet, will receive via background relay');
-        }
+        _sendToPopup({ type: 'METRICS', ...event.data });
         
         // Background relay still needed for persistence/queuing
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
-        // Log every 1000 messages to avoid killing SW
-        if (_metricsCounter % 1000 === 0) {
-          log.info('Metrics sent:', _metricsCounter);
-        }
       }
       
       // Handle DSP time reports from AudioWorklet
@@ -930,7 +925,6 @@ async function startCapture(source, tabStreamId) {
         const latency = _lastWorkletTimestamp > 0
           ? Date.now() - _lastWorkletTimestamp
           : 0;
-        log.info(`DSP time: ${dspTime.toFixed(2)}ms, round-trip: ${latency.toFixed(1)}ms`);
         safeSendMessage({
           type: '_DEBUG_METRICS',
           dspTime: dspTime,
