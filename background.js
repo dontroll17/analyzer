@@ -52,8 +52,6 @@ let popupPort = null;
 let _capturedTabId = null; // Track active tab for overlay show/hide
 let _lastMetricsSnapshot = null; // Cache latest metrics for instant replay on reconnect
 let overlayPort = null;
-let metricsQueue = []; // In-memory buffer (drained on reconnect)
-let persistentMetricsQueue = []; // Survives popup disconnect — used for instant replay (Phase 2.2)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
 let globalPopupDisconnectTimer = null; // Grace period timer for popup disconnect
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
@@ -63,6 +61,15 @@ const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persis
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
 
+// Circular buffers for metrics queues (H-5 fix: zero push/shift allocations)
+// Using index pointer instead of push/shift — TDZ-safe: constants declared above
+const _metricsQueue = new Array(MAX_METRICS_QUEUE);
+let _metricsQueueHead = 0;
+let _metricsQueueCount = 0;
+const _persistentMetricsQueue = new Array(MAX_PERSISTENT_METRICS);
+let _persistentMetricsQueueHead = 0;
+let _persistentMetricsQueueCount = 0;
+
 // === Storage write throttle (debounce 100ms) to prevent backpressure at 43fps ===
 let _storageWriteTimer = null;
 let _pendingMetricsData = null;
@@ -71,8 +78,11 @@ const STORAGE_WRITE_DEBOUNCE_MS = 100; // 10fps max for storage
 
 // In-memory ring buffer for metrics persistence
 // Eliminates chrome.storage.local.get() before each write — reduces I/O by ~90%
-let ringBuffer = [];
+// H-6 fix: circular buffer with index pointer — zero push/shift allocations
 const RING_BUFFER_MAX = 80;
+const _ringBuffer = new Array(RING_BUFFER_MAX);
+let _ringBufHead = 0;
+let _ringBufCount = 0;
 const STORAGE_FLUSH_INTERVAL_MS = 1000; // Flush to disk 1/sec (not 100ms = 10fps)
 
 // === IndexedDB for long-term session history (Phase 2.3) ===
@@ -80,6 +90,8 @@ const STORAGE_FLUSH_INTERVAL_MS = 1000; // Flush to disk 1/sec (not 100ms = 10fp
 const SESSION_DB_NAME = 'ssa-session-db';
 const SESSION_DB_VERSION = 1;
 const SESSION_STORE_NAME = 'sessions';
+// Task 6: Separate IndexedDB store for binary token chunks (zero JSON overhead)
+const TOKEN_CHUNKS_STORE_NAME = 'token_chunks';
 let sessionDB = null;
 let dbReady = false;
 
@@ -93,6 +105,12 @@ function openSessionDB() {
         const store = db.createObjectStore(SESSION_STORE_NAME, { keyPath: 'id', autoIncrement: true });
         store.createIndex('timestamp', 'timestamp', { unique: false });
         store.createIndex('type', 'type', { unique: false });
+      }
+      // Task 6: Create token_chunks store for binary archival (separate from sessions)
+      if (!db.objectStoreNames.contains(TOKEN_CHUNKS_STORE_NAME)) {
+        const tokenStore = db.createObjectStore(TOKEN_CHUNKS_STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        tokenStore.createIndex('sessionId', 'sessionId', { unique: false });
+        tokenStore.createIndex('timestamp', 'timestamp', { unique: false });
       }
     };
     request.onsuccess = (event) => {
@@ -119,6 +137,22 @@ function appendToSessionDB(data) {
   }
 }
 
+// Task 6: Append binary token chunk to IndexedDB (zero JSON, binary payload)
+function appendToTokenStore(chunk) {
+  if (!sessionDB || !dbReady) return;
+  try {
+    const tx = sessionDB.transaction([TOKEN_CHUNKS_STORE_NAME], 'readwrite');
+    const store = tx.objectStore(TOKEN_CHUNKS_STORE_NAME);
+    store.add({
+      sessionId: chunk.sessionId,
+      timestamp: chunk.timestamp,
+      payload: chunk.payload // ArrayBuffer — binary token frames
+    });
+  } catch (e) {
+    log.warn('Failed to append token chunk to IndexedDB:', e.message);
+  }
+}
+
 function closeSessionDB() {
   if (sessionDB) {
     sessionDB.close();
@@ -140,24 +174,33 @@ function throttledPersistMetrics(data) {
     _pendingDropCount = null;
   }
   
-  // Push to ring buffer (overflow protection)
-  ringBuffer.push(data);
-  if (ringBuffer.length > RING_BUFFER_MAX) {
-    ringBuffer.shift();
+  // Push to ring buffer (H-6: circular buffer, O(1) no allocations)
+  _ringBuffer[_ringBufHead] = data;
+  _ringBufHead = (_ringBufHead + 1) % RING_BUFFER_MAX;
+  if (_ringBufCount < RING_BUFFER_MAX) {
+    _ringBufCount++;
   }
   
-  // Also append to IndexedDB for long-term session history
-  appendToSessionDB(data);
+  // Task 6: Token archival moved to offscreen.js TokenStreamRecorder (8-byte binary chunks)
+  // No more full JSON writes to IndexedDB from background.js
   
   // Throttle: only one flush per interval
   // P.3: Use chrome.storage.session for metrics (no quota limits, auto-cleans on session end)
   if (_storageWriteTimer) return;
   _storageWriteTimer = setTimeout(() => {
     _storageWriteTimer = null;
-    if (ringBuffer.length > 0) {
+    if (_ringBufCount > 0) {
+      // Collect entries in chronological order
+      const snapshot = new Array(_ringBufCount);
+      for (let i = 0; i < _ringBufCount; i++) {
+        const idx = (_ringBufHead - _ringBufCount + i + RING_BUFFER_MAX) % RING_BUFFER_MAX;
+        snapshot[i] = _ringBuffer[idx];
+      }
       // Atomic save: direct set, no read-before-write
-      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: ringBuffer });
-      ringBuffer = []; // Clear after successful save
+      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: snapshot });
+      // Reset circular buffer
+      _ringBufHead = 0;
+      _ringBufCount = 0;
     }
   }, STORAGE_FLUSH_INTERVAL_MS);
 }
@@ -312,17 +355,23 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onMessage.addListener(popupPortMessageHandler);
 
     // On reconnect: clear stale transient queue, replay from persistent queue (Phase 2.2)
-    if (metricsQueue.length > 0) {
-      log.debug('Discarding stale metrics queue:', metricsQueue.length);
-      metricsQueue = [];
+    if (_metricsQueueCount > 0) {
+      log.debug('Discarding stale metrics queue:', _metricsQueueCount);
+      _metricsQueueHead = 0;
+      _metricsQueueCount = 0;
     }
     safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     log.info('Popup reconnected, queues cleared');
     
     // Replay last metrics from persistent queue for instant snapshot
-    if (persistentMetricsQueue.length > 0 && isCapturing) {
-      const replayCount = Math.min(5, persistentMetricsQueue.length);
-      const recentMetrics = persistentMetricsQueue.slice(-replayCount);
+    if (_persistentMetricsQueueCount > 0 && isCapturing) {
+      const replayCount = Math.min(5, _persistentMetricsQueueCount);
+      // Collect recent entries from circular buffer
+      const recentMetrics = [];
+      for (let i = 0; i < replayCount; i++) {
+        const idx = (_persistentMetricsQueueHead - replayCount + i + MAX_PERSISTENT_METRICS) % MAX_PERSISTENT_METRICS;
+        recentMetrics.push(_persistentMetricsQueue[idx]);
+      }
       for (const m of recentMetrics) {
         popupPort.postMessage({ type: 'METRICS', ...m });
       }
@@ -435,7 +484,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'REQUEST_STATUS') {
-    sendResponse({ isCapturing, hasMetrics: !!metricsQueue?.length });
+    sendResponse({ isCapturing, hasMetrics: !!_metricsQueueCount });
     return false;
   }
   
@@ -444,8 +493,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     log.warn('Offscreen context invalidated — resetting capture state');
     isCapturing = false;
     offscreenReady = false;
-    metricsQueue = [];
-    persistentMetricsQueue = [];
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
     safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     sendResponse({ ok: true });
     return false;
@@ -456,7 +505,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       safeSendMessage({ type: '_OFFSCREEN_STOP' }, response => {
         isCapturing = false;
         persistCapturing();
-        metricsQueue = []; // Clear in-memory queue on stop
+        _metricsQueueHead = 0; _metricsQueueCount = 0; // Clear in-memory queue on stop
         safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
         
         // Notify content script to hide overlay using saved tabId (popup may be focused)
@@ -472,7 +521,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       isCapturing = false;
       persistCapturing();
-      metricsQueue = []; // Clear in-memory queue on stop
+      _metricsQueueHead = 0; _metricsQueueCount = 0; // Clear in-memory queue on stop
       safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
       // Note: popupPort is cleared by popupPortDisconnectHandler
       // Notify content script to hide overlay (silent)
@@ -505,16 +554,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Persist to chrome.storage.local via throttled debounce (prevents 43fps backpressure)
     throttledPersistMetrics(d);
     
-    // Also add to transient in-memory queue (limit for stability)
-    metricsQueue.push(d);
-    if (metricsQueue.length > MAX_METRICS_QUEUE) {
-      metricsQueue.shift();
+    // Also add to transient in-memory queue (H-5: circular buffer, O(1) no allocations)
+    _metricsQueue[_metricsQueueHead] = d;
+    _metricsQueueHead = (_metricsQueueHead + 1) % MAX_METRICS_QUEUE;
+    if (_metricsQueueCount < MAX_METRICS_QUEUE) {
+      _metricsQueueCount++;
     }
     
-    // Push to persistent queue (survives popup disconnect for instant replay)
-    persistentMetricsQueue.push(d);
-    if (persistentMetricsQueue.length > MAX_PERSISTENT_METRICS) {
-      persistentMetricsQueue.shift();
+    // Push to persistent queue (H-5: circular buffer, survives popup disconnect)
+    _persistentMetricsQueue[_persistentMetricsQueueHead] = d;
+    _persistentMetricsQueueHead = (_persistentMetricsQueueHead + 1) % MAX_PERSISTENT_METRICS;
+    if (_persistentMetricsQueueCount < MAX_PERSISTENT_METRICS) {
+      _persistentMetricsQueueCount++;
     }
     
     // Forward to popup if connected (live stream)
@@ -592,8 +643,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try { popupPort.disconnect(); } catch (e) {}
     }
     // Also clear any lingering queues (including persistent replay buffer)
-    metricsQueue = [];
-    persistentMetricsQueue = [];
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
     safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
     // Notify content script to hide overlay (silent)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -671,8 +722,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     log.warn('FORCE_RESET received — clearing all stale state');
     isCapturing = false;
     offscreenReady = false;
-    metricsQueue = [];
-    persistentMetricsQueue = [];
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
     // P.3: UI settings stay in local, metrics move to session
     safeStorageSet({ 
       [CAPTURING_KEY]: false,

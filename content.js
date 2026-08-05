@@ -1078,30 +1078,38 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // === Named event handlers for cleanup (P.5) ===
+// M-7: Wrap handlers in try/catch to prevent stale closure crashes
 const _visibilityHandler = () => {
-  if (document.hidden && overlayVisible) {
-    hideOverlay();
-  }
+  try {
+    if (document.hidden && overlayVisible) {
+      hideOverlay();
+    }
+  } catch (_) {}
 };
 
 const _beforeUnloadHandler = () => {
-  if (overlayEl) {
-    overlayEl.remove();
-    overlayEl = null;
-  }
-  if (miniBadgeEl) {
-    miniBadgeEl.remove();
-    miniBadgeEl = null;
-  }
-  const styleEl = document.getElementById('ssa-overlay-style');
-  if (styleEl) styleEl.remove();
+  try {
+    if (document.readyState === 'loading') return; // Skip during early unload
+    if (overlayEl) {
+      try { overlayEl.remove(); } catch (_) {}
+      overlayEl = null;
+    }
+    if (miniBadgeEl) {
+      try { miniBadgeEl.remove(); } catch (_) {}
+      miniBadgeEl = null;
+    }
+    const styleEl = document.getElementById('ssa-overlay-style');
+    if (styleEl) styleEl.remove();
+  } catch (_) {}
 };
 
 const _errorHandler = (event) => {
-  const msg = event.message || '';
-  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
-    hideOverlay();
-  }
+  try {
+    const msg = event.message || '';
+    if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
+      hideOverlay();
+    }
+  } catch (_) {}
 };
 
 // Auto-hide when page is hidden

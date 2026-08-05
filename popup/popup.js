@@ -98,6 +98,7 @@ const oscilloscopeCanvas = document.getElementById('oscilloscopeCanvas');
 const oscilloscopeCtx = oscilloscopeCanvas ? oscilloscopeCanvas.getContext('2d') : null;
 const exportBtn = document.getElementById('exportBtn');
 const exportLogBtn = document.getElementById('exportLogBtn');
+const exportTokensBtn = document.getElementById('exportTokensBtn');
 const oscilloscopeSection = document.getElementById('oscilloscopeSection');
 const timelineCanvas = document.getElementById('timelineCanvas');
 const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
@@ -215,15 +216,31 @@ const glitchStateDot = document.getElementById('glitchStateDot');
 
 // Glitch log (max 500 entries, FIFO)
 const GLITCH_LOG_MAX = 500;
-let glitchLog = [];
+// M-5: Circular buffer for glitch log
+const _glitchLog = new Array(GLITCH_LOG_MAX);
+let _glitchLogHead = 0;
+let _glitchLogCount = 0;
 let currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
 let lastGlitchState = 'STABLE';
 
 // Glitch timeline history
 const TIMELINE_MAX = 300;
-let glitchHistory = [];
+// M-4: Circular buffer for glitch timeline history
+const _glitchHistory = new Array(TIMELINE_MAX);
+let _glitchHistoryHead = 0;
+let _glitchHistoryCount = 0;
 let lastTimelineRecord = 0;
 let CAPTURE_START_TIME = 0;
+
+// M-4: Get snapshot of glitch history from circular buffer (for read-only iteration)
+function getGlitchHistorySnapshot() {
+  const snapshot = [];
+  for (let i = 0; i < _glitchHistoryCount; i++) {
+    const idx = (_glitchHistoryHead - _glitchHistoryCount + i + TIMELINE_MAX) % TIMELINE_MAX;
+    snapshot.push(_glitchHistory[idx]);
+  }
+  return snapshot;
+}
 
 // Oscilloscope history buffers (ring buffer: Float32Array, HISTORY_SIZE=1024)
 // Buffers are overwritten each frame by updateOscilloscopeFromWaveform()
@@ -256,8 +273,11 @@ const PERF_KEY = 'perfMonitorActive';
 let perfActive = false;
 let perfFrameCount = 0;
 let perfLastTime = 0;
-let perfDrawTimes = [];
-let PERF_MAX_DRAWS = 30;
+// M-1: Circular buffer for draw times (zero push/shift allocations)
+let _perfDrawBuf = new Array(30);
+let _perfDrawHead = 0;
+let _perfDrawCount = 0;
+const PERF_MAX_DRAWS = 30;
 
 // Debug metrics state
 let lastLatency = 0;
@@ -423,7 +443,11 @@ const HEATMAP_DRAW_INTERVAL_MS = 500;
 
 // Performance-aware heatmap: auto-disable when draw exceeds threshold
 const HEATMAP_PERF_MAX_AVG_MS = 15; // Auto-disable if avg draw > 15ms
-let heatmapDrawTimes = [];
+// M-3: Circular buffer for heatmap draw times (zero push/shift allocations)
+const _heatmapPerfSampleSize = 10;
+let _heatmapDrawBuf = new Array(_heatmapPerfSampleSize);
+let _heatmapDrawHead = 0;
+let _heatmapDrawCount = 0;
 const HEATMAP_PERF_SAMPLE_SIZE = 10;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
@@ -440,12 +464,17 @@ function perfFrameLoop(timestamp) {
   // Calculate FPS every 30 frames (~0.5s)
   if (perfFrameCount % 30 === 0) {
     const fps = Math.round(1000 / (delta || 16.67));
-    const avgDrawMs = perfDrawTimes.length > 0
-      ? perfDrawTimes.reduce((a, b) => a + b, 0) / perfDrawTimes.length
-      : 0;
+    // M-1: Circular buffer average (zero allocations)
+    let sum = 0;
+    for (let i = 0; i < _perfDrawCount; i++) {
+      const idx = (_perfDrawHead - _perfDrawCount + i + PERF_MAX_DRAWS) % PERF_MAX_DRAWS;
+      sum += _perfDrawBuf[idx];
+    }
+    const avgDrawMs = _perfDrawCount > 0 ? sum / _perfDrawCount : 0;
 
     updatePerfDisplay(fps, avgDrawMs, 0);
-    perfDrawTimes = [];
+    _perfDrawHead = 0;
+    _perfDrawCount = 0;
   }
   
   // Ping background every ~3 seconds (180 frames at 60fps)
@@ -479,9 +508,13 @@ function perfFrameLoop(timestamp) {
   if (perfFrameCount % 360 === 0 && perfActive) {
     const now = Date.now();
     const fps = Math.round(1000 / (delta || 16.67));
-    const avgDrawMs = perfDrawTimes.length > 0
-      ? perfDrawTimes.reduce((a, b) => a + b, 0) / perfDrawTimes.length
-      : 0;
+    // M-1: Circular buffer average
+    let sum2 = 0;
+    for (let i = 0; i < _perfDrawCount; i++) {
+      const idx = (_perfDrawHead - _perfDrawCount + i + PERF_MAX_DRAWS) % PERF_MAX_DRAWS;
+      sum2 += _perfDrawBuf[idx];
+    }
+    const avgDrawMs = _perfDrawCount > 0 ? sum2 / _perfDrawCount : 0;
     
     // FPS alert (< 15)
     if (fps < 15 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
@@ -531,9 +564,11 @@ function perfAwareDraw(leftSamples, rightSamples) {
   drawOscilloscope(leftSamples, rightSamples);
   const elapsed = perfNow() - start;
 
-  perfDrawTimes.push(elapsed);
-  if (perfDrawTimes.length > PERF_MAX_DRAWS) {
-    perfDrawTimes.shift();
+  // M-1: Circular buffer push (zero allocation)
+  _perfDrawBuf[_perfDrawHead] = elapsed;
+  _perfDrawHead = (_perfDrawHead + 1) % PERF_MAX_DRAWS;
+  if (_perfDrawCount < PERF_MAX_DRAWS) {
+    _perfDrawCount++;
   }
 }
 
@@ -601,7 +636,13 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
         if (perfActive) {
           const tStart = perfNow();
           drawTimeline();
-          perfDrawTimes.push(perfNow() - tStart);
+          // M-1: Circular buffer push for timeline draw time
+          const tElapsed = perfNow() - tStart;
+          _perfDrawBuf[_perfDrawHead] = tElapsed;
+          _perfDrawHead = (_perfDrawHead + 1) % PERF_MAX_DRAWS;
+          if (_perfDrawCount < PERF_MAX_DRAWS) {
+            _perfDrawCount++;
+          }
         } else {
           drawTimeline();
         }
@@ -717,8 +758,12 @@ function updateUI(connected) {
     smoothedBass = 0;
     smoothedMid = 0;
     smoothedTreble = 0;
-    glitchLog = [];
-    glitchHistory = [];
+    // M-5: Reset glitch log circular buffer
+    _glitchLogHead = 0;
+    _glitchLogCount = 0;
+    // M-4: Reset glitch history circular buffer
+    _glitchHistoryHead = 0;
+    _glitchHistoryCount = 0;
     CAPTURE_START_TIME = 0;
     lastTimelineRecord = 0;
 
@@ -1068,11 +1113,12 @@ function drawTimeline() {
   timelineCtx.fillStyle = colors.bg;
   timelineCtx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-  if (glitchHistory.length < 2) return;
+  const gh = getGlitchHistorySnapshot();
+  if (gh.length < 2) return;
 
   // Normalize timestamps relative to oldest point in window (prevents timeline disappearing after shift)
-  const windowStart = glitchHistory[0].time;
-  const windowEnd = glitchHistory[glitchHistory.length - 1].time;
+  const windowStart = gh[0].time;
+  const windowEnd = gh[gh.length - 1].time;
   const windowDuration = windowEnd - windowStart;
 
   // Group consecutive points by state for batched color drawing
@@ -1080,8 +1126,8 @@ function drawTimeline() {
   var currentSegment = [];
   var currentState = null;
   
-  for (var i = 0; i < glitchHistory.length; i++) {
-    var point = glitchHistory[i];
+  for (var i = 0; i < gh.length; i++) {
+    var point = gh[i];
     if (point.state !== currentState) {
       if (currentSegment.length > 0) {
         segments.push({ state: currentState, points: currentSegment });
@@ -1221,17 +1267,26 @@ function drawHeatmap() {
   
   // Performance monitoring: auto-disable heatmap if drawing is too slow
   const drawElapsed = perfNow() - drawStart;
-  heatmapDrawTimes.push(drawElapsed);
-  if (heatmapDrawTimes.length > HEATMAP_PERF_SAMPLE_SIZE) {
-    heatmapDrawTimes.shift();
+  // M-3: Circular buffer push
+  _heatmapDrawBuf[_heatmapDrawHead] = drawElapsed;
+  _heatmapDrawHead = (_heatmapDrawHead + 1) % _heatmapPerfSampleSize;
+  if (_heatmapDrawCount < _heatmapPerfSampleSize) {
+    _heatmapDrawCount++;
   }
-  if (heatmapDrawTimes.length === HEATMAP_PERF_SAMPLE_SIZE) {
-    const avgDrawMs = heatmapDrawTimes.reduce((a, b) => a + b, 0) / HEATMAP_PERF_SAMPLE_SIZE;
+  if (_heatmapDrawCount === _heatmapPerfSampleSize) {
+    // M-3: Circular buffer average
+    let sum = 0;
+    for (let i = 0; i < _heatmapDrawCount; i++) {
+      const idx = (_heatmapDrawHead - _heatmapDrawCount + i + _heatmapPerfSampleSize) % _heatmapPerfSampleSize;
+      sum += _heatmapDrawBuf[idx];
+    }
+    const avgDrawMs = sum / _heatmapPerfSampleSize;
     if (avgDrawMs > HEATMAP_PERF_MAX_AVG_MS) {
       log.warn(`Heatmap avg draw ${avgDrawMs.toFixed(1)}ms > ${HEATMAP_PERF_MAX_AVG_MS}ms threshold — auto-disabling`);
       heatmapActive = false;
       safeStorageSet({ [HEATMAP_KEY]: false });
-      heatmapDrawTimes = [];
+      _heatmapDrawHead = 0;
+      _heatmapDrawCount = 0;
     }
   }
 }
@@ -1351,15 +1406,17 @@ function applyMetrics(data) {
       // Timeline recording (throttle ~5 Hz)
       if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
       if (data.timestamp - lastTimelineRecord > 200) {
-        glitchHistory.push({
+        // M-4: Circular buffer push
+        _glitchHistory[_glitchHistoryHead] = {
           time: data.timestamp - CAPTURE_START_TIME,
           rms: data.rms,
           state: data.glitchState
-        });
-        lastTimelineRecord = data.timestamp;
-        if (glitchHistory.length > TIMELINE_MAX) {
-          glitchHistory.shift();
+        };
+        _glitchHistoryHead = (_glitchHistoryHead + 1) % TIMELINE_MAX;
+        if (_glitchHistoryCount < TIMELINE_MAX) {
+          _glitchHistoryCount++;
         }
+        lastTimelineRecord = data.timestamp;
         updateTimelineWithThrottle();
       }
     }
@@ -1480,7 +1537,9 @@ async function initAudioProcessing(stream) {
 function stopAudioProcessing() {
   gracefulStop = true;
   
-  glitchLog = [];
+  // M-5: Reset glitch log circular buffer
+  _glitchLogHead = 0;
+  _glitchLogCount = 0;
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
   
@@ -1569,22 +1628,30 @@ function addGlitchLogEntry(glitchCount) {
     treble: currentMetrics.treble,
     highFreqAnomaly: currentMetrics.highFreqAnomaly
   };
-  glitchLog.push(entry);
-  if (glitchLog.length > GLITCH_LOG_MAX) {
-    glitchLog.shift();
+  // M-5: Circular buffer push
+  _glitchLog[_glitchLogHead] = entry;
+  _glitchLogHead = (_glitchLogHead + 1) % GLITCH_LOG_MAX;
+  if (_glitchLogCount < GLITCH_LOG_MAX) {
+    _glitchLogCount++;
   }
 }
 
 function exportGlitchLog() {
-  if (glitchLog.length === 0) {
+  if (_glitchLogCount === 0) {
     alert('Лог глитчей пуст. Запустите захват аудио и дождитесь срабатывания детектора.');
     return;
   }
+  // M-5: Collect entries from circular buffer in chronological order
+  const entries = [];
+  for (let i = 0; i < _glitchLogCount; i++) {
+    const idx = (_glitchLogHead - _glitchLogCount + i + GLITCH_LOG_MAX) % GLITCH_LOG_MAX;
+    entries.push(_glitchLog[idx]);
+  }
   const exportData = {
     exportDate: new Date().toISOString(),
-    totalGlitches: glitchLog.length,
+    totalGlitches: _glitchLogCount,
     maxEntries: GLITCH_LOG_MAX,
-    entries: glitchLog
+    entries: entries
   };
   const jsonStr = JSON.stringify(exportData, null, 2);
   const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -1623,6 +1690,157 @@ function exportCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// === Task 6: Token Stream Export Functions ===
+const TOKEN_FRAME_SIZE = 8;
+const TOKEN_DB_NAME = 'ssa-session-db';
+const TOKEN_STORE_NAME = 'token_chunks';
+
+function decodeTokenFrame(view) {
+  return {
+    rel_ms: view.getUint32(0, true),
+    token: view.getUint8(4),    // aiScore mapped 0–255
+    rms: view.getUint8(5),      // 0–255
+    centroid: view.getUint8(6), // 0–255
+    flags: view.getUint8(7),    // bitmask
+    fsm_state: view.getUint8(7) & 0b11,
+    has_drop: !!(view.getUint8(7) & 0b100)
+  };
+}
+
+function getTokenFramesFromDB(sessionId) {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in self)) { reject('IndexedDB not available'); return; }
+    const request = indexedDB.open(TOKEN_DB_NAME);
+    request.onsuccess = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(TOKEN_STORE_NAME)) {
+        resolve([]);
+        return;
+      }
+      const tx = db.transaction([TOKEN_STORE_NAME], 'readonly');
+      const store = tx.objectStore(TOKEN_STORE_NAME);
+      const index = store.index('sessionId');
+      const getAll = index.getAll(sessionId);
+      getAll.onsuccess = () => {
+        // Return chunks in chronological order (ID auto-increment)
+        resolve(getAll.result || []);
+      };
+      getAll.onerror = () => reject(getAll.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function decodeChunksToRecords(chunks) {
+  const records = [];
+  for (const chunk of chunks) {
+    const payload = chunk.payload; // ArrayBuffer
+    const view = new DataView(payload);
+    const frameCount = payload.byteLength / TOKEN_FRAME_SIZE;
+    for (let i = 0; i < frameCount; i++) {
+      const offset = i * TOKEN_FRAME_SIZE;
+      records.push(decodeTokenFrame(view));
+    }
+  }
+  // Sort by relative timestamp
+  records.sort((a, b) => a.rel_ms - b.rel_ms);
+  return records;
+}
+
+// Task 6: Export token stream as JSONL
+async function exportTokenStreamJSONL() {
+  // Find the most recent session ID from storage
+  let sessionId = null;
+  try {
+    // Read from chrome.storage.session if available
+    const result = await new Promise(resolve => {
+      chrome.storage.session.get(['ssa_capture_session_id'], (r) => resolve(r));
+    });
+    sessionId = result?.ssa_capture_session_id;
+  } catch (_) { /* ignore */ }
+  
+  if (!sessionId) {
+    // Try to get the latest session from IndexedDB by timestamp
+    sessionId = '__latest__';
+  }
+  
+  try {
+    alert('Загрузка токенов из IndexedDB...');
+    const chunks = await getTokenFramesFromDB(sessionId);
+    const records = await decodeChunksToRecords(chunks);
+    
+    if (records.length === 0) {
+      alert('Токены не найдены. Убедитесь, что захват был активен.');
+      return;
+    }
+    
+    // JSONL format: one JSON object per line
+    const jsonl = records.map(r =>
+      JSON.stringify({
+        t: r.rel_ms,
+        token: r.token,
+        rms: r.rms,
+        centroid: r.centroid,
+        state: r.fsm_state, // 0=STABLE, 1=DRIFT, 2=GLITCH
+        drop: r.has_drop ? 1 : 0
+      })
+    ).join('\n');
+    
+    const blob = new Blob([jsonl], { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `token-stream-${Date.now()}.jsonl`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert(`Экспортировано ${records.length} токенов в JSONL`);
+  } catch (e) {
+    alert('Ошибка экспорта: ' + e.message);
+  }
+}
+
+// Task 6: Export token stream as CSV
+async function exportTokenStreamCSV() {
+  let sessionId = null;
+  try {
+    const result = await new Promise(resolve => {
+      chrome.storage.session.get(['ssa_capture_session_id'], (r) => resolve(r));
+    });
+    sessionId = result?.ssa_capture_session_id;
+  } catch (_) { /* ignore */ }
+  
+  if (!sessionId) sessionId = '__latest__';
+  
+  try {
+    const chunks = await getTokenFramesFromDB(sessionId);
+    const records = await decodeChunksToRecords(chunks);
+    
+    if (records.length === 0) {
+      alert('Токены не найдены.');
+      return;
+    }
+    
+    const csv = ['rel_ms,token,rms,centroid,fsm,has_drop'].concat(
+      records.map(r => `${r.rel_ms},${r.token},${r.rms},${r.centroid},${r.fsm_state},${r.has_drop ? 1 : 0}`)
+    ).join('\n');
+    
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `token-stream-${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert(`Экспортировано ${records.length} строк в CSV`);
+  } catch (e) {
+    alert('Ошибка экспорта: ' + e.message);
+  }
 }
 
 function sendSensitivityToWorklet(percentage) {
@@ -1806,6 +2024,11 @@ function _setupOffscreenPort(port) {
 let bgPortId = 0; // Track connection generation to reject stale messages
 let bgMetricsConnected = false; // Track if port is actually connected
 
+// Connection gap detection — persist across port reconnects (H-2 fix)
+let _lastMetricsTime = 0;
+let _missedFrames = 0;
+const METRICS_GAP_WARN_MS = 1000;
+
 // === P.6: Listen for incoming ports from offscreen ===
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'offscreen-metrics') {
@@ -1851,11 +2074,6 @@ function ensureBackgroundPort() {
     let metricsRecvCount = 0;
     let metricsDroppedThrottle = 0;
     let metricsDroppedQueue = 0;
-    
-    // Connection gap detection — warn when metrics gap > 1000ms (SW freeze/drop)
-    let _lastMetricsTime = 0;
-    let _missedFrames = 0;
-    const METRICS_GAP_WARN_MS = 1000;
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
@@ -2665,6 +2883,24 @@ if (exportBtn) {
     exportCSV();
   });
   exportBtn.addEventListener('mousedown', function(e) {
+    e.stopPropagation();
+  });
+}
+
+// Task 6: Кнопка экспорта Token Stream (выбирает формат при клике)
+if (exportTokensBtn) {
+  exportTokensBtn.addEventListener('click', async function(e) {
+    e.stopPropagation();
+    const format = prompt('Формат экспорта токенов: JSONL или CSV?', 'JSONL');
+    if (!format) return;
+    const upper = format.trim().toUpperCase();
+    if (upper === 'CSV') {
+      await exportTokenStreamCSV();
+    } else {
+      await exportTokenStreamJSONL();
+    }
+  });
+  exportTokensBtn.addEventListener('mousedown', function(e) {
     e.stopPropagation();
   });
 }

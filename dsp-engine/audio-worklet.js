@@ -246,6 +246,10 @@ class AudioAnalyzer extends AudioWorkletProcessor {
     
     this._downsampleOutput = new Float32Array(64);           // spectrum downsample output
     
+    // Pre-allocated for MFCC top-4 (H-3 fix: eliminates 2 Array allocations/frame at 43 Hz)
+    this._mfccTop4 = new Float32Array(4);
+    this._mfccStdTop4 = new Float32Array(4);
+    
     this._melBankSampleRate = 0; // Track sample rate for Mel bank rebuild
     
     // State per channel
@@ -1068,8 +1072,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       return;
     }
     
-    // V4: declare aiScore variables hoisted via var
-    var aiScore = 0, mfccTop4 = [], mfccStdTop4 = [];
+    // V4: declare aiScore variable hoisted via var
+    var aiScore = 0;
     
     const leftData = this.leftFrameData;
     const rightData = this.rightFrameData;
@@ -1244,13 +1248,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
        aiScore += moderateEntropy * 15;       // Mid-range entropy
        aiScore += (flatness > 0.35 ? 10 : 0); // Spectral flatness
        
-       aiScore = Math.min(100, Math.max(0, Math.round(aiScore)));
-       
-       // V4.2: Compute mfccTop4 and mfccStdTop4 for payload
-       mfccTop4 = Array.from(mfcc.slice(0, 4)); // Top 4 coefficients (most discriminative)
-       
-       // Also compute mfccStdTop4
-       var mfccStdTop4 = Array.from(mfccStd.slice(0, 4));
+        aiScore = Math.min(100, Math.max(0, Math.round(aiScore)));
+        
+        // V4.2: Compute mfccTop4 and mfccStdTop4 for payload (H-3: pre-allocated, zero-allocation)
+        this._mfccTop4.set(mfcc.subarray(0, 4)); // Top 4 coefficients (most discriminative)
+        this._mfccStdTop4.set(mfccStd.subarray(0, 4));
      }
     
      // C.2.10: Inter-band Energy Ratios (log-scaled, ~0dB = balanced)
@@ -1337,8 +1339,8 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       glitchRate: glitchRateHeavy,
       // V4: AI Detection
       aiScore: aiScore,
-      mfcc: mfccTop4,
-      mfccStd: mfccStdTop4
+      mfcc: this._mfccTop4,
+      mfccStd: this._mfccStdTop4
     };
     
     if (includeWaveform) {

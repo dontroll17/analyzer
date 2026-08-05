@@ -71,6 +71,118 @@ let _effectsState = {
   delay: { enabled: false, delayTime: 0, feedback: 0, mix: 0 }
 };
 
+// === Task 6: TokenStreamRecorder — zero-allocation binary frame archival ===
+// Compact 8-byte frames → chunked IndexedDB writes (replaces full JSON archival)
+// Offscreen.js handles token archival directly; background.js no longer writes JSON to IndexedDB
+const TOKEN_STREAM_RECORDER_DB = 'ssa-session-db'; // Same DB as background.js
+const TOKEN_CHUNKS_STORE = 'token_chunks';
+const FRAME_BYTES = 8;
+const FRAMES_PER_CHUNK = 256; // ~6 seconds at 43 fps
+const SAMPLE_RATE_HZ = 22050; // Max spectral bin for centroid normalization
+
+let tokenRecorder = null; // Initialized when capture starts
+
+class TokenStreamRecorder {
+  constructor(sessionId) {
+    this.sessionId = sessionId;
+    this.buffer = new ArrayBuffer(FRAMES_PER_CHUNK * FRAME_BYTES);
+    this.view = new DataView(this.buffer);
+    this.frameCount = 0;
+    this.sessionStart = 0;
+    this.prevDrops = 0;
+  }
+
+  pushFrame(data, audioDrops) {
+    if (this.sessionStart === 0) this.sessionStart = data.timestamp;
+    const o = this.frameCount * FRAME_BYTES;
+    
+    // Byte 0-3: relative timestamp (ms from session start)
+    this.view.setUint32(o, data.timestamp - this.sessionStart, true);
+    // Byte 4: fsqToken — aiScore 0–100 mapped to 0–255
+    this.view.setUint8(o + 4, Math.min(255, Math.round(data.aiScore * 2.55)));
+    // Byte 5: rmsLevel — 0–1 mapped to 0–255
+    this.view.setUint8(o + 5, Math.min(255, Math.round(data.rms * 255)));
+    // Byte 6: centroidBin — spectralCentroid / maxBin mapped to 0–255
+    this.view.setUint8(o + 6, Math.min(255, Math.round((data.spectralCentroid || 0) / SAMPLE_RATE_HZ * 255)));
+    
+    // Byte 7: statusFlags — bitmask
+    let flags = 0;
+    if (data.glitchState === 'DRIFT') flags |= 1;
+    else if (data.glitchState === 'GLITCH') flags |= 2;
+    if (audioDrops > this.prevDrops) flags |= 4;
+    this.view.setUint8(o + 7, flags);
+    this.prevDrops = audioDrops;
+    this.frameCount++;
+    
+    // Auto-flush when chunk is full
+    if (this.frameCount >= FRAMES_PER_CHUNK) this.flush();
+  }
+
+  flush() {
+    const chunkData = this.buffer.slice(0, this.frameCount * FRAME_BYTES);
+    // Import appendToTokenStore from background context if available
+    if (typeof appendToTokenStore === 'function') {
+      appendToTokenStore({
+        sessionId: this.sessionId,
+        timestamp: Date.now(),
+        payload: chunkData
+      });
+    } else {
+      // Fallback: direct IndexedDB write in offscreen context
+      _flushTokenChunk(chunkData);
+    }
+    this.frameCount = 0;
+  }
+
+  getChunkSize() {
+    return this.frameCount * FRAME_BYTES;
+  }
+}
+
+// Direct IndexedDB flush from offscreen context (backup if appendToTokenStore not available)
+let _tokenDBReady = false;
+let _tokenDB = null;
+
+function _initTokenDB() {
+  if (_tokenDB || !('indexedDB' in self)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const request = indexedDB.open(TOKEN_STREAM_RECORDER_DB, TOKEN_STREAM_RECORDER_DB === 'ssa-session-db' ? 2 : 1);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(TOKEN_CHUNKS_STORE)) {
+        const store = db.createObjectStore(TOKEN_CHUNKS_STORE, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('sessionId', 'sessionId', { unique: false });
+        store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+    };
+    request.onsuccess = (event) => {
+      _tokenDB = event.target.result;
+      _tokenDBReady = true;
+      log.info('TokenStreamRecorder IndexedDB opened');
+      resolve(true);
+    };
+    request.onerror = () => {
+      log.warn('TokenStreamRecorder IndexedDB failed to open');
+      resolve(false);
+    };
+  });
+}
+
+function _flushTokenChunk(chunkData) {
+  if (!_tokenDB || !_tokenDBReady) return;
+  try {
+    const tx = _tokenDB.transaction([TOKEN_CHUNKS_STORE], 'readwrite');
+    const store = tx.objectStore(TOKEN_CHUNKS_STORE);
+    store.add({
+      sessionId: tokenRecorder.sessionId,
+      timestamp: Date.now(),
+      payload: chunkData
+    });
+  } catch (e) {
+    log.warn('Failed to flush token chunk to IndexedDB:', e.message);
+  }
+}
+
 // === P.4: Load effects settings from chrome.storage (offscreen self-loading) ===
 // Elimimates the need for popup to send settings via setTimeout — offscreen reads directly.
 function _loadEffectsFromStorage() {
@@ -660,6 +772,12 @@ async function startCapture(source, tabStreamId) {
     
     const audioSource = audioContext.createMediaStreamSource(mediaStream);
     
+    // === Task 6: Initialize TokenStreamRecorder ===
+    const captureSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    tokenRecorder = new TokenStreamRecorder(captureSessionId);
+    await _initTokenDB();
+    log.info(`TokenStreamRecorder initialized for session ${captureSessionId}`);
+    
     const workletPath = chrome.runtime.getURL('dsp-engine/audio-worklet.js');
     await audioContext.audioWorklet.addModule(workletPath);
     
@@ -829,9 +947,9 @@ async function startCapture(source, tabStreamId) {
     const analysisTap = audioContext.createGain();
     analysisTap.gain.value = 1;
     audioSource.connect(analysisTap);
-    // Connect BOTH to worklet for direct input analysis
+    // Single path: audioSource → analysisTap → workletNode (unity gain tap)
+    // Prevents double-signal input to worklet and inflated level metrics
     analysisTap.connect(workletNode);
-    audioSource.connect(workletNode);
     audioChain.analysisTap = analysisTap;
     
     log.info('Graph built. mediaStream.active=' + mediaStream.active + ', tracks=' + mediaStream.getTracks().map(t => t.readyState).join(',') + ', src.connects: compressor, analysisTap, workletNode');
@@ -962,6 +1080,11 @@ async function startCapture(source, tabStreamId) {
         
         // Background relay still needed for persistence/queuing
         safeSendMessage({ type: '_OFFSCREEN_METRICS', data: event.data });
+        
+        // Task 6: Compact binary archival — 8-byte token frame per METRICS (zero JSON overhead)
+        if (tokenRecorder) {
+          tokenRecorder.pushFrame(event.data, audioDropCount);
+        }
       }
       
       // Handle DSP time reports from AudioWorklet
@@ -1027,6 +1150,13 @@ async function startCapture(source, tabStreamId) {
       _trackEndedListeners.set(track, endedHandler);
       track.addEventListener('ended', endedHandler);
     });
+    
+    // Task 6: Save session ID to chrome.storage for popup export reference
+    if (chrome.storage?.session) {
+      chrome.storage.session.set({ ssa_capture_session_id: captureSessionId }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
     
     return { ok: true };
   } catch (error) {
