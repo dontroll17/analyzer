@@ -1,15 +1,11 @@
 {
-  "name": "ssa-tests",
+  "name": "ssa",
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.js"
+    "check:syntax": "node --check background.js content.js offscreen.js logger.js dsp-engine/audio-worklet.js dsp-engine/delay-processor.js dsp-engine/rms.js dsp-engine/delay-utils.js popup/popup.js popup/config.js"
   },
-  "devDependencies": {
-    "@babel/core": "^7.29.7",
-    "@babel/preset-env": "^7.29.0",
-    "@types/jest": "^30.0.0",
-    "babel-jest": "^29.7.0",
-    "jest": "^29.7.0"
+  "overrides": {
+    "brace-expansion": "^1.1.17"
   }
 }

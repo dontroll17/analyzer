@@ -4,7 +4,6 @@ import { loadSettings, saveSetting } from './config.js';
 // Logger from logger.js (loaded via regular script tag) or fallback
 const _lf = { forModule: (mod) => ({ debug: () => {}, info: () => {}, warn: (m, ...a) => console.warn(`[${mod}] ${m}`, ...a), error: (m, ...a) => console.error(`[${mod}] ${m}`, ...a) }) };
 const log = (window.__logger) ? window.__logger.forModule('popup') : _lf.forModule('popup');
-log.info('Popup init OK, logger:', typeof log, 'window.__logger:', !!window.__logger);
 
 // ============================================
 // Background port & capture state
@@ -14,9 +13,27 @@ let bgMetricsHandler = null;
 let captureActive = false;
 let gracefulStop = false;
 let isConnected = false;
+let bgPortReconnectTimer = null; // Debounce timer for reconnect
+let currentCaptureSource = 'tab'; // Track for unmute on stop
+let capturedTabId = null; // Track tab that was muted
 
 // Storage key for persisting drop count across popup reconnects
 const DROP_COUNT_KEY = 'ssa_audio_drop_count';
+
+// Keys matching background.js for force-reset recovery
+const CAPTURING_KEY = 'ssa_capturing';
+const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue';
+
+// === Force reset stale state ONLY when capture was active ===
+// H-6: Unconditional FORCE_RESET erases metrics from active sessions
+// Now only sends reset if storage indicates stale capturing state
+chrome.storage.local.get([CAPTURING_KEY], (result) => {
+  if (result && result[CAPTURING_KEY]) {
+    chrome.runtime.sendMessage({ type: 'FORCE_RESET' }, () => {
+      void chrome.runtime.lastError;
+    });
+  }
+});
 
 // ============================================
 // Theme Colors
@@ -81,6 +98,7 @@ const oscilloscopeCanvas = document.getElementById('oscilloscopeCanvas');
 const oscilloscopeCtx = oscilloscopeCanvas ? oscilloscopeCanvas.getContext('2d') : null;
 const exportBtn = document.getElementById('exportBtn');
 const exportLogBtn = document.getElementById('exportLogBtn');
+const exportTokensBtn = document.getElementById('exportTokensBtn');
 const oscilloscopeSection = document.getElementById('oscilloscopeSection');
 const timelineCanvas = document.getElementById('timelineCanvas');
 const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
@@ -111,6 +129,87 @@ const entropyState = document.getElementById('entropyState');
 const flatnessValue = document.getElementById('flatnessValue');
 const entropyHint = document.getElementById('entropyHint');
 
+// New DSP metrics section
+const newMetricsSection = document.getElementById('newMetricsSection');
+const hnrValue = document.getElementById('hnrValue');
+const zcrValue = document.getElementById('zcrValue');
+const centroidValue = document.getElementById('centroidValue');
+const rolloffValue = document.getElementById('rolloffValue');
+const onsetValue = document.getElementById('onsetValue');
+const rttValue = document.getElementById('rttValue');
+
+// Extended DSP metrics (C.2.8–C.2.10)
+const extendedMetricsSection = document.getElementById('extendedMetricsSection');
+const drValue = document.getElementById('drValue');
+const bassMidRatioValue = document.getElementById('bassMidRatioValue');
+const midTrebleRatioValue = document.getElementById('midTrebleRatioValue');
+const glitchRateValue = document.getElementById('glitchRateValue');
+
+// ============================================
+// Effects Section (C.3)
+// ============================================
+const effectsSection = document.getElementById('effectsSection');
+
+// Compressor
+const compressorToggle = document.getElementById('compressorToggle');
+const compThreshold = document.getElementById('compThreshold');
+const compRatio = document.getElementById('compRatio');
+const compKnee = document.getElementById('compKnee');
+const compAttack = document.getElementById('compAttack');
+const compRelease = document.getElementById('compRelease');
+const compThresholdVal = document.getElementById('compThresholdVal');
+const compRatioVal = document.getElementById('compRatioVal');
+const compKneeVal = document.getElementById('compKneeVal');
+const compAttackVal = document.getElementById('compAttackVal');
+const compReleaseVal = document.getElementById('compReleaseVal');
+
+// Parametric EQ
+const eqToggle = document.getElementById('eqToggle');
+const hpfFreq = document.getElementById('hpfFreq');
+const lpfFreq = document.getElementById('lpfFreq');
+const peakFreq = document.getElementById('peakFreq');
+const peakGain = document.getElementById('peakGain');
+const peakQ = document.getElementById('peakQ');
+const hpfFreqVal = document.getElementById('hpfFreqVal');
+const lpfFreqVal = document.getElementById('lpfFreqVal');
+const peakFreqVal = document.getElementById('peakFreqVal');
+const peakGainVal = document.getElementById('peakGainVal');
+const peakQVal = document.getElementById('peakQVal');
+
+// Limiter
+const limiterToggle = document.getElementById('limiterToggle');
+const limThresh = document.getElementById('limThresh');
+const limThreshVal = document.getElementById('limThreshVal');
+
+// Delay
+const delayToggle = document.getElementById('delayToggle');
+const delayTime = document.getElementById('delayTime');
+const delayFeedback = document.getElementById('delayFeedback');
+const delayMix = document.getElementById('delayMix');
+const delayTimeVal = document.getElementById('delayTimeVal');
+const delayFeedbackVal = document.getElementById('delayFeedbackVal');
+const delayMixVal = document.getElementById('delayMixVal');
+
+// Reset All
+const effectsResetBtn = document.getElementById('effectsResetBtn');
+
+// Effects storage keys
+const EFFECTS_STORAGE_KEY = 'ssa_effectsSettings';
+const EFFECTS_DEFAULTS = {
+  compressor: { active: false, threshold: -24, ratio: 12, knee: 30, attack: 3, release: 250 },
+  eq: { active: false, hpfFreq: 20, lpfFreq: 22050, peakFreq: 1000, peakGain: 0, peakQ: 1 },
+  limiter: { active: false, threshold: -1 },
+  delay: { active: false, delayTime: 0, feedback: 0, mix: 0 }
+};
+
+// Effects send debounce — 100ms interval to prevent spamming offscreen
+let _effectsSendDebounce = null;
+let _pendingEffectsSend = null;
+
+// Effects local state
+let effectsSettings = JSON.parse(JSON.stringify(EFFECTS_DEFAULTS));
+let effectsUIEnabled = false; // Whether sliders are enabled (capture active)
+
 // Glitch settings elements
 const thresholdSlider = document.getElementById('thresholdSlider');
 const thresholdValue = document.getElementById('thresholdValue');
@@ -121,15 +220,31 @@ const glitchStateDot = document.getElementById('glitchStateDot');
 
 // Glitch log (max 500 entries, FIFO)
 const GLITCH_LOG_MAX = 500;
-let glitchLog = [];
+// M-5: Circular buffer for glitch log
+const _glitchLog = new Array(GLITCH_LOG_MAX);
+let _glitchLogHead = 0;
+let _glitchLogCount = 0;
 let currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
 let lastGlitchState = 'STABLE';
 
 // Glitch timeline history
 const TIMELINE_MAX = 300;
-let glitchHistory = [];
+// M-4: Circular buffer for glitch timeline history
+const _glitchHistory = new Array(TIMELINE_MAX);
+let _glitchHistoryHead = 0;
+let _glitchHistoryCount = 0;
 let lastTimelineRecord = 0;
 let CAPTURE_START_TIME = 0;
+
+// M-4: Get snapshot of glitch history from circular buffer (for read-only iteration)
+function getGlitchHistorySnapshot() {
+  const snapshot = [];
+  for (let i = 0; i < _glitchHistoryCount; i++) {
+    const idx = (_glitchHistoryHead - _glitchHistoryCount + i + TIMELINE_MAX) % TIMELINE_MAX;
+    snapshot.push(_glitchHistory[idx]);
+  }
+  return snapshot;
+}
 
 // Oscilloscope history buffers (ring buffer: Float32Array, HISTORY_SIZE=1024)
 // Buffers are overwritten each frame by updateOscilloscopeFromWaveform()
@@ -149,6 +264,7 @@ let referenceBufferRight = null;
 
 const OSC_SPLIT_KEY = 'oscSplit';
 const OSC_REF_KEY = 'oscReferenceSet';
+const OSC_OPTIONS_KEY = 'oscOptions';
 
 // rAF throttle for Canvas rendering
 let pendingOscDraw = null;
@@ -161,8 +277,11 @@ const PERF_KEY = 'perfMonitorActive';
 let perfActive = false;
 let perfFrameCount = 0;
 let perfLastTime = 0;
-let perfDrawTimes = [];
-let PERF_MAX_DRAWS = 30;
+// M-1: Circular buffer for draw times (zero push/shift allocations)
+let _perfDrawBuf = new Array(30);
+let _perfDrawHead = 0;
+let _perfDrawCount = 0;
+const PERF_MAX_DRAWS = 30;
 
 // Debug metrics state
 let lastLatency = 0;
@@ -180,9 +299,23 @@ const perfLatency = document.getElementById('perfLatency');
 const perfDsp = document.getElementById('perfDsp');
 const perfDrops = document.getElementById('perfDrops');
 const perfConnection = document.getElementById('perfConnection');
+const perfConnLatency = document.getElementById('perfConnLatency');
+const perfMemory = document.getElementById('perfMemory');
+const perfAlerts = document.getElementById('perfAlerts');
 
 // Perf monitor visibility state (separate from perfActive which tracks measurement)
 let perfVisible = false;
+
+// Memory monitoring
+let perfAlertCount = 0;
+let perfAlertsLastLogged = 0;
+const PERF_ALERT_RATE_LIMIT_MS = 5000; // Rate-limit alerts to once per 5s
+
+// Connection latency sampling
+let perfLastPingTime = 0;
+let perfConnectionLatency = 0;
+let perfLatencySampleTimer = null;
+let lastConnectionLatency = 0; // RTT from ping/pong (ms)
 
 // ============================================
 // Glitch Heatmap
@@ -217,7 +350,7 @@ function togglePerfMonitor() {
     togglePerfBtn.textContent = perfVisible ? 'Hide' : 'Perf';
   }
   
-  chrome.storage.local.set({ [PERF_KEY]: perfVisible });
+  safeStorageSet({ [PERF_KEY]: perfVisible });
   
   // Start rAF loop when enabling
   if (perfVisible && !perfRunning) {
@@ -267,6 +400,37 @@ function updatePerfDisplay(fps, drawMs, queueLen) {
     perfConnection.className = `label-sm ${colorClass}`;
     perfConnection.textContent = isConnected ? 'Conn: OK' : 'Conn: FAIL';
   }
+  // Connection RTT (from ping/pong)
+  if (perfConnLatency) {
+    const colorClass = lastConnectionLatency > 0
+      ? (lastConnectionLatency < 15 ? 'perf-good' : lastConnectionLatency < 50 ? 'perf-warn' : 'perf-bad')
+      : 'label-sm';
+    perfConnLatency.className = `label-sm ${colorClass}`;
+    perfConnLatency.textContent = lastConnectionLatency > 0
+      ? `RTT: ${Math.round(lastConnectionLatency)}ms`
+      : 'RTT: --';
+  }
+  // Memory (Chrome-only API)
+  if (perfMemory) {
+    if (typeof performance !== 'undefined' && performance.memory && performance.memory.usedJSHeapSize) {
+      const memMB = (performance.memory.usedJSHeapSize / (1024 * 1024)).toFixed(1);
+      const memRatio = performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit;
+      let colorClass = 'perf-good';
+      if (memRatio > 0.8) colorClass = 'perf-bad';
+      else if (memRatio > 0.6) colorClass = 'perf-warn';
+      perfMemory.className = `label-sm ${colorClass}`;
+      perfMemory.textContent = `Mem: ${memMB}MB`;
+    } else {
+      perfMemory.className = 'label-sm';
+      perfMemory.textContent = 'Mem: n/a';
+    }
+  }
+  // Alerts counter
+  if (perfAlerts) {
+    const colorClass = perfAlertCount === 0 ? 'perf-good' : perfAlertCount <= 2 ? 'perf-warn' : 'perf-bad';
+    perfAlerts.className = `label-sm ${colorClass}`;
+    perfAlerts.textContent = `Alerts: ${perfAlertCount}`;
+  }
 }
 
 // Performance frame loop
@@ -283,7 +447,11 @@ const HEATMAP_DRAW_INTERVAL_MS = 500;
 
 // Performance-aware heatmap: auto-disable when draw exceeds threshold
 const HEATMAP_PERF_MAX_AVG_MS = 15; // Auto-disable if avg draw > 15ms
-let heatmapDrawTimes = [];
+// M-3: Circular buffer for heatmap draw times (zero push/shift allocations)
+const _heatmapPerfSampleSize = 10;
+let _heatmapDrawBuf = new Array(_heatmapPerfSampleSize);
+let _heatmapDrawHead = 0;
+let _heatmapDrawCount = 0;
 const HEATMAP_PERF_SAMPLE_SIZE = 10;
 function perfFrameLoop(timestamp) {
   if (!perfActive) {
@@ -300,20 +468,32 @@ function perfFrameLoop(timestamp) {
   // Calculate FPS every 30 frames (~0.5s)
   if (perfFrameCount % 30 === 0) {
     const fps = Math.round(1000 / (delta || 16.67));
-    const avgDrawMs = perfDrawTimes.length > 0
-      ? perfDrawTimes.reduce((a, b) => a + b, 0) / perfDrawTimes.length
-      : 0;
+    // M-1: Circular buffer average (zero allocations)
+    let sum = 0;
+    for (let i = 0; i < _perfDrawCount; i++) {
+      const idx = (_perfDrawHead - _perfDrawCount + i + PERF_MAX_DRAWS) % PERF_MAX_DRAWS;
+      sum += _perfDrawBuf[idx];
+    }
+    const avgDrawMs = _perfDrawCount > 0 ? sum / _perfDrawCount : 0;
 
     updatePerfDisplay(fps, avgDrawMs, 0);
-    perfDrawTimes = [];
+    _perfDrawHead = 0;
+    _perfDrawCount = 0;
   }
   
-  // Sample latency every ~2 seconds (120 frames at 60fps)
+  // Ping background every ~3 seconds (180 frames at 60fps)
   perfLatencySampleCount++;
-  if (perfLatencySampleCount >= 120 && popupAudioContext) {
+  if (perfLatencySampleCount >= 90) { // ~1.5s at 60fps
     perfLatencySampleCount = 0;
-    const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
-    lastLatency = latency;
+    if (bgPort && bgMetricsConnected) {
+      const pingTime = Date.now();
+      safePostMessage(bgPort, { type: '_PONG_REQUEST', pingTime });
+    }
+    // Also sample device outputLatency if available
+    if (popupAudioContext) {
+      const latency = (popupAudioContext.outputLatency || 0) * 1000; // Convert to ms
+      lastLatency = latency;
+    }
     
     // Also request DSP time from worklet if available
     if (popupWorkletNode) {
@@ -325,6 +505,41 @@ function perfFrameLoop(timestamp) {
       const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
       const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
       updatePerfDisplay(fps, drawMs, 0);
+    }
+  }
+  
+  // Check performance alerts every ~6 seconds (360 frames)
+  if (perfFrameCount % 360 === 0 && perfActive) {
+    const now = Date.now();
+    const fps = Math.round(1000 / (delta || 16.67));
+    // M-1: Circular buffer average
+    let sum2 = 0;
+    for (let i = 0; i < _perfDrawCount; i++) {
+      const idx = (_perfDrawHead - _perfDrawCount + i + PERF_MAX_DRAWS) % PERF_MAX_DRAWS;
+      sum2 += _perfDrawBuf[idx];
+    }
+    const avgDrawMs = _perfDrawCount > 0 ? sum2 / _perfDrawCount : 0;
+    
+    // FPS alert (< 15)
+    if (fps < 15 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+      log.warn(`Perf alert: FPS dropped to ${fps}`);
+      perfAlertsLastLogged = now;
+      perfAlertCount++;
+    }
+    // Draw time alert (> 30ms)
+    if (avgDrawMs > 30 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+      log.warn(`Perf alert: draw time ${avgDrawMs.toFixed(1)}ms`);
+      perfAlertsLastLogged = now;
+      perfAlertCount++;
+    }
+    // Memory alert (> 100MB, Chrome-only)
+    if (typeof performance !== 'undefined' && performance.memory) {
+      const memMB = performance.memory.usedJSHeapSize / (1024 * 1024);
+      if (memMB > 100 && now - perfAlertsLastLogged > PERF_ALERT_RATE_LIMIT_MS) {
+        log.warn(`Perf alert: memory ${memMB.toFixed(0)}MB`);
+        perfAlertsLastLogged = now;
+        perfAlertCount++;
+      }
     }
   }
 
@@ -353,15 +568,17 @@ function perfAwareDraw(leftSamples, rightSamples) {
   drawOscilloscope(leftSamples, rightSamples);
   const elapsed = perfNow() - start;
 
-  perfDrawTimes.push(elapsed);
-  if (perfDrawTimes.length > PERF_MAX_DRAWS) {
-    perfDrawTimes.shift();
+  // M-1: Circular buffer push (zero allocation)
+  _perfDrawBuf[_perfDrawHead] = elapsed;
+  _perfDrawHead = (_perfDrawHead + 1) % PERF_MAX_DRAWS;
+  if (_perfDrawCount < PERF_MAX_DRAWS) {
+    _perfDrawCount++;
   }
 }
 
 // Load perf monitor state on startup
-chrome.storage.local.get([PERF_KEY], (result) => {
-  if (result[PERF_KEY]) {
+safeStorageGet([PERF_KEY], (result) => {
+  if (result && result[PERF_KEY]) {
     perfVisible = true;
     perfActive = true;
     if (perfMonitor) perfMonitor.style.display = 'block';
@@ -408,8 +625,7 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
         // Throttle to ~15fps (canvas is expensive — 30fps causes hangs)
         const now = perfNow();
         if (now - lastOscDrawTime < 66 && lastOscDrawTime > 0) {
-          // Skip draw but update buffer for next frame
-          // Buffer is already Float32Array — no copy overhead
+          // Skip draw — keep pendingOscDraw for next draw so we don't stale
         } else {
           lastOscDrawTime = now;
           if (perfActive) {
@@ -418,15 +634,19 @@ function scheduleDraws(leftBuffer, rightBuffer, needsTimelineUpdate) {
             drawOscilloscope(pendingOscDraw.left, pendingOscDraw.right);
           }
         }
-        // CRITICAL: Release reference to prevent memory leaks
-        pendingOscDraw = null;
       }
       
       if (pendingTimelineDraw) {
         if (perfActive) {
           const tStart = perfNow();
           drawTimeline();
-          perfDrawTimes.push(perfNow() - tStart);
+          // M-1: Circular buffer push for timeline draw time
+          const tElapsed = perfNow() - tStart;
+          _perfDrawBuf[_perfDrawHead] = tElapsed;
+          _perfDrawHead = (_perfDrawHead + 1) % PERF_MAX_DRAWS;
+          if (_perfDrawCount < PERF_MAX_DRAWS) {
+            _perfDrawCount++;
+          }
         } else {
           drawTimeline();
         }
@@ -518,6 +738,9 @@ function updateUI(connected) {
     if (heatmapSection) heatmapSection.style.display = 'block';
     if (entropySection) entropySection.style.display = '';
     if (entropyHint) entropyHint.style.display = '';
+    // Effects section — show when capture active
+    if (effectsSection) effectsSection.style.display = 'block';
+    setEffectsEnabled(true);
   } else {
     if (startBtn) startBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = true;
@@ -531,6 +754,7 @@ function updateUI(connected) {
     if (glitchSettings) glitchSettings.style.display = 'none';
     if (timelineSection) timelineSection.style.display = 'none';
     if (heatmapSection) heatmapSection.style.display = 'none';
+    if (effectsSection) effectsSection.style.display = 'none';
     if (entropySection) entropySection.style.display = 'none';
     if (entropyHint) entropyHint.style.display = 'none';
 
@@ -538,8 +762,12 @@ function updateUI(connected) {
     smoothedBass = 0;
     smoothedMid = 0;
     smoothedTreble = 0;
-    glitchLog = [];
-    glitchHistory = [];
+    // M-5: Reset glitch log circular buffer
+    _glitchLogHead = 0;
+    _glitchLogCount = 0;
+    // M-4: Reset glitch history circular buffer
+    _glitchHistoryHead = 0;
+    _glitchHistoryCount = 0;
     CAPTURE_START_TIME = 0;
     lastTimelineRecord = 0;
 
@@ -574,6 +802,9 @@ function updateUI(connected) {
 
     if (entropyValue) entropyValue.textContent = '0.00';
     if (flatnessValue) flatnessValue.textContent = '0.00';
+
+    // Disable effects on stop
+    setEffectsEnabled(false);
     if (entropyState) {
       entropyState.textContent = 'STABLE';
       entropyState.style.color = tc('glitch').STABLE;
@@ -614,11 +845,19 @@ function updateFrequencyBands(bass, mid, treble, maxEnergy = 1.0) {
   const rawMid = isValid(mid) ? mid : 0;
   const rawTreble = isValid(treble) ? treble : 0;
 
-  // Формула сглаживания LERP (Linear Interpolation):
-  // Current = Current + (Target - Current) * Factor
-  smoothedBass += (rawBass - smoothedBass) * SMOOTHING_FACTOR;
-  smoothedMid += (rawMid - smoothedMid) * SMOOTHING_FACTOR;
-  smoothedTreble += (rawTreble - smoothedTreble) * SMOOTHING_FACTOR;
+  // Check for DC silence detection: all bands zero AND RMS zero
+  // Reset smoothing immediately to avoid ghost 100% bass
+  if (rawBass === 0 && rawMid === 0 && rawTreble === 0) {
+    smoothedBass = 0;
+    smoothedMid = 0;
+    smoothedTreble = 0;
+  } else {
+    // Формула сглаживания LERP (Linear Interpolation):
+    // Current = Current + (Target - Current) * Factor
+    smoothedBass += (rawBass - smoothedBass) * SMOOTHING_FACTOR;
+    smoothedMid += (rawMid - smoothedMid) * SMOOTHING_FACTOR;
+    smoothedTreble += (rawTreble - smoothedTreble) * SMOOTHING_FACTOR;
+  }
 
   const bassPercent = Math.min(100, Math.max(0, smoothedBass));
   const midPercent = Math.min(100, Math.max(0, smoothedMid));
@@ -765,7 +1004,7 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = 
   // Hold frame: keep current drawing, skip update
   if (hold === true) return;
   
-  // No waveform data — skip
+  // No waveform data and not hold — don't clear canvas, just skip
   if (!waveform || waveform.length === 0) return;
   
   if (frozen) {
@@ -796,7 +1035,7 @@ function updateOscilloscopeFromWaveform(waveform, hold, waveformRight, frozen = 
   updateOscilloscopeWithThrottle(leftChannelHistory, rightChannelHistory);
 }
 
-function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
+function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness, hnr, zcr, spectralCentroid, spectralRolloff, onsetDetected, rtt, dynamicRange, bassMidRatio, midTrebleRatio, glitchRate) {
   updateGlitchStatus(state, count);
 
   if (entropySection && entropy !== undefined) {
@@ -824,6 +1063,47 @@ function updateGlitchDisplay(state, count, entropy, entropyStateVal, flatness) {
         break;
     }
   }
+  
+  // C.2.11: Update new DSP metrics display
+  if (newMetricsSection) {
+    newMetricsSection.style.display = 'block';
+  }
+  if (hnrValue && hnr !== undefined && Number.isFinite(hnr) && hnr !== 0) {
+    hnrValue.textContent = hnr.toFixed(1) + ' dB';
+  }
+  if (zcrValue && zcr !== undefined) {
+    zcrValue.textContent = zcr.toFixed(0);
+  }
+  if (centroidValue && spectralCentroid !== undefined) {
+    centroidValue.textContent = spectralCentroid.toFixed(0) + ' Hz';
+  }
+  if (rolloffValue && spectralRolloff !== undefined) {
+    rolloffValue.textContent = spectralRolloff.toFixed(0) + ' Hz';
+  }
+  if (onsetValue && onsetDetected !== undefined) {
+    onsetValue.textContent = onsetDetected ? 'YES' : 'NO';
+    onsetValue.style.color = onsetDetected ? 'var(--text-red)' : 'var(--accent-blue)';
+  }
+  if (rttValue && rtt !== undefined && rtt > 0) {
+    rttValue.textContent = Math.round(rtt) + 'ms';
+  }
+  
+  // C.2.8–C.2.10: Extended metrics display
+  if (extendedMetricsSection) {
+    extendedMetricsSection.style.display = 'block';
+  }
+  if (dynamicRange !== undefined && dynamicRange != null && dynamicRange > 0) {
+    drValue.textContent = dynamicRange.toFixed(1) + ' dB';
+  }
+  if (bassMidRatio !== undefined && bassMidRatio != null) {
+    bassMidRatioValue.textContent = bassMidRatio.toFixed(2) + ' dB';
+  }
+  if (midTrebleRatio !== undefined && midTrebleRatio != null) {
+    midTrebleRatioValue.textContent = midTrebleRatio.toFixed(2) + ' dB';
+  }
+  if (glitchRate !== undefined && glitchRate != null) {
+    glitchRateValue.textContent = glitchRate.toFixed(1) + '/s';
+  }
 }
 
 function drawTimeline() {
@@ -837,11 +1117,12 @@ function drawTimeline() {
   timelineCtx.fillStyle = colors.bg;
   timelineCtx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-  if (glitchHistory.length < 2) return;
+  const gh = getGlitchHistorySnapshot();
+  if (gh.length < 2) return;
 
   // Normalize timestamps relative to oldest point in window (prevents timeline disappearing after shift)
-  const windowStart = glitchHistory[0].time;
-  const windowEnd = glitchHistory[glitchHistory.length - 1].time;
+  const windowStart = gh[0].time;
+  const windowEnd = gh[gh.length - 1].time;
   const windowDuration = windowEnd - windowStart;
 
   // Group consecutive points by state for batched color drawing
@@ -849,8 +1130,8 @@ function drawTimeline() {
   var currentSegment = [];
   var currentState = null;
   
-  for (var i = 0; i < glitchHistory.length; i++) {
-    var point = glitchHistory[i];
+  for (var i = 0; i < gh.length; i++) {
+    var point = gh[i];
     if (point.state !== currentState) {
       if (currentSegment.length > 0) {
         segments.push({ state: currentState, points: currentSegment });
@@ -990,17 +1271,26 @@ function drawHeatmap() {
   
   // Performance monitoring: auto-disable heatmap if drawing is too slow
   const drawElapsed = perfNow() - drawStart;
-  heatmapDrawTimes.push(drawElapsed);
-  if (heatmapDrawTimes.length > HEATMAP_PERF_SAMPLE_SIZE) {
-    heatmapDrawTimes.shift();
+  // M-3: Circular buffer push
+  _heatmapDrawBuf[_heatmapDrawHead] = drawElapsed;
+  _heatmapDrawHead = (_heatmapDrawHead + 1) % _heatmapPerfSampleSize;
+  if (_heatmapDrawCount < _heatmapPerfSampleSize) {
+    _heatmapDrawCount++;
   }
-  if (heatmapDrawTimes.length === HEATMAP_PERF_SAMPLE_SIZE) {
-    const avgDrawMs = heatmapDrawTimes.reduce((a, b) => a + b, 0) / HEATMAP_PERF_SAMPLE_SIZE;
+  if (_heatmapDrawCount === _heatmapPerfSampleSize) {
+    // M-3: Circular buffer average
+    let sum = 0;
+    for (let i = 0; i < _heatmapDrawCount; i++) {
+      const idx = (_heatmapDrawHead - _heatmapDrawCount + i + _heatmapPerfSampleSize) % _heatmapPerfSampleSize;
+      sum += _heatmapDrawBuf[idx];
+    }
+    const avgDrawMs = sum / _heatmapPerfSampleSize;
     if (avgDrawMs > HEATMAP_PERF_MAX_AVG_MS) {
       log.warn(`Heatmap avg draw ${avgDrawMs.toFixed(1)}ms > ${HEATMAP_PERF_MAX_AVG_MS}ms threshold — auto-disabling`);
       heatmapActive = false;
-      chrome.storage.local.set({ [HEATMAP_KEY]: false });
-      heatmapDrawTimes = [];
+      safeStorageSet({ [HEATMAP_KEY]: false });
+      _heatmapDrawHead = 0;
+      _heatmapDrawCount = 0;
     }
   }
 }
@@ -1041,9 +1331,34 @@ function applyMetrics(data) {
   }
   if (applyMetrics._count === undefined) applyMetrics._count = 0;
   applyMetrics._count++;
-  // Log every 500 metrics only
-  if (applyMetrics._count === 500) {
-    log.info('applyMetrics: processed', applyMetrics._count, 'total');
+  
+  // P.2 DSP DECIMATION: Cache heavy metrics between light payloads
+  // Light payloads (every ~2.9ms) have hnr:0, spectralCentroid:0, mfcc:[], aiScore:0
+  // Heavy payloads (every ~23ms) have real heavy metrics
+  // Only update heavy metrics when non-zero (i.e., from heavy frame)
+  if (!applyMetrics._cachedHeavy) {
+    applyMetrics._cachedHeavy = {
+      hnr: 0, zcr: 0, spectralCentroid: 0, spectralRolloff: 0,
+      onsetDetected: false, aiScore: 0, mfcc: [], mfccStd: [],
+      dynamicRange: 0, bassMidRatio: 0, midTrebleRatio: 0
+    };
+  }
+  
+  // Merge: always update light metrics, only update heavy when non-zero
+  const heavyData = data;
+  if (heavyData.hnr > 0 || heavyData.aiScore > 0 || heavyData.mfcc.length > 0) {
+    // Heavy frame — update cache
+    applyMetrics._cachedHeavy.hnr = heavyData.hnr;
+    applyMetrics._cachedHeavy.zcr = heavyData.zcr;
+    applyMetrics._cachedHeavy.spectralCentroid = heavyData.spectralCentroid;
+    applyMetrics._cachedHeavy.spectralRolloff = heavyData.spectralRolloff;
+    applyMetrics._cachedHeavy.onsetDetected = heavyData.onsetDetected;
+    applyMetrics._cachedHeavy.aiScore = heavyData.aiScore;
+    applyMetrics._cachedHeavy.mfcc = heavyData.mfcc;
+    applyMetrics._cachedHeavy.mfccStd = heavyData.mfccStd;
+    applyMetrics._cachedHeavy.dynamicRange = heavyData.dynamicRange;
+    applyMetrics._cachedHeavy.bassMidRatio = heavyData.bassMidRatio;
+    applyMetrics._cachedHeavy.midTrebleRatio = heavyData.midTrebleRatio;
   }
   
   try {
@@ -1095,21 +1410,41 @@ function applyMetrics(data) {
       // Timeline recording (throttle ~5 Hz)
       if (CAPTURE_START_TIME === 0) { CAPTURE_START_TIME = Date.now(); }
       if (data.timestamp - lastTimelineRecord > 200) {
-        glitchHistory.push({
+        // M-4: Circular buffer push
+        _glitchHistory[_glitchHistoryHead] = {
           time: data.timestamp - CAPTURE_START_TIME,
           rms: data.rms,
           state: data.glitchState
-        });
-        lastTimelineRecord = data.timestamp;
-        if (glitchHistory.length > TIMELINE_MAX) {
-          glitchHistory.shift();
+        };
+        _glitchHistoryHead = (_glitchHistoryHead + 1) % TIMELINE_MAX;
+        if (_glitchHistoryCount < TIMELINE_MAX) {
+          _glitchHistoryCount++;
         }
+        lastTimelineRecord = data.timestamp;
         updateTimelineWithThrottle();
       }
     }
 
-    // Glitch detection display
-    updateGlitchDisplay(data.glitchState, data.glitchCount, data.entropy, data.entropyState, data.flatness);
+    // Glitch detection display — use cached heavy metrics (P.2 DSP decimation)
+    // Light payloads have 0 for heavy metrics; heavy payloads fill _cachedHeavy
+    const heavy = applyMetrics._cachedHeavy;
+    updateGlitchDisplay(
+      data.glitchState,
+      data.glitchCount,
+      data.entropy,
+      data.entropyState,
+      data.flatness,
+      heavy.hnr,
+      heavy.zcr,
+      heavy.spectralCentroid,
+      heavy.spectralRolloff,
+      heavy.onsetDetected,
+      lastConnectionLatency,
+      heavy.dynamicRange,
+      heavy.bassMidRatio,
+      heavy.midTrebleRatio,
+      data.glitchRate
+    );
   } catch (e) {
     // One bad metrics frame must not hang the popup
     log.warn('applyMetrics error:', e.message);
@@ -1121,7 +1456,32 @@ async function initAudioProcessing(stream) {
   popupCaptureStream = stream;
   
   try {
-    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+    // === DYNAMIC SAMPLE RATE SYNC ===
+    // Match AudioContext sampleRate to the input track to eliminate SRC (Sample Rate Conversion)
+    let targetSampleRate = 44100; // Fallback — Chrome's internal default
+    try {
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0 && audioTracks[0].getSettings) {
+        const settings = audioTracks[0].getSettings();
+        if (settings.sampleRate && settings.sampleRate > 0) {
+          targetSampleRate = settings.sampleRate;
+        }
+      }
+    } catch (e) {
+      // getSettings() not available in all browsers
+      log.info('getSettings() not available — using default sampleRate:', targetSampleRate);
+    }
+    
+    // === C-3: Close previous AudioContext BEFORE creating new one ===
+    // Prevents memory leak when popup is re-started without full page reload
+    if (popupAudioContext && popupAudioContext.state !== 'closed') {
+      log.info('C-3: Closing stale AudioContext before re-init');
+      try {
+        popupAudioContext.close();
+      } catch (_) {}
+    }
+    
+    popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
     
     if (popupAudioContext.state === 'suspended') {
       await popupAudioContext.resume();
@@ -1136,16 +1496,18 @@ async function initAudioProcessing(stream) {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       channelCount: 2,
-      channelCountMode: 'max',
+      channelCountMode: 'explicit', // Prevents dynamic input array length changes on mono/stereo switch
       channelInterpretation: 'discrete'
     });
 
     // 1. Источник направляем в воркет для спектрального анализа
     popupMediaStreamSource.connect(popupWorkletNode);
 
-    // 2. ВАЖНО: Подключаем воркет (или источник) к колонкам/наушникам, 
-    // чтобы не было глушения оригинального звука
-    popupWorkletNode.connect(popupAudioContext.destination);
+    // 2. [COMMENTED] Original audio already plays through browser's native content rendering.
+    //    Connecting to destination would cause double audio (echo) — user hears it twice:
+    //    (a) from the original page content, (b) from this popup AudioContext → speakers.
+    //    Kept for potential "monitoring" use case in future.
+    // popupMediaStreamSource.connect(popupAudioContext.destination);
 
     // Named handler for proper cleanup — previous handlers lost on reassignment
     const workletMetricsHandler = (event) => {
@@ -1179,15 +1541,13 @@ async function initAudioProcessing(stream) {
 function stopAudioProcessing() {
   gracefulStop = true;
   
-  glitchLog = [];
+  // M-5: Reset glitch log circular buffer
+  _glitchLogHead = 0;
+  _glitchLogCount = 0;
   lastGlitchState = 'STABLE';
   currentMetrics = { rms: 0, bass: 0, mid: 0, treble: 0, highFreqAnomaly: 0 };
   
   // Reset all buffers to prevent memory leaks
-  leftChannelHistory.fill(0);
-  rightChannelHistory.fill(0);
-  
-  // CRITICAL: Clear all buffers to prevent memory leaks
   leftChannelHistory.fill(0);
   rightChannelHistory.fill(0);
   
@@ -1210,14 +1570,18 @@ function stopAudioProcessing() {
   pendingOscDraw = null;
   pendingTimelineDraw = false;
   
-  // Clear channel history buffers
+  // CRITICAL: Null worklet port.onmessage to release closures (was leaking applyMetrics, currentMetrics refs)
+  if (popupWorkletNode) {
+    try {
+      popupWorkletNode.port.onmessage = null;
+      popupWorkletNode.disconnect();
+    } catch (_) {}
+    popupWorkletNode = null;
+  }
+  
   if (popupMediaStreamSource) {
     try { popupMediaStreamSource.disconnect(); } catch (_) {}
     popupMediaStreamSource = null;
-  }
-  if (popupWorkletNode) {
-    try { popupWorkletNode.disconnect(); } catch (_) {}
-    popupWorkletNode = null;
   }
   if (popupAudioContext) {
     if (popupAudioContext.state !== 'closed') {
@@ -1268,22 +1632,30 @@ function addGlitchLogEntry(glitchCount) {
     treble: currentMetrics.treble,
     highFreqAnomaly: currentMetrics.highFreqAnomaly
   };
-  glitchLog.push(entry);
-  if (glitchLog.length > GLITCH_LOG_MAX) {
-    glitchLog.shift();
+  // M-5: Circular buffer push
+  _glitchLog[_glitchLogHead] = entry;
+  _glitchLogHead = (_glitchLogHead + 1) % GLITCH_LOG_MAX;
+  if (_glitchLogCount < GLITCH_LOG_MAX) {
+    _glitchLogCount++;
   }
 }
 
 function exportGlitchLog() {
-  if (glitchLog.length === 0) {
+  if (_glitchLogCount === 0) {
     alert('Лог глитчей пуст. Запустите захват аудио и дождитесь срабатывания детектора.');
     return;
   }
+  // M-5: Collect entries from circular buffer in chronological order
+  const entries = [];
+  for (let i = 0; i < _glitchLogCount; i++) {
+    const idx = (_glitchLogHead - _glitchLogCount + i + GLITCH_LOG_MAX) % GLITCH_LOG_MAX;
+    entries.push(_glitchLog[idx]);
+  }
   const exportData = {
     exportDate: new Date().toISOString(),
-    totalGlitches: glitchLog.length,
+    totalGlitches: _glitchLogCount,
     maxEntries: GLITCH_LOG_MAX,
-    entries: glitchLog
+    entries: entries
   };
   const jsonStr = JSON.stringify(exportData, null, 2);
   const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -1324,6 +1696,157 @@ function exportCSV() {
   URL.revokeObjectURL(url);
 }
 
+// === Task 6: Token Stream Export Functions ===
+const TOKEN_FRAME_SIZE = 8;
+const TOKEN_DB_NAME = 'ssa-session-db';
+const TOKEN_STORE_NAME = 'token_chunks';
+
+function decodeTokenFrame(view) {
+  return {
+    rel_ms: view.getUint32(0, true),
+    token: view.getUint8(4),    // aiScore mapped 0–255
+    rms: view.getUint8(5),      // 0–255
+    centroid: view.getUint8(6), // 0–255
+    flags: view.getUint8(7),    // bitmask
+    fsm_state: view.getUint8(7) & 0b11,
+    has_drop: !!(view.getUint8(7) & 0b100)
+  };
+}
+
+function getTokenFramesFromDB(sessionId) {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in self)) { reject('IndexedDB not available'); return; }
+    const request = indexedDB.open(TOKEN_DB_NAME);
+    request.onsuccess = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(TOKEN_STORE_NAME)) {
+        resolve([]);
+        return;
+      }
+      const tx = db.transaction([TOKEN_STORE_NAME], 'readonly');
+      const store = tx.objectStore(TOKEN_STORE_NAME);
+      const index = store.index('sessionId');
+      const getAll = index.getAll(sessionId);
+      getAll.onsuccess = () => {
+        // Return chunks in chronological order (ID auto-increment)
+        resolve(getAll.result || []);
+      };
+      getAll.onerror = () => reject(getAll.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function decodeChunksToRecords(chunks) {
+  const records = [];
+  for (const chunk of chunks) {
+    const payload = chunk.payload; // ArrayBuffer
+    const view = new DataView(payload);
+    const frameCount = payload.byteLength / TOKEN_FRAME_SIZE;
+    for (let i = 0; i < frameCount; i++) {
+      const offset = i * TOKEN_FRAME_SIZE;
+      records.push(decodeTokenFrame(view));
+    }
+  }
+  // Sort by relative timestamp
+  records.sort((a, b) => a.rel_ms - b.rel_ms);
+  return records;
+}
+
+// Task 6: Export token stream as JSONL
+async function exportTokenStreamJSONL() {
+  // Find the most recent session ID from storage
+  let sessionId = null;
+  try {
+    // Read from chrome.storage.session if available
+    const result = await new Promise(resolve => {
+      chrome.storage.session.get(['ssa_capture_session_id'], (r) => resolve(r));
+    });
+    sessionId = result?.ssa_capture_session_id;
+  } catch (_) { /* ignore */ }
+  
+  if (!sessionId) {
+    // Try to get the latest session from IndexedDB by timestamp
+    sessionId = '__latest__';
+  }
+  
+  try {
+    alert('Загрузка токенов из IndexedDB...');
+    const chunks = await getTokenFramesFromDB(sessionId);
+    const records = await decodeChunksToRecords(chunks);
+    
+    if (records.length === 0) {
+      alert('Токены не найдены. Убедитесь, что захват был активен.');
+      return;
+    }
+    
+    // JSONL format: one JSON object per line
+    const jsonl = records.map(r =>
+      JSON.stringify({
+        t: r.rel_ms,
+        token: r.token,
+        rms: r.rms,
+        centroid: r.centroid,
+        state: r.fsm_state, // 0=STABLE, 1=DRIFT, 2=GLITCH
+        drop: r.has_drop ? 1 : 0
+      })
+    ).join('\n');
+    
+    const blob = new Blob([jsonl], { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `token-stream-${Date.now()}.jsonl`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert(`Экспортировано ${records.length} токенов в JSONL`);
+  } catch (e) {
+    alert('Ошибка экспорта: ' + e.message);
+  }
+}
+
+// Task 6: Export token stream as CSV
+async function exportTokenStreamCSV() {
+  let sessionId = null;
+  try {
+    const result = await new Promise(resolve => {
+      chrome.storage.session.get(['ssa_capture_session_id'], (r) => resolve(r));
+    });
+    sessionId = result?.ssa_capture_session_id;
+  } catch (_) { /* ignore */ }
+  
+  if (!sessionId) sessionId = '__latest__';
+  
+  try {
+    const chunks = await getTokenFramesFromDB(sessionId);
+    const records = await decodeChunksToRecords(chunks);
+    
+    if (records.length === 0) {
+      alert('Токены не найдены.');
+      return;
+    }
+    
+    const csv = ['rel_ms,token,rms,centroid,fsm,has_drop'].concat(
+      records.map(r => `${r.rel_ms},${r.token},${r.rms},${r.centroid},${r.fsm_state},${r.has_drop ? 1 : 0}`)
+    ).join('\n');
+    
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `token-stream-${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert(`Экспортировано ${records.length} строк в CSV`);
+  } catch (e) {
+    alert('Ошибка экспорта: ' + e.message);
+  }
+}
+
 function sendSensitivityToWorklet(percentage) {
   if (!popupWorkletNode) return;
   const threshold = percentage / 100;
@@ -1334,26 +1857,43 @@ function sendSensitivityToWorklet(percentage) {
 }
 
 // Background port disconnect handler — named for proper removal
-function bgPortDisconnectHandler() {
+// Uses a module-level variable to track the handler reference for cleanup
+let bgPortDisconnectHandlerRef = null;
+function _bgPortDisconnectHandler() {
   bgMetricsConnected = false;
   
   // Remove all listeners to prevent leaks
   if (bgPort) {
     bgPort.onMessage.removeListener(bgMetricsHandler);
-    bgPort.onDisconnect.removeListener(bgPortDisconnectHandler);
+    bgPort.onDisconnect.removeListener(_bgPortDisconnectHandler);
   }
   
   isConnected = false;
   bgPort = null;
   bgMetricsHandler = null;
+  bgPortDisconnectHandlerRef = null;
   
   // If capture was active when port disconnected, trigger reconnect
-  if (captureActive) {
-    setTimeout(() => {
+  if (captureActive && !gracefulStop) {
+    // Debounce reconnect — prevent rapid disconnect/reconnect cycle
+    if (bgPortReconnectTimer) {
+      clearTimeout(bgPortReconnectTimer);
+      bgPortReconnectTimer = null;
+    }
+    
+    // Check if we're still receiving metrics (connected recently)
+    // If yes, skip reconnect — port may be temporarily paused
+    const lastMetrics = performance.now();
+    const maxDelay = 3000; // Only reconnect if no data for 3s
+    
+    // Schedule reconnect after 2s (give time for background SW to stabilize)
+    bgPortReconnectTimer = setTimeout(() => {
       if (captureActive && !bgPort && !bgMetricsConnected) {
+        log.warn('Reconnecting to background (no metrics for >2s)');
         ensureBackgroundPort();
       }
-    }, 500);
+      bgPortReconnectTimer = null;
+    }, 2000);
   }
   
   // Only update UI if capture was active (spontaneous disconnect)
@@ -1370,14 +1910,30 @@ function bgPortDisconnectHandler() {
   updateUI(false);
 }
 
+// Assign the named handler to module-level ref for cleanup
+bgPortDisconnectHandlerRef = _bgPortDisconnectHandler;
+
+// Safe chrome.storage wrapper — guard against undefined in invalid contexts
+function safeStorageGet(keys, callback) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.get(keys, callback);
+}
+
+function safeStorageSet(obj) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.set(obj);
+}
+
 // Send message to runtime with lastError suppression
+// Must consume lastError inside callback to prevent console "Unchecked runtime.lastError" spam
 function safeSendMessage(msg, callback) {
+  if (!chrome.runtime?.id) {
+    if (callback) callback(null);
+    return;
+  }
   chrome.runtime.sendMessage(msg, (response) => {
-    if (chrome.runtime.lastError) {
-      // SW may have terminated — ignore, will reconnect
-      if (callback) callback(null);
-      return;
-    }
+    // Always consume lastError to prevent console spam
+    void chrome.runtime.lastError;
     if (callback) callback(response);
   });
 }
@@ -1393,9 +1949,97 @@ function safePostMessage(port, msg) {
   }
 }
 
+// === P.6: Direct port from offscreen for metrics ===
+let _offscreenPort = null;
+let _offscreenMetricsHandler = null;
+
+/**
+ * Handle direct metrics port from offscreen (P.6 optimization).
+ * Eliminates background relay overhead for popup → metrics.
+ */
+function _setupOffscreenPort(port) {
+  if (_offscreenPort && !_offscreenPort._disconnected) {
+    log.warn('P.6: Offscreen port already connected, disconnecting old');
+    try { _offscreenPort.disconnect(); } catch (_) {}
+  }
+  
+  _offscreenPort = port;
+  log.info('P.6: Direct port from offscreen connected');
+  
+  if (_offscreenMetricsHandler) {
+    port.onMessage.removeListener(_offscreenMetricsHandler);
+  }
+  
+  _offscreenMetricsHandler = (data) => {
+    if (!data || !captureActive) return;
+    
+    if (data.type === 'METRICS') {
+      applyMetrics(data);
+      if (data.audioDrops !== undefined) {
+        updateDropCounter(data.audioDrops);
+      }
+    }
+    // Control messages via direct port
+    if (data.type === '_AUDIO_DROP') {
+      dropCount = data.count;
+      updateDropCounter(dropCount);
+    }
+    if (data.type === '_AUDIO_DROP_RESET') {
+      dropCount = 0;
+      updateDropCounter(0);
+    }
+    if (data.type === '_OFFSCREEN_ENDED') {
+      gracefulStop = true;
+      stopAudioProcessing();
+      updateUI(false);
+      captureActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+      setTimeout(() => { gracefulStop = false; }, 100);
+    }
+    if (data.type === '_OFFSCREEN_ERROR') {
+      if (rmsLevel) {
+        rmsLevel.textContent = 'Error: ' + (data.error || 'Capture failed');
+        rmsLevel.style.color = tc('rms').SILENCE;
+      }
+      captureActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+    }
+  };
+  
+  port.onMessage.addListener(_offscreenMetricsHandler);
+  
+  port.onDisconnect.addListener(() => {
+    log.info('P.6: Offscreen port disconnected');
+    if (_offscreenMetricsHandler) {
+      port.onMessage.removeListener(_offscreenMetricsHandler);
+      _offscreenMetricsHandler = null;
+    }
+    _offscreenPort = null;
+  });
+}
+
 // Background port — create ONCE at page load to prevent memory leaks
 let bgPortId = 0; // Track connection generation to reject stale messages
 let bgMetricsConnected = false; // Track if port is actually connected
+
+// Connection gap detection — persist across port reconnects (H-2 fix)
+let _lastMetricsTime = 0;
+let _missedFrames = 0;
+const METRICS_GAP_WARN_MS = 1000;
+
+// === P.6: Listen for incoming ports from offscreen ===
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'offscreen-metrics') {
+    _setupOffscreenPort(port);
+  }
+});
+
 function ensureBackgroundPort() {
   // Skip if port is already connected
   if (bgPort && !bgPort._disconnected && bgMetricsConnected) {
@@ -1403,18 +2047,21 @@ function ensureBackgroundPort() {
     return true;
   }
   
-  // Create a new port generation
-  bgPortId++;
-  const currentId = bgPortId;
-  
   // Clear any stale listeners from previous port
   if (bgPort && !bgPort._disconnected) {
     try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
-    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandler); } catch (_) {}
+    try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandlerRef); } catch (_) {}
     bgPort.disconnect();
     bgPort = null;
   }
   bgMetricsConnected = false;
+  
+  // CRITICAL: Null old bgMetricsHandler to release its closure (prevents memory leak on reconnect)
+  bgMetricsHandler = null;
+  
+  // Create a new port generation
+  bgPortId++;
+  const currentId = bgPortId;
   
   try {
     bgPort = chrome.runtime.connect({ name: 'popup-metrics' });
@@ -1424,18 +2071,13 @@ function ensureBackgroundPort() {
     
     // Drop metrics queue to prevent popup hang from backlog
     // When reconnecting, drop anything older than 500ms
-    const METRICS_THROTTLE_MS = 0; // DISABLED - was dropping 99% of metrics
+    const METRICS_THROTTLE_MS = 66; // ~15fps throttle — was 0 (unthrottled at ~43fps)
     let lastMetricsApplyTime = 0;
     let metricsQueueDepth = 0;
     const MAX_QUEUE_DEPTH = 3; // Drop excess if >3 messages pending
     let metricsRecvCount = 0;
     let metricsDroppedThrottle = 0;
     let metricsDroppedQueue = 0;
-    
-    // Connection gap detection — warn when metrics gap > 500ms (indicates SW freeze/drop)
-    let _lastMetricsTime = 0;
-    let _missedFrames = 0;
-    const METRICS_GAP_WARN_MS = 500;
     
     // Named handler function for proper removeListener
     bgMetricsHandler = (data) => {
@@ -1446,12 +2088,12 @@ function ensureBackgroundPort() {
       
       if (data.type === 'METRICS') {
         metricsRecvCount++;
-        if (metricsRecvCount <= 5 || metricsRecvCount % 500 === 0) {
-          log.info('bgMetricsHandler #', metricsRecvCount, 'rms:', data.rms?.toFixed(4));
-        }
         
         // Discard metrics if capture is not active (prevents post-stop spam)
         if (!captureActive) {
+          if (metricsRecvCount <= 5) {
+            log.warn('Metrics dropped: captureActive=false (count=' + metricsRecvCount + ')');
+          }
           return;
         }
         
@@ -1466,9 +2108,11 @@ function ensureBackgroundPort() {
         }
         metricsQueueDepth++;
         
-        // Throttle: skip if called faster than 15fps
+        // Throttle: skip if called faster than 15fps (33ms interval)
+        // EXCEPT: never throttle waveform frames — oscilloscope needs smooth updates
         const now = Date.now();
-        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS) {
+        const hasWaveform = data.waveform && data.waveform.length > 0 && !data.waveformHold;
+        if (now - lastMetricsApplyTime < METRICS_THROTTLE_MS && !hasWaveform) {
           metricsDroppedThrottle++;
           metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
           return;
@@ -1487,11 +2131,6 @@ function ensureBackgroundPort() {
           }
         }
         _lastMetricsTime = Date.now();
-        
-        // Log every 1000 metrics to track flow
-        if (metricsRecvCount % 1000 === 0) {
-          log.info(`Recv=${metricsRecvCount} thr=${metricsDroppedThrottle} q=${metricsDroppedQueue}`);
-        }
         
         applyMetrics(data);
         metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
@@ -1542,6 +2181,18 @@ function ensureBackgroundPort() {
           updatePerfDisplay(fps, drawMs, 0);
         }
       }
+      // Handle connection latency pong (from _PONG_REQUEST roundtrip)
+      if (data.type === '_PONG_RESPONSE') {
+        metricsQueueDepth = Math.max(0, metricsQueueDepth - 1);
+        const rtt = Date.now() - data.pingTime;
+        lastConnectionLatency = rtt;
+        // Update perf display if active
+        if (perfActive && perfFps) {
+          const fps = parseInt(perfFps.textContent.replace(/\D/g, '') || '0');
+          const drawMs = parseFloat(perfDrawTime.textContent.replace(/[^0-9.]/g, '') || '0');
+          updatePerfDisplay(fps, drawMs, 0);
+        }
+      }
       // Handle offscreen capture errors (user cancelled, permission denied, etc.)
       if (data.type === '_OFFSCREEN_ERROR') {
         if (rmsLevel) {
@@ -1557,28 +2208,26 @@ function ensureBackgroundPort() {
     };
     
     bgPort.onMessage.addListener(bgMetricsHandler);
-    bgPort.onDisconnect.addListener(bgPortDisconnectHandler);
+    bgPort.onDisconnect.addListener(bgPortDisconnectHandlerRef);
     
-    log.info('bgPort listeners attached, id:', currentId);
-    
-    // Restore drop count from storage (in case drops occurred while popup was closed)
-    chrome.storage.local.get([DROP_COUNT_KEY], (result) => {
-      if (result[DROP_COUNT_KEY] && result[DROP_COUNT_KEY] > 0) {
-        dropCount = result[DROP_COUNT_KEY];
-        if (captureActive) {
-          updateDropCounter(dropCount);
-        }
-        log.info('Restored dropCount:', dropCount, 'from storage');
+    // Restore drop count from storage
+    safeStorageGet([DROP_COUNT_KEY], (result) => {
+      if (!result || !result[DROP_COUNT_KEY] || result[DROP_COUNT_KEY] <= 0) return;
+      dropCount = result[DROP_COUNT_KEY];
+      if (captureActive) {
+        updateDropCounter(dropCount);
       }
     });
     
-    // Send metrics request immediately after connect (in case capture is active)
+    // Send metrics request immediately after connect
     setTimeout(() => {
       if (bgPort) {
-        log.info('Sending REQUEST_METRICS');
         bgPort.postMessage({ type: 'REQUEST_METRICS' });
       }
     }, 100);
+    
+    // P.6: Signal offscreen that popup is ready — triggers direct port connection
+    safeSendMessage({ type: '_SSA_POPUP_READY' });
     
     return true;
   } catch (e) {
@@ -1591,7 +2240,7 @@ function connectToBackground() {
   return ensureBackgroundPort();
 }
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   if (captureActive) return;
   
   captureActive = true;
@@ -1602,28 +2251,127 @@ startBtn.addEventListener('click', () => {
   heatmapActive = true;
 
   const captureSource = captureSourceSelect?.value || 'tab';
-  log.info('Start capture requested, source:', captureSource);
+  currentCaptureSource = captureSource;
 
-  connectToBackground();
-  safeSendMessage({ type: 'START_CAPTURE', captureSource: captureSource }, response => {
-    if (response?.ok) {
-      log.info('Capture started successfully');
-      updateUI(true);
-    } else {
-      log.error('Capture failed:', response?.error);
-      alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+  // Popup is its own window. Need to find the active tab from the main browser window.
+  // chrome.windows.getLastFocused() returns the main window when called from a popup.
+  chrome.windows.getLastFocused({ populate: true }, (win) => {
+    if (!win || !win.tabs || win.tabs.length === 0) {
+      log.error('No tabs in last focused window');
       captureActive = false;
       heatmapActive = false;
       if (startBtn) {
         startBtn.textContent = 'Start Capture';
         startBtn.disabled = false;
       }
+      return;
     }
+    
+    const activeTab = win.tabs.find(t => t.active);
+    if (!activeTab) {
+      log.error('No active tab in last focused window');
+      captureActive = false;
+      heatmapActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+      return;
+    }
+    
+    if (activeTab.url?.startsWith('chrome://') || activeTab.url?.startsWith('chrome-extension://')) {
+      log.warn('Active tab is internal: ' + activeTab.url);
+      captureActive = false;
+      heatmapActive = false;
+      if (startBtn) {
+        startBtn.textContent = 'Start Capture';
+        startBtn.disabled = false;
+      }
+      return;
+    }
+    
+    capturedTabId = activeTab.id;
+    log.info('Target tab:', capturedTabId, activeTab.title?.substring(0, 50), activeTab.url?.substring(0, 80));
+
+    connectToBackground();
+
+    // === MODERNIZED CAPTURE: chrome.tabCapture.getMediaStreamId() with user activation ===
+    // P.1: Obtain streamId via tabCapture (requires transient user activation from popup click)
+    // P.2: Pass streamId to offscreen.js for getUserMedia with chromeMediaSource constraints
+    // P.3: Mute active tab AFTER successful streamId acquisition (prevents double sound)
+    
+    // P.1: Call chrome.tabCapture.getMediaStreamId() — works only with user activation (popup click)
+    const requestStreamId = () => {
+      return new Promise((resolve) => {
+        if (!chrome.tabCapture || !chrome.tabCapture.getMediaStreamId) {
+          log.warn('chrome.tabCapture.getMediaStreamId() not available — falling back to offscreen dialog');
+          resolve(null);
+          return;
+        }
+        
+        chrome.tabCapture.getMediaStreamId(
+          { targetTabId: capturedTabId, allowCurrentTab: true },
+          (streamId) => {
+            if (chrome.runtime.lastError) {
+              log.warn('tabCapture.getMediaStreamId() failed:', chrome.runtime.lastError.message, '— falling back to offscreen dialog');
+              resolve(null); // Fallback: offscreen will show dialog
+            } else {
+              resolve(streamId); // streamId is a string token
+            }
+          }
+        );
+      });
+    };
+
+    // Mute active tab when capturing tab audio (prevents double sound)
+    if (captureSource === 'tab') {
+      chrome.tabs.update(capturedTabId, { muted: true }, (tab) => {
+        if (chrome.runtime.lastError) {
+          log.warn('Failed to mute tab:', chrome.runtime.lastError.message);
+        } else {
+          log.info('Tab muted:', capturedTabId);
+        }
+      });
+    }
+
+    // Request streamId and start capture
+    requestStreamId().then((streamId) => {
+      log.info('Got streamId:', streamId ? 'OK (' + streamId.substring(0, 40) + '...)' : 'null');
+
+      safeSendMessage({
+        type: 'START_CAPTURE',
+        captureSource: captureSource,
+        capturedTabId: capturedTabId,
+        tabStreamId: streamId // Pass streamId to offscreen for getUserMedia
+      }, response => {
+        if (response?.ok) {
+          updateUI(true);
+          // Show overlay in active tab
+          chrome.tabs.sendMessage(capturedTabId, { type: '_SSA_SHOW_OVERLAY' }, () => {
+            if (chrome.runtime.lastError) {
+              log.warn('Failed to show overlay in tab:', capturedTabId);
+            }
+          });
+        } else {
+          log.error('Capture failed:', response?.error);
+          alert('Ошибка: ' + (response?.error || 'Не удалось начать захват'));
+          captureActive = false;
+          heatmapActive = false;
+          // Unmute on failure
+          if (captureSource === 'tab') {
+            chrome.tabs.update(capturedTabId, { muted: false });
+          }
+          if (startBtn) {
+            startBtn.textContent = 'Start Capture';
+            startBtn.disabled = false;
+          }
+        }
+      });
+    });
   });
 });
 
 stopBtn.addEventListener('click', () => {
-  log.info('Stop capture requested');
   // 1. Stop immediately — don't wait for SW response
   stopAudioProcessing();
   captureActive = false;
@@ -1632,23 +2380,24 @@ stopBtn.addEventListener('click', () => {
     startBtn.disabled = false;
   }
   
-  // 2. Notify background/offscreen (non-blocking)
-  safeSendMessage({ type: 'STOP_CAPTURE' });
+  // 2. Unmute tab if it was muted (use saved tabId, not query)
+  if (currentCaptureSource === 'tab' && capturedTabId) {
+    chrome.tabs.update(capturedTabId, { muted: false }, (tab) => {
+      if (chrome.runtime.lastError) {
+        log.warn('Failed to unmute tab:', capturedTabId, chrome.runtime.lastError.message);
+      } else {
+        log.info('Tab unmuted:', capturedTabId);
+      }
+    });
+  }
+  
+  // 3. Notify background/offscreen (non-blocking)
+  safeSendMessage({ type: 'STOP_CAPTURE' }, () => {});
 });
 
-chrome.runtime.sendMessage({ type: 'GET_CAPTURE_STATUS' }, (response) => {
-  // Ignore lastError — SW may have terminated
-  if (chrome.runtime.lastError) {
-    updateUI(false);
-    return;
-  }
-
-  if (response && response.isCapturing) {
-    updateUI(true);
-  } else {
-    updateUI(false);
-  }
-});
+// === Popup always starts inactive — no status check on open ===
+// This prevents stale state from hanging the UI
+updateUI(false);
 
 // ============================================
 // Slider & Sensitivity Controls
@@ -1658,7 +2407,8 @@ const SENSITIVITY_KEY = 'glitchSensitivity';
 const SENSITIVITY_DEFAULT = 85;
 
 // Load saved sensitivity on startup
-chrome.storage.local.get([SENSITIVITY_KEY], (result) => {
+safeStorageGet([SENSITIVITY_KEY], (result) => {
+  if (!result) return;
   const saved = result[SENSITIVITY_KEY];
   if (typeof saved === 'number' && saved >= 60 && saved <= 90) {
     if (thresholdSlider) thresholdSlider.value = saved;
@@ -1679,7 +2429,7 @@ if (thresholdSlider) {
     // Отправляем настройку в AudioWorklet в реальном времени
     sendSensitivityToWorklet(parseInt(value));
     // Сохраняем настройку
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: parseInt(value) });
+    safeStorageSet({ [SENSITIVITY_KEY]: parseInt(value) });
   });
 }
 
@@ -1689,9 +2439,439 @@ if (resetSensitivityBtn) {
     if (thresholdSlider) thresholdSlider.value = SENSITIVITY_DEFAULT;
     if (thresholdValue) thresholdValue.textContent = SENSITIVITY_DEFAULT + '%';
     sendSensitivityToWorklet(SENSITIVITY_DEFAULT);
-    chrome.storage.local.set({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT });
+    safeStorageSet({ [SENSITIVITY_KEY]: SENSITIVITY_DEFAULT });
   });
 }
+
+// ============================================
+// Effects Helper Functions
+// ============================================
+
+// _effectsSendDebounce and _pendingEffectsSend are declared near EFFECTS_DEFAULTS (line ~206)
+
+function scheduleEffectsSend(type, active, params) {
+  const payload = { type, active, params };
+  _pendingEffectsSend = payload;
+  
+  if (_effectsSendDebounce) {
+    clearTimeout(_effectsSendDebounce);
+  }
+  
+  _effectsSendDebounce = setTimeout(() => {
+    _effectsSendDebounce = null;
+    if (_pendingEffectsSend) {
+      safeSendMessage(_pendingEffectsSend);
+      _pendingEffectsSend = null;
+    }
+  }, 100); // 10fps max for effects updates
+}
+
+/**
+ * Send compressor settings to offscreen (direct via runtime)
+ */
+function sendCompressorSettings() {
+  scheduleEffectsSend('_SSA_SET_COMPRESSOR', effectsSettings.compressor.active, {
+    threshold: effectsSettings.compressor.threshold,
+    ratio: effectsSettings.compressor.ratio,
+    knee: effectsSettings.compressor.knee,
+    attack: effectsSettings.compressor.attack,
+    release: effectsSettings.compressor.release
+  });
+}
+
+/**
+ * Send EQ settings to offscreen (direct via runtime)
+ */
+function sendEQSettings() {
+  scheduleEffectsSend('_SSA_SET_EQ', effectsSettings.eq.active, {
+    hpfFreq: effectsSettings.eq.hpfFreq,
+    lpfFreq: effectsSettings.eq.lpfFreq,
+    peakFreq: effectsSettings.eq.peakFreq,
+    peakGain: effectsSettings.eq.peakGain,
+    peakQ: effectsSettings.eq.peakQ
+  });
+}
+
+/**
+ * Send limiter settings to offscreen (direct via runtime)
+ */
+function sendLimiterSettings() {
+  scheduleEffectsSend('_SSA_SET_LIMITER', effectsSettings.limiter.active, {
+    threshold: effectsSettings.limiter.threshold
+  });
+}
+
+/**
+ * Send delay settings to offscreen (direct via runtime)
+ */
+function sendDelaySettings() {
+  scheduleEffectsSend('_SSA_SET_DELAY', effectsSettings.delay.active, {
+    delayTime: effectsSettings.delay.delayTime,
+    feedback: effectsSettings.delay.feedback,
+    mix: effectsSettings.delay.mix
+  });
+}
+
+/**
+ * Save all effects settings to chrome.storage
+ */
+function saveEffectsSettings() {
+  safeStorageSet({ [EFFECTS_STORAGE_KEY]: effectsSettings });
+}
+
+/**
+ * Load effects settings from chrome.storage
+ */
+function loadEffectsSettings() {
+  safeStorageGet([EFFECTS_STORAGE_KEY], (result) => {
+    if (!result || !result[EFFECTS_STORAGE_KEY]) return;
+    if (typeof result[EFFECTS_STORAGE_KEY] !== 'object') return;
+    
+    const saved = result[EFFECTS_STORAGE_KEY];
+    // Merge with defaults
+    if (saved.compressor && typeof saved.compressor === 'object') {
+      Object.assign(effectsSettings.compressor, saved.compressor);
+    }
+    if (saved.eq && typeof saved.eq === 'object') {
+      Object.assign(effectsSettings.eq, saved.eq);
+    }
+    if (saved.limiter && typeof saved.limiter === 'object') {
+      Object.assign(effectsSettings.limiter, saved.limiter);
+    }
+    if (saved.delay && typeof saved.delay === 'object') {
+      Object.assign(effectsSettings.delay, saved.delay);
+    }
+    applyEffectsUIValues();
+  });
+}
+
+/**
+ * Apply stored values to UI elements (without sending to offscreen)
+ */
+function applyEffectsUIValues() {
+  // Compressor
+  if (compThreshold) compThreshold.value = effectsSettings.compressor.threshold;
+  if (compThresholdVal) compThresholdVal.textContent = effectsSettings.compressor.threshold;
+  if (compRatio) compRatio.value = effectsSettings.compressor.ratio;
+  if (compRatioVal) compRatioVal.textContent = effectsSettings.compressor.ratio;
+  if (compKnee) compKnee.value = effectsSettings.compressor.knee;
+  if (compKneeVal) compKneeVal.textContent = effectsSettings.compressor.knee;
+  if (compAttack) compAttack.value = effectsSettings.compressor.attack;
+  if (compAttackVal) compAttackVal.textContent = effectsSettings.compressor.attack;
+  if (compRelease) compRelease.value = effectsSettings.compressor.release;
+  if (compReleaseVal) compReleaseVal.textContent = effectsSettings.compressor.release;
+  if (compressorToggle) compressorToggle.checked = effectsSettings.compressor.active;
+
+  // EQ
+  if (hpfFreq) hpfFreq.value = effectsSettings.eq.hpfFreq;
+  if (hpfFreqVal) hpfFreqVal.textContent = effectsSettings.eq.hpfFreq;
+  if (lpfFreq) lpfFreq.value = effectsSettings.eq.lpfFreq;
+  if (lpfFreqVal) lpfFreqVal.textContent = effectsSettings.eq.lpfFreq;
+  if (peakFreq) peakFreq.value = effectsSettings.eq.peakFreq;
+  if (peakFreqVal) peakFreqVal.textContent = effectsSettings.eq.peakFreq;
+  if (peakGain) peakGain.value = effectsSettings.eq.peakGain;
+  if (peakGainVal) peakGainVal.textContent = effectsSettings.eq.peakGain;
+  if (peakQ) peakQ.value = effectsSettings.eq.peakQ;
+  if (peakQVal) peakQVal.textContent = effectsSettings.eq.peakQ;
+  if (eqToggle) eqToggle.checked = effectsSettings.eq.active;
+
+  // Limiter
+  if (limThresh) limThresh.value = effectsSettings.limiter.threshold;
+  if (limThreshVal) limThreshVal.textContent = effectsSettings.limiter.threshold;
+  if (limiterToggle) limiterToggle.checked = effectsSettings.limiter.active;
+
+  // Delay
+  if (delayTime) delayTime.value = effectsSettings.delay.delayTime;
+  if (delayTimeVal) delayTimeVal.textContent = (effectsSettings.delay.delayTime / 1000).toFixed(1);
+  if (delayFeedback) delayFeedback.value = effectsSettings.delay.feedback;
+  if (delayFeedbackVal) delayFeedbackVal.textContent = effectsSettings.delay.feedback;
+  if (delayMix) delayMix.value = effectsSettings.delay.mix;
+  if (delayMixVal) delayMixVal.textContent = effectsSettings.delay.mix;
+  if (delayToggle) delayToggle.checked = effectsSettings.delay.active;
+
+  // Update slider disabled states
+  updateEffectsSliderStates();
+}
+
+/**
+ * Enable/disable sliders based on capture active state
+ */
+function updateEffectsSliderStates() {
+  const sliders = [
+    compThreshold, compRatio, compKnee, compAttack, compRelease,
+    hpfFreq, lpfFreq, peakFreq, peakGain, peakQ,
+    limThresh,
+    delayTime, delayFeedback, delayMix
+  ];
+  
+  sliders.forEach(slider => {
+    if (slider) {
+      slider.disabled = !effectsUIEnabled;
+      slider.style.opacity = effectsUIEnabled ? '1' : '0.5';
+    }
+  });
+  
+  // Toggles always enabled
+  if (compressorToggle) compressorToggle.disabled = false;
+  if (eqToggle) eqToggle.disabled = false;
+  if (limiterToggle) limiterToggle.disabled = false;
+  if (delayToggle) delayToggle.disabled = false;
+}
+
+/**
+ * Reset all effects to defaults
+ */
+function resetEffects() {
+  effectsSettings = JSON.parse(JSON.stringify(EFFECTS_DEFAULTS));
+  saveEffectsSettings();
+  applyEffectsUIValues();
+  
+  // Send reset values to offscreen
+  sendCompressorSettings();
+  sendEQSettings();
+  sendLimiterSettings();
+  sendDelaySettings();
+}
+
+/**
+ * Toggle effects UI enabled state (capture active)
+ */
+function setEffectsEnabled(enabled) {
+  effectsUIEnabled = enabled;
+  updateEffectsSliderStates();
+  
+  if (!enabled) {
+    // Disable all effect toggles when capture stops
+    if (compressorToggle) compressorToggle.checked = false;
+    if (eqToggle) eqToggle.checked = false;
+    if (limiterToggle) limiterToggle.checked = false;
+    if (delayToggle) delayToggle.checked = false;
+    
+    effectsSettings.compressor.active = false;
+    effectsSettings.eq.active = false;
+    effectsSettings.limiter.active = false;
+    effectsSettings.delay.active = false;
+    
+    // Send disabled state
+    sendCompressorSettings();
+    sendEQSettings();
+    sendLimiterSettings();
+    sendDelaySettings();
+  }
+  
+  saveEffectsSettings();
+}
+
+// ============================================
+// Effects Event Handlers
+// ============================================
+
+// Compressor toggle
+if (compressorToggle) {
+  compressorToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.compressor.active = e.target.checked;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+
+// Compressor sliders
+if (compThreshold) {
+  compThreshold.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.threshold = val;
+    if (compThresholdVal) compThresholdVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compRatio) {
+  compRatio.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.ratio = val;
+    if (compRatioVal) compRatioVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compKnee) {
+  compKnee.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.knee = val;
+    if (compKneeVal) compKneeVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compAttack) {
+  compAttack.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.attack = val;
+    if (compAttackVal) compAttackVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+if (compRelease) {
+  compRelease.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.compressor.release = val;
+    if (compReleaseVal) compReleaseVal.textContent = val;
+    saveEffectsSettings();
+    sendCompressorSettings();
+  });
+}
+
+// EQ toggle
+if (eqToggle) {
+  eqToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.eq.active = e.target.checked;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+
+// EQ sliders
+if (hpfFreq) {
+  hpfFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.hpfFreq = val;
+    if (hpfFreqVal) hpfFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (lpfFreq) {
+  lpfFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.lpfFreq = val;
+    if (lpfFreqVal) lpfFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakFreq) {
+  peakFreq.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.peakFreq = val;
+    if (peakFreqVal) peakFreqVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakGain) {
+  peakGain.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.eq.peakGain = val;
+    if (peakGainVal) peakGainVal.textContent = val;
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+if (peakQ) {
+  peakQ.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseFloat(e.target.value);
+    effectsSettings.eq.peakQ = val;
+    if (peakQVal) peakQVal.textContent = val.toFixed(1);
+    saveEffectsSettings();
+    sendEQSettings();
+  });
+}
+
+// Limiter toggle
+if (limiterToggle) {
+  limiterToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.limiter.active = e.target.checked;
+    saveEffectsSettings();
+    sendLimiterSettings();
+  });
+}
+
+// Limiter slider
+if (limThresh) {
+  limThresh.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseFloat(e.target.value);
+    effectsSettings.limiter.threshold = val;
+    if (limThreshVal) limThreshVal.textContent = val.toFixed(1);
+    saveEffectsSettings();
+    sendLimiterSettings();
+  });
+}
+
+// Delay toggle
+if (delayToggle) {
+  delayToggle.addEventListener('change', (e) => {
+    e.stopPropagation();
+    effectsSettings.delay.active = e.target.checked;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+
+// Delay sliders
+if (delayTime) {
+  delayTime.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.delayTime = val;
+    if (delayTimeVal) delayTimeVal.textContent = (val / 1000).toFixed(1);
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+if (delayFeedback) {
+  delayFeedback.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.feedback = val;
+    if (delayFeedbackVal) delayFeedbackVal.textContent = val;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+if (delayMix) {
+  delayMix.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const val = parseInt(e.target.value);
+    effectsSettings.delay.mix = val;
+    if (delayMixVal) delayMixVal.textContent = val;
+    saveEffectsSettings();
+    sendDelaySettings();
+  });
+}
+
+// Reset All button
+if (effectsResetBtn) {
+  effectsResetBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetEffects();
+  });
+}
+
+// Prevent popup closing on effects control clicks
+[compThreshold, compRatio, compKnee, compAttack, compRelease,
+ hpfFreq, lpfFreq, peakFreq, peakGain, peakQ,
+ limThresh, delayTime, delayFeedback, delayMix,
+ compressorToggle, eqToggle, limiterToggle, delayToggle].forEach(el => {
+  if (el) {
+    el.addEventListener('click', (e) => e.stopPropagation());
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+});
 
 // Кнопка экспорта лога глитчей
 if (exportLogBtn) {
@@ -1705,6 +2885,24 @@ if (exportBtn) {
     exportCSV();
   });
   exportBtn.addEventListener('mousedown', function(e) {
+    e.stopPropagation();
+  });
+}
+
+// Task 6: Кнопка экспорта Token Stream (выбирает формат при клике)
+if (exportTokensBtn) {
+  exportTokensBtn.addEventListener('click', async function(e) {
+    e.stopPropagation();
+    const format = prompt('Формат экспорта токенов: JSONL или CSV?', 'JSONL');
+    if (!format) return;
+    const upper = format.trim().toUpperCase();
+    if (upper === 'CSV') {
+      await exportTokenStreamCSV();
+    } else {
+      await exportTokenStreamJSONL();
+    }
+  });
+  exportTokensBtn.addEventListener('mousedown', function(e) {
     e.stopPropagation();
   });
 }
@@ -1762,7 +2960,8 @@ function applyTheme(theme) {
   }
   
   // Load heatmap storage key
-  chrome.storage.local.get([HEATMAP_KEY], (result) => {
+  safeStorageGet([HEATMAP_KEY], (result) => {
+    if (!result) return;
     if (heatmapSection) {
       heatmapActive = result[HEATMAP_KEY] ?? true;
     }
@@ -1776,6 +2975,9 @@ function applyTheme(theme) {
     if (togglePerfBtn) togglePerfBtn.textContent = 'Hide';
     requestAnimationFrame(perfFrameLoop);
   }
+  
+  // Load effects settings
+  loadEffectsSettings();
 })();
 
 if (themeToggle) {
@@ -1793,7 +2995,7 @@ if (themeToggle) {
     const nextIndex = (currentIndex + 1) % THEME_CYCLE.length;
     const next = THEME_CYCLE[nextIndex];
     applyTheme(next);
-    chrome.storage.local.set({ [THEME_KEY]: next });
+    safeStorageSet({ [THEME_KEY]: next });
   });
 }
 
@@ -1823,10 +3025,9 @@ function redrawOscilloscope() {
 // Oscilloscope Options (Freeze, Zoom, Log Scale)
 // ============================================
 
-const OSC_OPTIONS_KEY = 'oscOptions';
-
 // Load saved oscilloscope options
-chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
+safeStorageGet([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result) => {
+  if (!result) return;
   if (result[OSC_OPTIONS_KEY] && typeof result[OSC_OPTIONS_KEY] === 'object') {
     const opts = result[OSC_OPTIONS_KEY];
     if (opts.freeze) oscFreeze = true;
@@ -1841,7 +3042,7 @@ chrome.storage.local.get([OSC_OPTIONS_KEY, OSC_SPLIT_KEY, OSC_REF_KEY], (result)
 });
 
 function saveOscOptions() {
-  chrome.storage.local.set({
+  safeStorageSet({
     [OSC_OPTIONS_KEY]: {
       freeze: oscFreeze,
       zoom: oscZoom,
@@ -2045,31 +3246,45 @@ window.addEventListener('beforeunload', async () => {
       await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, (response) => {
           stopPending = true;
-          // Ignore lastError — page unloading
+          // Always consume lastError — page unloading
+          void chrome.runtime.lastError;
           resolve(response);
         });
       });
     } catch (_) {
       // Fallback: if sendMessage fails, retry with setTimeout
       setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, () => {});
+        chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, () => {
+          void chrome.runtime.lastError;
+        });
       }, 50);
     }
   }
   
+  // CRITICAL: Clean up logger listener to prevent memory leaks
+  if (_logsChangeCleanup) {
+    _logsChangeCleanup();
+    _logsChangeCleanup = null;
+  }
+  
   if (bgPort) {
-    // Remove listener before disconnecting
+    // CRITICAL: Remove ALL listeners before disconnecting to prevent memory leaks
     if (bgMetricsHandler) {
       try { bgPort.onMessage.removeListener(bgMetricsHandler); } catch (_) {}
+    }
+    if (bgPortDisconnectHandlerRef) {
+      try { bgPort.onDisconnect.removeListener(bgPortDisconnectHandlerRef); } catch (_) {}
     }
     bgPort.disconnect();
     bgPort = null;
     bgMetricsHandler = null;
+    bgPortDisconnectHandlerRef = null;
   }
 });
 
-// Initialize background port ONCE at page load — prevents memory leaks from multiple connections
-ensureBackgroundPort();
+// Initialize background port — moved to START_CAPTURE handler to ensure background is ready
+// (offscreen document creation takes time; connecting too early causes empty metrics)
+// ensureBackgroundPort() is now called in the START_CAPTURE handler
 
 // Global error handler — catch unhandled errors before they crash popup
 window.addEventListener('error', (e) => {
@@ -2084,7 +3299,6 @@ window.addEventListener('unhandledrejection', (e) => {
 // Reconnect port on window focus (handles Chrome suspend/resume cycle)
 window.addEventListener('focus', () => {
   if (captureActive && !bgMetricsConnected) {
-    log.info('Focus — reconnecting port');
     ensureBackgroundPort();
   }
 });
@@ -2147,9 +3361,10 @@ function toggleLogs() {
   }
 }
 
-// Subscribe to log changes
+// Subscribe to log changes (capture cleanup function for beforeunload)
+let _logsChangeCleanup = null;
 if (window.__logger) {
-  window.__logger.onLogChange(() => {
+  _logsChangeCleanup = window.__logger.onLogChange(() => {
     renderLogs();
   });
   // Initial load
@@ -2182,15 +3397,18 @@ if (logsClearBtn) {
 // Export all logs as JSON
 if (logsExportBtn) {
   logsExportBtn.addEventListener('click', () => {
-    const url = window.__logger?.exportJSON?.();
-    if (url) {
+    const result = window.__logger?.exportJSON?.();
+    if (result && result.url) {
       const a = document.createElement('a');
-      a.href = url;
+      a.href = result.url;
       a.download = `ssa-logs-${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      // CRITICAL: Always revoke Blob URL after download to prevent memory leak
+      setTimeout(() => {
+        if (result.revoke) result.revoke();
+      }, 2000);
     }
   });
 }
@@ -2207,3 +3425,13 @@ if (logsFilterRow) {
     renderLogs();
   });
 }
+
+// === Extension context invalidation handler for popup ===
+window.addEventListener('error', (event) => {
+  const msg = event.message || '';
+  if (msg.includes('Extension context invalidated') || !chrome.runtime?.id) {
+    log.warn('Popup: Extension context invalidated');
+    safeStorageSet({ [CAPTURING_KEY]: false, [PERSISTENT_METRICS_KEY]: [], [DROP_COUNT_KEY]: 0 });
+    updateUI(false);
+  }
+});

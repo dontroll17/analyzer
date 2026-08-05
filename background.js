@@ -4,17 +4,71 @@ const log = (self.__logger?.forModule('bg')) || {
   error: (m, ...a) => console.error('[BG]', m, ...a),
 };
 
+// Safe chrome.storage wrapper — guard against undefined in invalid contexts
+function safeStorageGet(keys, callback) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.get(keys, callback);
+}
+
+function safeStorageSet(obj) {
+  if (!chrome.storage?.local) return;
+  chrome.storage.local.set(obj);
+}
+
+// === Session storage for metrics (P.3: Storage separation) ===
+// chrome.storage.session has no meaningful quota and auto-cleans on session end
+// Metrics (PERSISTENT_METRICS_KEY) use session — UI settings (CAPTURING_KEY, DROP_COUNT_KEY) stay in local
+function safeStorageSessionGet(keys, callback) {
+  if (!chrome.storage?.session) return;
+  chrome.storage.session.get(keys, callback);
+}
+
+function safeStorageSessionSet(obj) {
+  if (!chrome.storage?.session) return;
+  chrome.storage.session.set(obj);
+}
+
+// Safe chrome.runtime.sendMessage wrapper
+function safeSendMessage(msg, callback) {
+  if (!chrome.runtime?.id) {
+    log.warn('safeSendMessage: no runtime.id, message not sent:', msg.type);
+    if (callback) callback(null);
+    return;
+  }
+  log.info('safeSendMessage:', msg.type);
+  chrome.runtime.sendMessage(msg, (response) => {
+    // Always consume lastError to prevent console spam
+    void chrome.runtime.lastError;
+    if (callback) callback(response);
+    if (msg.type === '_OFFSCREEN_START') {
+      log.info('OFFSCREEN_START response:', response?.ok ? 'ok' : response?.error);
+    }
+  });
+}
+
 let offscreenReady = false;
 let isCapturing = false;
 let popupPort = null;
+let _capturedTabId = null; // Track active tab for overlay show/hide
+let _lastMetricsSnapshot = null; // Cache latest metrics for instant replay on reconnect
 let overlayPort = null;
-let metricsQueue = []; // In-memory buffer (drained on reconnect)
 let _bgMetricsRecv = 0; // total metrics received from offscreen
+let globalPopupDisconnectTimer = null; // Grace period timer for popup disconnect
 let popupDisconnectedWarned = false; // throttle: warn once when popup disconnects
-const MAX_METRICS_QUEUE = 10; // Limit queue for stability
+const MAX_METRICS_QUEUE = 10; // Limit transient queue for stability
+const MAX_PERSISTENT_METRICS = 500; // Max entries in persistent queue
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue'; // chrome.storage for persistence
 const CAPTURING_KEY = 'ssa_capturing'; // persist capture state across SW restarts
 const DROP_COUNT_KEY = 'ssa_audio_drop_count'; // persist drop count across popup disconnects
+
+// Circular buffers for metrics queues (H-5 fix: zero push/shift allocations)
+// Using index pointer instead of push/shift — TDZ-safe: constants declared above
+const _metricsQueue = new Array(MAX_METRICS_QUEUE);
+let _metricsQueueHead = 0;
+let _metricsQueueCount = 0;
+const _persistentMetricsQueue = new Array(MAX_PERSISTENT_METRICS);
+let _persistentMetricsQueueHead = 0;
+let _persistentMetricsQueueCount = 0;
 
 // === Storage write throttle (debounce 100ms) to prevent backpressure at 43fps ===
 let _storageWriteTimer = null;
@@ -22,56 +76,172 @@ let _pendingMetricsData = null;
 let _pendingDropCount = null;
 const STORAGE_WRITE_DEBOUNCE_MS = 100; // 10fps max for storage
 
+// In-memory ring buffer for metrics persistence
+// Eliminates chrome.storage.local.get() before each write — reduces I/O by ~90%
+// H-6 fix: circular buffer with index pointer — zero push/shift allocations
+const RING_BUFFER_MAX = 80;
+const _ringBuffer = new Array(RING_BUFFER_MAX);
+let _ringBufHead = 0;
+let _ringBufCount = 0;
+const STORAGE_FLUSH_INTERVAL_MS = 1000; // Flush to disk 1/sec (not 100ms = 10fps)
+
+// === IndexedDB for long-term session history (Phase 2.3) ===
+// chrome.storage.local has ~5MB quota; IndexedDB provides persistent large storage
+const SESSION_DB_NAME = 'ssa-session-db';
+const SESSION_DB_VERSION = 1;
+const SESSION_STORE_NAME = 'sessions';
+// Task 6: Separate IndexedDB store for binary token chunks (zero JSON overhead)
+const TOKEN_CHUNKS_STORE_NAME = 'token_chunks';
+let sessionDB = null;
+let dbReady = false;
+
+function openSessionDB() {
+  if (sessionDB || !('indexedDB' in self)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const request = indexedDB.open(SESSION_DB_NAME, SESSION_DB_VERSION);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(SESSION_STORE_NAME)) {
+        const store = db.createObjectStore(SESSION_STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('timestamp', 'timestamp', { unique: false });
+        store.createIndex('type', 'type', { unique: false });
+      }
+      // Task 6: Create token_chunks store for binary archival (separate from sessions)
+      if (!db.objectStoreNames.contains(TOKEN_CHUNKS_STORE_NAME)) {
+        const tokenStore = db.createObjectStore(TOKEN_CHUNKS_STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        tokenStore.createIndex('sessionId', 'sessionId', { unique: false });
+        tokenStore.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+    };
+    request.onsuccess = (event) => {
+      sessionDB = event.target.result;
+      dbReady = true;
+      log.info('IndexedDB session store opened');
+      resolve(true);
+    };
+    request.onerror = () => {
+      log.warn('IndexedDB session store failed to open');
+      resolve(false);
+    };
+  });
+}
+
+function appendToSessionDB(data) {
+  if (!sessionDB || !dbReady) return;
+  try {
+    const tx = sessionDB.transaction([SESSION_STORE_NAME], 'readwrite');
+    const store = tx.objectStore(SESSION_STORE_NAME);
+    store.add({ ...data, timestamp: Date.now(), type: 'metrics' });
+  } catch (e) {
+    log.warn('Failed to append to IndexedDB:', e.message);
+  }
+}
+
+// Task 6: Append binary token chunk to IndexedDB (zero JSON, binary payload)
+function appendToTokenStore(chunk) {
+  if (!sessionDB || !dbReady) return;
+  try {
+    const tx = sessionDB.transaction([TOKEN_CHUNKS_STORE_NAME], 'readwrite');
+    const store = tx.objectStore(TOKEN_CHUNKS_STORE_NAME);
+    store.add({
+      sessionId: chunk.sessionId,
+      timestamp: chunk.timestamp,
+      payload: chunk.payload // ArrayBuffer — binary token frames
+    });
+  } catch (e) {
+    log.warn('Failed to append token chunk to IndexedDB:', e.message);
+  }
+}
+
+function closeSessionDB() {
+  if (sessionDB) {
+    sessionDB.close();
+    sessionDB = null;
+    dbReady = false;
+  }
+}
+
+// Open IndexedDB on startup
+if ('indexedDB' in self) {
+  openSessionDB();
+}
+
 function throttledPersistMetrics(data) {
-  _pendingMetricsData = data;
-  // Capture latest drop count so it's included in the next flush
+  // Also flush pending drop count if any
   if (data.audioDrops !== undefined) {
     _pendingDropCount = data.audioDrops;
+    safeStorageSet({ [DROP_COUNT_KEY]: _pendingDropCount });
+    _pendingDropCount = null;
   }
+  
+  // Push to ring buffer (H-6: circular buffer, O(1) no allocations)
+  _ringBuffer[_ringBufHead] = data;
+  _ringBufHead = (_ringBufHead + 1) % RING_BUFFER_MAX;
+  if (_ringBufCount < RING_BUFFER_MAX) {
+    _ringBufCount++;
+  }
+  
+  // Task 6: Token archival moved to offscreen.js TokenStreamRecorder (8-byte binary chunks)
+  // No more full JSON writes to IndexedDB from background.js
+  
+  // Throttle: only one flush per interval
+  // P.3: Use chrome.storage.session for metrics (no quota limits, auto-cleans on session end)
   if (_storageWriteTimer) return;
   _storageWriteTimer = setTimeout(() => {
     _storageWriteTimer = null;
-    if (_pendingMetricsData) {
-      chrome.storage.local.get([PERSISTENT_METRICS_KEY], (result) => {
-        const queue = result[PERSISTENT_METRICS_KEY] || [];
-        queue.push(_pendingMetricsData);
-        if (queue.length > 80) queue.shift();
-        chrome.storage.local.set({ [PERSISTENT_METRICS_KEY]: queue });
-      });
-      _pendingMetricsData = null;
+    if (_ringBufCount > 0) {
+      // Collect entries in chronological order
+      const snapshot = new Array(_ringBufCount);
+      for (let i = 0; i < _ringBufCount; i++) {
+        const idx = (_ringBufHead - _ringBufCount + i + RING_BUFFER_MAX) % RING_BUFFER_MAX;
+        snapshot[i] = _ringBuffer[idx];
+      }
+      // Atomic save: direct set, no read-before-write
+      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: snapshot });
+      // Reset circular buffer
+      _ringBufHead = 0;
+      _ringBufCount = 0;
     }
-    // Also flush pending drop count if any
-    if (_pendingDropCount !== null) {
-      chrome.storage.local.set({ [DROP_COUNT_KEY]: _pendingDropCount });
-      _pendingDropCount = null;
-    }
-  }, STORAGE_WRITE_DEBOUNCE_MS);
+  }, STORAGE_FLUSH_INTERVAL_MS);
 }
 
-// Restore isCapturing from storage on startup (SW lifecycle)
-chrome.storage.local.get([CAPTURING_KEY], (result) => {
-  if (result[CAPTURING_KEY]) {
-    isCapturing = result[CAPTURING_KEY];
-    log.info('Restored isCapturing=true from storage (SW restart recovery)');
-  }
-});
+// isCapturing starts false by default
+// Storage persistence is only updated via START_CAPTURE/STOP_CAPTURE events
 
 function persistCapturing() {
-  chrome.storage.local.set({ [CAPTURING_KEY]: isCapturing });
+  safeStorageSet({ [CAPTURING_KEY]: isCapturing });
 }
 
 // Check if offscreen API is available (may be disabled in some Chrome versions)
 function canUseOffscreen() {
-  return !!(chrome.offscreen && chrome.offscreen.createDocument);
+  return !!(chrome.offscreen && chrome.offscreen.hasDocument);
+}
+
+// Ensure offscreen document is ready using chrome.offscreen.hasDocument()
+// This prevents Service Worker sleep by verifying document exists before sending messages
+async function ensureOffscreenReady() {
+  if (offscreenReady) return true;
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (hasDoc) {
+      offscreenReady = true;
+      return true;
+    }
+    return await createOffscreenDocument();
+  } catch (err) {
+    log.error('ensureOffscreenReady failed:', err);
+    return false;
+  }
 }
 
 // Keepalive alarm to prevent SW sleep during capture
 // SW max lifetime ~30-60s, use 15s interval (synced with offscreen keepalive)
 chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'ssa_keepalive' && isCapturing && offscreenReady) {
-    // Ping offscreen to keep SW alive
-    chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }).catch(() => {});
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'ssa_keepalive' && isCapturing) {
+    // Use ensureOffscreenReady() to check/recreate offscreen document
+    await ensureOffscreenReady();
+    safeSendMessage({ type: '_OFFSCREEN_REQ_METRICS' });
   }
 });
 
@@ -112,40 +282,109 @@ let popupPortMessageHandler = null;
 
 // === Popup connection (persistent, for metrics relay) ===
 chrome.runtime.onConnect.addListener((port) => {
+  // === Keepalive port from offscreen (prevents SW sleep) ===
+  if (port.name === 'offscreen-keepalive') {
+    log.info('Keepalive port connected from offscreen');
+    
+    port.onMessage.addListener((msg) => {
+      if (msg?.type === '_KEEPALIVE_PING') {
+        // Send PONG back
+        try { port.postMessage({ type: '_KEEPALIVE_PONG' }); } catch (_) {}
+        
+        // Reset idle alarm (prevents SW termination)
+        chrome.alarms.clear('ssa_keepalive', () => {
+          chrome.alarms.create('ssa_keepalive', { periodInMinutes: 0.25 });
+        });
+      }
+    });
+    
+    port.onDisconnect.addListener(() => {
+      log.info('Keepalive port disconnected');
+    });
+    return;
+  }
+  
   if (port.name === 'popup-metrics') {
     popupPort = port;
+    log.info('Popup connected');
 
-    // Clear queues on disconnect to prevent memory leak
+    // Cancel any existing global disconnect timer (prevents race condition on reconnect)
+    if (globalPopupDisconnectTimer) {
+      clearTimeout(globalPopupDisconnectTimer);
+      globalPopupDisconnectTimer = null;
+    }
+    
     popupPortDisconnectHandler = () => {
-      log.info('Popup port disconnected, queues cleared');
-      popupPort = null;
-      metricsQueue = [];
-      chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+      // Only clear if port wasn't replaced by reconnect
+      // NOTE: This handler NO LONGER clears ringBuffer or chrome.storage —
+      // capture lifecycle is separate from UI lifecycle (Phase 2)
+      const currentPort = popupPort;
+      // Immediately mark as disconnected to prevent postMessage on dead port
+      if (currentPort) currentPort._disconnected = true;
+      globalPopupDisconnectTimer = setTimeout(() => {
+        if (popupPort === currentPort) {
+          log.info('Popup port disconnected, clearing only port reference');
+          popupPort = null;
+          // metricsQueue and ringBuffer persist until STOP_CAPTURE or _OFFSCREEN_ENDED
+        } else {
+          log.info('Popup port reconnected, ignoring stale disconnect');
+        }
+        globalPopupDisconnectTimer = null;
+      }, 500); // 500ms grace period for reconnect
     };
     port.onDisconnect.addListener(popupPortDisconnectHandler);
 
     // Named handler for proper removal
     popupPortMessageHandler = (message) => {
       if (message && message.type === 'REQUEST_METRICS') {
+        // Reset timer on active request
+        if (globalPopupDisconnectTimer) {
+          clearTimeout(globalPopupDisconnectTimer);
+          globalPopupDisconnectTimer = null;
+        }
         if (isCapturing) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
+          safeSendMessage({ type: '_OFFSCREEN_REQ_METRICS' });
         }
       }
+      // Connection latency ping → pong (echo)
+      if (message && message.type === '_PONG_REQUEST') {
+        port.postMessage({ type: '_PONG_RESPONSE', pingTime: message.pingTime });
+      }
+
     };
     port.onMessage.addListener(popupPortMessageHandler);
 
-    // On reconnect: clear stale queues and request fresh metrics (no drain)
-    // Draining old metrics causes 5-10s delay when queue has 80-130 items
-    if (metricsQueue.length > 0) {
-      log.debug('Discarding stale metrics queue:', metricsQueue.length);
-      metricsQueue = [];
+    // On reconnect: clear stale transient queue, replay from persistent queue (Phase 2.2)
+    if (_metricsQueueCount > 0) {
+      log.debug('Discarding stale metrics queue:', _metricsQueueCount);
+      _metricsQueueHead = 0;
+      _metricsQueueCount = 0;
     }
-    chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
+    log.info('Popup reconnected, queues cleared');
+    
+    // Replay last metrics from persistent queue for instant snapshot
+    if (_persistentMetricsQueueCount > 0 && isCapturing) {
+      const replayCount = Math.min(5, _persistentMetricsQueueCount);
+      // Collect recent entries from circular buffer
+      const recentMetrics = [];
+      for (let i = 0; i < replayCount; i++) {
+        const idx = (_persistentMetricsQueueHead - replayCount + i + MAX_PERSISTENT_METRICS) % MAX_PERSISTENT_METRICS;
+        recentMetrics.push(_persistentMetricsQueue[idx]);
+      }
+      for (const m of recentMetrics) {
+        popupPort.postMessage({ type: 'METRICS', ...m });
+      }
+      log.info(`Replayed ${replayCount} recent metrics from persistent queue`);
+    }
+    
+    // Reset disconnect warning flag on reconnect (allows warning on next disconnect)
+    popupDisconnectedWarned = false;
     
     // Request fresh metrics immediately
     if (isCapturing) {
       log.info('Requesting fresh metrics from offscreen');
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, () => {});
+      safeSendMessage({ type: '_OFFSCREEN_REQ_METRICS' });
     }
   }
   
@@ -163,9 +402,20 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'overlay-toggle') {
     port.onMessage.addListener((data) => {
       if (data && data.type === 'TOGGLE') {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
           if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }).catch(() => {});
+            try {
+              // Ensure content.js is loaded before toggling
+              await chrome.scripting.executeScript({
+                target: { tabId: tabs[0].id },
+                files: ['content.js']
+              });
+              chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_TOGGLE_OVERLAY' }, () => {
+                void chrome.runtime.lastError;
+              });
+            } catch (e) {
+              // Content script injection failed — OK, tab may not be web page
+            }
           }
         });
       }
@@ -176,75 +426,110 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // === From Popup ===
   if (message.type === 'START_CAPTURE') {
-    if (!canUseOffscreen()) {
-      sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
-      return true;
-    }
-    
-    const captureSource = message.captureSource || 'tab';
-    
-    if (offscreenReady) {
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, response => {
-        isCapturing = !!response?.ok;
-        persistCapturing();
-        // Notify content script to show overlay
-        if (isCapturing) {
-          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs.length > 0) {
-              chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_SHOW_OVERLAY' }).catch(() => {});
-            }
-          });
-        }
+    try {
+      log.info('START_CAPTURE: checking canUseOffscreen...');
+      if (!canUseOffscreen()) {
+        log.error('Offscreen API not available');
+        sendResponse({ ok: false, error: 'Offscreen API not available in this Chrome version' });
+        return true;
+      }
+      
+      // Set capturing immediately to prevent metrics drop during offscreen startup (~100ms)
+      log.info('START_CAPTURE: setting isCapturing=true');
+      isCapturing = true;
+      persistCapturing();
+      log.info('START_CAPTURE: persistCapturing done');
+      
+      const captureSource = message.captureSource || 'tab';
+      log.info('START_CAPTURE: captureSource=', captureSource);
+      
+      // Overlay is shown by popup.js with the correct capturedTabId
+      // background.js doesn't know the captured tab because popup is active when START_CAPTURE is called
+      async function handleStartResponse(response) {
+        // isCapturing already set above; only log response
+        log.warn('START_CAPTURE response:', response?.ok ? 'ok' : response?.error);
         sendResponse(response);
-      });
-    } else {
-      // Try to create offscreen document
-      createOffscreenDocument().then((success) => {
-        if (success) {
-          chrome.runtime.sendMessage({ type: '_OFFSCREEN_START', captureSource }, (response) => {
-            isCapturing = !!response?.ok;
-            persistCapturing();
-            sendResponse(response);
-          });
-        } else {
+      }
+      
+      // Reset stale state if offscreen context was invalidated
+      offscreenReady = false;
+      log.info('START_CAPTURE: creating offscreen document...');
+      
+      // Make async to prevent SW sleep during createDocument
+    (async () => {
+      if (!offscreenReady) {
+        log.info('START_CAPTURE: calling createOffscreenDocument...');
+        const success = await createOffscreenDocument();
+        log.info('createOffscreenDocument result:', success);
+        if (!success) {
+          log.error('createOffscreenDocument failed, sending error to popup');
           sendResponse({ ok: false, error: 'Failed to create offscreen document' });
+          return;
         }
-      });
+      }
+      
+      // Save capturedTabId for overlay hide later (passed by popup)
+      _capturedTabId = message.capturedTabId || null;
+      
+      log.info('START_CAPTURE: sending _OFFSCREEN_START to offscreen');
+      safeSendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId: message.tabStreamId }, handleStartResponse);
+    })();
+      
+      // Return true to keep channel open for async response
+    } catch (e) {
+      log.error('START_CAPTURE error:', e.message, e.stack);
+      sendResponse({ ok: false, error: e.message });
     }
     return true;
   }
   
   if (message.type === 'REQUEST_STATUS') {
-    sendResponse({ isCapturing, hasMetrics: !!metricsQueue?.length });
+    sendResponse({ isCapturing, hasMetrics: !!_metricsQueueCount });
+    return false;
+  }
+  
+  // === Context invalidation detected — offscreen document destroyed ===
+  if (message.type === '_OFFSCREEN_INVALIDATED') {
+    log.warn('Offscreen context invalidated — resetting capture state');
+    isCapturing = false;
+    offscreenReady = false;
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
+    sendResponse({ ok: true });
     return false;
   }
   
   if (message.type === 'STOP_CAPTURE') {
     if (offscreenReady) {
-      chrome.runtime.sendMessage({ type: '_OFFSCREEN_STOP' }, response => {
+      safeSendMessage({ type: '_OFFSCREEN_STOP' }, response => {
         isCapturing = false;
         persistCapturing();
-        metricsQueue = []; // Clear in-memory queue on stop
-        chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
-        // Note: popupPort is cleared by popupPortDisconnectHandler
-        // Notify content script to hide overlay
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (tabs.length > 0) {
-            chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
-          }
-        });
+        _metricsQueueHead = 0; _metricsQueueCount = 0; // Clear in-memory queue on stop
+        safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
+        
+        // Notify content script to hide overlay using saved tabId (popup may be focused)
+        const tabId = _capturedTabId;
+        if (tabId) {
+          chrome.tabs.sendMessage(tabId, { type: '_SSA_HIDE_OVERLAY' }, () => {
+            // Silently ignore errors — tab may be closed/invalid
+          });
+        }
+        
         sendResponse(response);
       });
     } else {
       isCapturing = false;
       persistCapturing();
-      metricsQueue = []; // Clear in-memory queue on stop
-      chrome.storage.local.remove([PERSISTENT_METRICS_KEY]); // Clear storage queue
+      _metricsQueueHead = 0; _metricsQueueCount = 0; // Clear in-memory queue on stop
+      safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] }); // Clear session storage queue
       // Note: popupPort is cleared by popupPortDisconnectHandler
-      // Notify content script to hide overlay
+      // Notify content script to hide overlay (silent)
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs.length > 0) {
-          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+          chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {
+            // Silently ignore — tab may be closed/invalid
+          });
         }
       });
       sendResponse({ ok: true });
@@ -252,24 +537,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   
-  if (message.type === 'GET_CAPTURE_STATUS') {
-    sendResponse({ isCapturing });
-    return false;
-  }
-  
   // === From Offscreen ===
   if (message.type === '_OFFSCREEN_METRICS') {
     const d = message.data;
     
-    // Log every 100 messages from offscreen
+    // Cache latest metrics for instant replay on popup reconnect
+    _lastMetricsSnapshot = d;
     _bgMetricsRecv++;
-    if (_bgMetricsRecv <= 5 || _bgMetricsRecv % 100 === 0) {
-      log.info('Received _OFFSCREEN_METRICS #', _bgMetricsRecv, 'isCapturing:', isCapturing);
-    }
     
     // Only queue/metrics forward if capture is active
     if (!isCapturing) {
-      log.warn('Dropping metrics: isCapturing=false');
       sendResponse({ ok: true });
       return false;
     }
@@ -277,20 +554,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Persist to chrome.storage.local via throttled debounce (prevents 43fps backpressure)
     throttledPersistMetrics(d);
     
-    // Also add to in-memory queue (limit for stability)
-    metricsQueue.push(d);
-    if (metricsQueue.length > MAX_METRICS_QUEUE) {
-      metricsQueue.shift();
+    // Also add to transient in-memory queue (H-5: circular buffer, O(1) no allocations)
+    _metricsQueue[_metricsQueueHead] = d;
+    _metricsQueueHead = (_metricsQueueHead + 1) % MAX_METRICS_QUEUE;
+    if (_metricsQueueCount < MAX_METRICS_QUEUE) {
+      _metricsQueueCount++;
+    }
+    
+    // Push to persistent queue (H-5: circular buffer, survives popup disconnect)
+    _persistentMetricsQueue[_persistentMetricsQueueHead] = d;
+    _persistentMetricsQueueHead = (_persistentMetricsQueueHead + 1) % MAX_PERSISTENT_METRICS;
+    if (_persistentMetricsQueueCount < MAX_PERSISTENT_METRICS) {
+      _persistentMetricsQueueCount++;
     }
     
     // Forward to popup if connected (live stream)
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage({ type: 'METRICS', ...d });
       } catch (e) {
         log.error('Failed to forward to popup:', e.message);
         popupPort = null;
       }
+    }
+    // Send instant replay if popup just reconnected (cached metrics)
+    else if (_lastMetricsSnapshot && !popupDisconnectedWarned) {
+      popupDisconnectedWarned = true;
+      log.warn('Popup disconnected — cached metrics not forwarded');
     } else {
       // Throttle: warn only once at disconnect, not every frame
       if (!popupDisconnectedWarned) {
@@ -302,7 +592,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Forward to overlay if connected
     if (overlayPort) {
       try {
-        overlayPort.postMessage(message.data);
+        overlayPort.postMessage({ type: 'METRICS', ...message.data });
       } catch (e) {
         log.warn('Failed to forward metrics to overlay:', e.message);
       }
@@ -311,9 +601,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  if (message.type === 'GET_CAPTURE_STATUS') {
+    sendResponse({ isCapturing });
+    return false;
+  }
+  
   // === Forward audio drop events to popup ===
   if (message.type === '_AUDIO_DROP') {
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage(message);
       } catch (e) {
@@ -325,7 +620,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === '_AUDIO_DROP_RESET') {
-    if (popupPort) {
+    if (popupPort && !popupPort._disconnected) {
       try {
         popupPort.postMessage(message);
       } catch (e) {
@@ -339,18 +634,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === '_OFFSCREEN_ENDED') {
     isCapturing = false;
     persistCapturing();
-    if (popupPort) {
-      popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
-      popupPort.disconnect();
-      // popupPort will be nullified by popupPortDisconnectHandler
+    if (popupPort && !popupPort._disconnected) {
+      try {
+        popupPort.postMessage({ type: '_OFFSCREEN_ENDED' });
+      } catch (e) {
+        // port may be disconnected
+      }
+      try { popupPort.disconnect(); } catch (e) {}
     }
-    // Also clear any lingering queues
-    metricsQueue = [];
-    chrome.storage.local.remove([PERSISTENT_METRICS_KEY]);
-    // Notify content script to hide overlay
+    // Also clear any lingering queues (including persistent replay buffer)
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
+    // Notify content script to hide overlay (silent)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs.length > 0) {
-        chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }).catch(() => {});
+        chrome.tabs.sendMessage(tabs[0].id, { type: '_SSA_HIDE_OVERLAY' }, () => {
+          // Silently ignore — tab may be closed/invalid
+        });
       }
     });
     sendResponse({ ok: true });
@@ -381,15 +682,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   
+  // === Forward effects from popup to offscreen ===
+  if (message && message.type.startsWith('_SSA_SET_')) {
+    if (isCapturing && offscreenReady) {
+      safeSendMessage(message);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  // === Offscreen metrics request from popup — verify offscreen is alive ===
+  if (message.type === '_OFFSCREEN_REQ_METRICS') {
+    if (offscreenReady) {
+      // Forward to offscreen with timeout — if offscreen doesn't respond in 500ms, return null
+      let responded = false;
+      const timeout = setTimeout(() => {
+        if (!responded) {
+          log.warn('_OFFSCREEN_REQ_METRICS: offscreen timeout — stale state');
+          sendResponse(null);
+        }
+      }, 500);
+      safeSendMessage({ type: '_OFFSCREEN_REQ_METRICS' }, (resp) => {
+        if (!responded) {
+          responded = true;
+          clearTimeout(timeout);
+          sendResponse(resp);
+        }
+      });
+    } else {
+      // Offscreen not ready — respond with null (stale state)
+      log.info('_OFFSCREEN_REQ_METRICS: offscreen not ready, returning null');
+      sendResponse(null);
+    }
+    return false;
+  }
+  
+  // === FORCE_RESET: Clear stale capture state (for recovery after context invalidation) ===
+  if (message.type === 'FORCE_RESET') {
+    log.warn('FORCE_RESET received — clearing all stale state');
+    isCapturing = false;
+    offscreenReady = false;
+    _metricsQueueHead = 0; _metricsQueueCount = 0;
+    _persistentMetricsQueueHead = 0; _persistentMetricsQueueCount = 0;
+    // P.3: UI settings stay in local, metrics move to session
+    safeStorageSet({ 
+      [CAPTURING_KEY]: false,
+      [DROP_COUNT_KEY]: 0
+    });
+    safeStorageSessionSet({ [PERSISTENT_METRICS_KEY]: [] });
+    sendResponse({ ok: true });
+    return false;
+  }
+  
+  // === P.6: Popup ready signal — relay to offscreen so it can connect directly ===
+  if (message && message.type === '_SSA_POPUP_READY') {
+    // Forward to all extension contexts; offscreen will handle it
+    safeSendMessage({ type: '_SSA_POPUP_READY' });
+    sendResponse({ ok: true });
+    return false;
+  }
+  
   return false;
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  createOffscreenDocument();
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  createOffscreenDocument();
-});
-
-createOffscreenDocument();
+// Note: offscreen document is created lazily via ensureOffscreenReady() when capture starts.
+// Do NOT create on install/startup — Chrome requires justification and only one offscreen doc allowed.

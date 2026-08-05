@@ -2,34 +2,62 @@
 
 > Расширение Chrome (Manifest V3) для анализа аудиопотока в реальном времени и обнаружения аномалий генеративных аудиосистем.
 
+**🚀 MVP Release v1.6.0** (2026-08-04) — AI Detection MVP complete. 826 unit tests, 56 E2E tests, 10 Sprint releases.
+
 ## Возможности
 
+### Audio Capture & Analysis
 | Модуль | Описание | Статус |
 |--------|----------|--------|
-| **Захват аудио** | Перехват звука активной вкладки через `getDisplayMedia` в offscreen-документе | ✅ Реализовано |
-| **RMS анализ** | Расчёт энергии сигнала в реальном времени через AudioWorklet | ✅ Реализовано |
-| **Пиковый RMS** | Отслеживание пикового значения RMS | ✅ Реализовано |
-| **Спектральный анализ** | Radix-2 Cooley-Tukey FFT (1024 точки, 512 бинов Nyquist, Hanning window) → 3 частотных диапазона | ✅ Реализовано |
-| **Детектор глитча** | Обнаружение ВЧ-аномалий с state machine, debounce и счётчиком | ✅ Реализовано |
-| **Осциллограф** | Визуализация волны в реальном времени (2 канала L/R, Canvas) | ✅ Реализовано |
-| **Glitch Timeline** | Canvas-график состояния глитч-детектора во времени | ✅ Реализовано |
-| **Экспорт данных** | Сохранение осциллограммы в CSV (1024 сэмпла, 2 канала) | ✅ Реализовано |
-| **Чувствительность** | Настройка порогов детектора глитча через UI (слайдер 60–90%, persist в storage) | ✅ Реализовано |
-| **Экспорт лога** | Сохранение лога глитчей в JSON (FIFO, max 500 записей) | ✅ Реализовано |
-| **Sensation State** | Визуальный индикатор (STABLE / DRIFT / GLITCH) с цветным кружком | ✅ Реализовано |
-| **Спектральная энтропия** | Анализ равномерности распределения энергии по 4 спектральным полосам | ✅ Реализовано |
-| **Спектральная плоскостность** | Detection spectral flatness —区分 тонального и шумоподобного сигнала | ✅ Реализовано |
-| **Stereo разделение** | Отдельные L/R буферы, метрики и осциллограф для каждого канала | ✅ Реализовано |
-| **Тёмная/светлая тема** | CSS custom properties, persist в storage, автодетект системной темы | ✅ Реализовано |
-| **Waveform throttle** | Передача waveform с частотой ~10 Hz для снижения нагрузки | ✅ Реализовано |
-| **Осциллограф: Freeze** | Блокировка обновления осциллографа (toggle) | ✅ Реализовано |
-| **Осциллограф: Zoom** | Масштабирование 256 сэмплов (toggle) | ✅ Реализовано |
-| **Осциллограф: Log Scale** | Логарифмическая шкала Y-axis (toggle) | ✅ Реализовано |
-| **Осциллограф: Clear** | Очистка буферов + сброс freeze | ✅ Реализовано |
-| **Glitch Heatmap** | Canvas visualisation glitch frequency over time (X=time, Y=bands) | ✅ Реализовано |
-| **Multiple capture sources** | Tab Audio / Mic Audio / Tab + Mic (combined) | ✅ Реализовано |
-| **Overlay widget** | Draggable Canvas поверх страницы (content.js), position persistence | ✅ Реализовано |
-| **Performance Monitor** | FPS, Draw time, Queue length (toggle) | ✅ Реализовано |
+| **Захват аудио** | `getDisplayMedia` в offscreen-документе | ✅ |
+| **RMS + Peak** | Энергия сигнала в реальном времени | ✅ |
+| **Спектральный анализ** | FFT-1024, Hanning window, 3 диапазона (Bass/Mid/Treble) | ✅ |
+| **Stereo L/R** | Отдельные буферы и метрики для каждого канала | ✅ |
+| **Multiple sources** | Tab Audio / Mic Audio / Tab + Mic | ✅ |
+
+### AI Detection (MVP 🆕)
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **MFCC extraction** | 13 коэффициентов + temporal stats | ✅ |
+| **aiScore** | Logistic Regression (88% accuracy on test set) | ✅ |
+
+### Glitch Detection
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Детектор глитча** | ВЧ-аномалии, state machine (STABLE→DRIFT→GLITCH), debounce | ✅ |
+| **Glitch Timeline** | График состояния во времени | ✅ |
+| **Glitch Heatmap** | Частота глитчей по_band_ам (X=time, Y=bands) | ✅ |
+| **Sensation State** | Цветной индикатор: 🟢 STABLE / 🟠 DRIFT / 🔴 GLITCH | ✅ |
+
+### DSP Metrics
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Entropy + Flatness** | Шеннон энтропия, spectral flatness (Wiener) | ✅ |
+| **Extended** | HNR, ZCR, Centroid, Rolloff, Onset, Dynamic Range, Band Ratios, Glitch Rate | ✅ |
+
+### UI & Visualization
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Осциллограф** | 2 канала L/R, Freeze/Zoom/LogScale/Clear | ✅ |
+| **Overlay widget** | Draggable Canvas поверх страницы | ✅ |
+| **Side Panel UI** | Chrome 114+ (popup deprecated) | ✅ |
+| **Темы** | Dark / Light / Neon, автодетект системной темы | ✅ |
+| **Performance Monitor** | FPS, Draw time, Memory, Alerts | ✅ |
+
+### Effects Chain
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **Compressor** | threshold/ratio/knee/attack/release | ✅ |
+| **Parametric EQ** | HPF / LPF / Peaking | ✅ |
+| **Limiter** | WaveShaper soft clipping | ✅ |
+| **Delay** | time/feedback/mix (AudioWorkletProcessor) | ✅ |
+
+### Export & Logging
+| Модуль | Описание | Статус |
+|--------|----------|--------|
+| **CSV Export** | Осциллограмма (1024 сэмпла, 2 канала) | ✅ |
+| **JSON Log** | Глитчи FIFO (max 500 записей) | ✅ |
+| **Centralized logging** | logger.js с level filtering | ✅ |
 
 ---
 
@@ -49,7 +77,7 @@
 1. Откройте страницу с аудиопотоком (YouTube, Spotify и т.д.)
 2. Активируйте вкладку с воспроизведением звука
 3. Нажмите на значок расширения в панели инструментов
-4. Нажмите **\"Start Capture\"** в popup-окне
+4. Нажмите **"Start Capture"** в side panel
 
 > **Примечание:** используется `getDisplayMedia` с `video: true, audio: true` — достаточно поделиться текущей вкладкой в диалоге системы захвата экрана.
 
@@ -60,9 +88,11 @@
 | **Start Capture** | Запуск захвата и анализа аудио через offscreen-документ |
 | **Stop Capture** | Остановка захвата, очистка буферов |
 
-### Интерфейс popup
+### Интерфейс Side Panel
 
-В popup отображаются:
+> **Примечание:** Popup устарел (deprecated). Side panel используется с версии 1.3.0. UI идентичен, но side panel не закрывается при клике вне области.
+
+В side panel отображаются:
 - **RMS Value** — текущая энергия сигнала с цветовой индикацией (SILENCE → CRITICAL)
 - **Peak RMS** — пиковое значение RMS
 - **RMS Level** — классификация уровня + процент
@@ -81,8 +111,12 @@
 - **Capture Source** — выбор источника: Tab Audio / Mic Audio / Tab + Mic
 - **Export CSV** — сохранение данных осциллограммы в CSV
 - **Export Log** — сохранение лога глитчей в JSON (до 500 записей)
-- **Theme Toggle** — переключение тёмной/светлой темы
-- **Performance Monitor** — FPS, Draw time, Queue length
+- **Theme Toggle** — переключение тёмной/светлой темы (dark/light/neon)
+- **Performance Monitor** — FPS, Draw time, Latency, DSP time, Drops, Memory, Alerts
+- **Audio Effects** — Compressor (threshold/ratio/knee/attack/release), Parametric EQ (HPF/LPF/Peaking), Limiter (threshold), Delay (time/feedback/mix) — toggle + 13 sliders
+- **Extended Metrics** — HNR, ZCR, Spectral Centroid/Rolloff, Onset, Dynamic Range, Band Ratios, Glitch Rate
+- **AI Score** — 0-100 индикатор AI-генерации (color-coded: cyan/yellow/red)
+- **Logs Panel** — Filter (all/error/warn/info/debug), Clear, Export, Real-time streaming
 
 ---
 
@@ -104,6 +138,7 @@
 | **Channel Indicator** | STEREO для многоканального ввода, MONO для одноканального |
 | **Overlay widget** | Появляется поверх страницы при активном захвате |
 | **Glitch Timeline** | Отображает RMS и состояние (STABLE/DRIFT/GLITCH) во времени |
+| **AI Score** | 0-100: низкий = естественный звук, высокий = возможная AI-генерация |
 
 ---
 
@@ -114,21 +149,61 @@
 ├── manifest.json              # Конфигурация расширения (MV3)
 ├── background.js              # Service worker (обработка сообщений, relay popup ↔ offscreen)
 ├── offscreen.js               # Offscreen document (persistent audio capture)
+├── content.js                 # Shadow DOM overlay widget (content script)
+├── logger.js                  # Centralized logging system
 ├── README.md                  # Этот файл
+│
+├── popup/
+│   ├── popup.html             # Side Panel UI (popup deprecated)
+│   ├── popup.css              # Тема (dark/light/neon), стили элементов
+│   ├── popup.js               # Логика side panel (захват, обработка, визуализация, theme, sensitivity)
+│   ├── popup-testable.js      # Pure functions: themes, validation, message builders
+│   └── config.js              # Settings persistence
 │
 ├── dsp-engine/
 │   ├── audio-worklet.js       # AudioWorklet processor (FFT, RMS, глитч-детектор, stereo)
-│   └── rms.js                 # Класс RMS (статические методы: classifyLevel, rmsToPercentage)
+│   ├── delay-processor.js     # Delay effect AudioWorkletProcessor
+│   ├── rms.js                 # Класс RMS (статические методы: classifyLevel, rmsToPercentage)
+│   ├── midi-export.js         # MIDI CC mapping (stub)
+│   ├── defensive-processors.js # Safe DSP implementations
+│   └── tests/                 # DSP unit tests (FFT, bands, metrics, RMS, MIDI)
 │
-└── popup/
-    ├── popup.html             # UI popup-окна (RMS, частотные полосы, осциллограф, timeline)
-    ├── popup.css              # Тема (dark/light), стили элементов
-    └── popup.js               # Логика popup (захват, обработка, визуализация, theme, sensitivity)
+├── tests/
+│   ├── unit/                  # Unit tests (Vitest)
+│   │   ├── popup/             # popup-api.spec.js (33 tests)
+│   │   ├── background/        # api-fault-injection.spec.js, ring-buffer.spec.js
+│   │   ├── content/           # context-invalidated.spec.js, style-isolation.spec.js
+│   │   ├── dsp/               # advanced-stress-tests.spec.js, silence-detection.spec.js
+│   │   └── utils/             # logger.spec.js
+│   └── e2e/                   # E2E tests (Playwright)
+│       ├── ssa-e2e.spec.js
+│       ├── ssa-cdp.spec.js
+│       └── metrics-validation.spec.js
+│
+├── scripts/
+│   ├── validate.js            # Validation suite (5 checks)
+│   ├── lint-logs.js           # Production logging linter
+│   └── scheduler/             # Auto-analysis pipeline
+│       ├── run-all.js
+│       ├── analyze-results.js
+│       ├── generate-tasks.js
+│       ├── reports/
+│       └── history/
+│
+├── GIGACODE.md                # Project instructions for GigaCode
+├── TASKS.md                   # Task tracking (Sprint 1-8)
+├── package.json               # NPM scripts (14 commands)
+├── vitest.config.js           # Vitest + coverage config
+├── playwright.config.js       # Playwright E2E config
+└── .github/workflows/
+    └── validate.yml           # CI pipeline (validate + scheduler)
 ```
 
 ---
 
 ## Архитектура
+
+> **Note:** Popup deprecated (Sprint 9 migration). Side panel is the primary UI.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -156,6 +231,7 @@
               │  │  │ • Stereo L/R      │  │  │
               │  │  │ • Glitch Detector │  │  │
               │  │  │ • Entropy + Flat  │  │  │
+              │  │  │ • HNR, ZCR, Centroid│  │  │
               │  │  └───────────────────┘  │  │
               │  └─────────────────────────┘  │
               │         │                     │
@@ -171,12 +247,12 @@
               └─────────┬──────────┘
                         │
               ┌─────────▼──────────┐
-              │  popup.js          │
-              │  Dual-path metrics │
-              │  • Direct (popup AudioContext)
-              │  • Offscreen (bg relay)
-              │  UI: RMS, Bands, Oscilloscope,
-              │  Timeline, Entropy, Theme
+              │  Side Panel        │
+              │  (popup.js)        │
+              │  • Metrics display │
+              │  • Canvas rendering│
+              │  • Effects controls│
+              │  • Oscilloscope    │
               └────────────────────┘
 ```
 
@@ -242,12 +318,14 @@
 - ✅ Экспорт осциллограммы в CSV (1024 сэмпла, 2 канала)
 - ✅ Визуальный индикатор Sensation State (STABLE / DRIFT / GLITCH)
 - ✅ Спектральная энтропия + spectral flatness
-- ✅ Overlay widget поверх страницы (draggable, collapsible, position persistent)
+- ✅ AI Detection MVP (Logistic Regression, 88% accuracy)
+- ✅ Overlay widget поверх страницы (draggable, position persistent)
+- ✅ Side Panel UI (не закрывается при клике вне)
 - ⚠️ При добавлении/изменении permissions в manifest.json нужно **полностью удалить** расширение (`chrome://extensions` → 🗑️) и загрузить заново. Простое "перезагрузить" не обновит permissions.
 - ⚠️ Аудиопоток не воспроизводится (только анализ) — во избежание обратной связи
-- ⚠️ Popup закрывается при клике вне его области (ограничение Chrome)
-- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии popup (mitigated via setTimeout fallback)
+- ⚠️ beforeunload race condition: STOP_CAPTURE может не дойти при резком закрытии side panel (mitigated via setTimeout fallback)
 - ⚠️ Service Worker termination: capture может прерваться после 30s–5min idle (mitigated via keepalive alarm)
+- ⚠️ AI Score — rule-based + lightweight ML (не production-grade detector, нужен v2 с expanded training data)
 
 ### Troubleshooting: Overlay widget
 
@@ -264,19 +342,67 @@
 
 | Проблема | Решение |
 |----------|----------|
-| `Tab capture error: Access denied` | Убедитесь, что расширение вызвано из popup; вкладка активна; на ней воспроизводится звук |
+| `Tab capture error: Access denied` | Убедитесь, что расширение вызвано из side panel; вкладка активна; на ней воспроизводится звук |
 | `Permission denied` | Перезагрузите расширение на `chrome://extensions` |
-| Нет данных в консоли | Убедитесь, что нажата кнопка \"Start Capture\" |
-| AudioWorklet не загружается | Проверьте консель на ошибки загрузки модуля; убедитесь, что `dsp-engine/audio-worklet.js` существует |
-| Метрики не отображаются | Откройте DevTools → Console, проверьте ошибки подключения popup ↔ background ↔ offscreen |
-
----
+| Нет данных в консоли | Убедитесь, что нажата кнопка **"Start Capture"** в side panel |
+| AudioWorklet не загружается | Проверьте консоль на ошибки загрузки модуля; убедитесь, что `dsp-engine/audio-worklet.js` существует |
+| Метрики не отображаются | Откройте DevTools → Console, проверьте ошибки подключения side panel ↔ background ↔ offscreen |
 
 ---
 
 ## Changelog
 
-### v1.2.0 (2026-07-29) — Glitch Heatmap, Multi-Source Capture
+### v1.6.0-MVP (2026-08-04) — 🚀 AI Detection MVP Release
+
+**AI Detection Pipeline:**
+- ✅ MFCC extraction (13 coefficients) в AudioWorklet с temporal stats (mean/stddev over 100-frame window)
+- ✅ `aiScore` (0-100) — Logistic Regression с SGD (1000 epochs, ~88% test accuracy)
+- ✅ 17-фича вектор: MFCC[0:4] + MFCC_std[0:4] + highFreqAnomaly + ZCR + entropy + flatness + HNR + onset
+- ✅ UI: color-coded score bar (cyan/yellow/red) в popup, "AI:" метрика в overlay
+- ✅ JS inference engine (`ai-detector.js`) — zero dependencies, bundle weights (`ai-model-weights.json`)
+- ✅ Python training script (`scripts/ml/train_ai_detector.py`) — numpy-free
+- ✅ 34 новых unit теста (15 MFCC + 19 AI detector)
+
+**Infrastructure:**
+- ✅ 826 unit tests (24 файла), 56 E2E Playwright тестов
+- ✅ Coverage: ~93.7%
+- ✅ Scheduler pipeline: Health Score 100/100 EXCELLENT
+- ✅ Chrome Extension API validator (41 вызовов, 40% coverage)
+
+**Sprint Releases Summary:**
+- Sprint 1-6: Core DSP, FFT, overlay, effects, validation
+- Sprint 7: Scheduler & Test Agent
+- Sprint 8: Chrome Extension API Tests (58 тестов)
+- Sprint 9: Vector Expansion (coverage + E2E hardening + docs)
+- Sprint 10: AI Detection MVP
+
+---
+
+### v1.5.0 (2026-08-02) — Scheduler, API Tests, Side Panel Migration
+
+**Scheduler Pipeline (Sprint 7):**
+- ✅ `scripts/scheduler/run-all.js` — orchestrator (tests, syntax, lint, coverage)
+- ✅ `scripts/scheduler/analyze-results.js` — agent analysis (health scoring 0-100)
+- ✅ `scripts/scheduler/generate-tasks.js` — task generator (auto-updates TASKS.md)
+- ✅ GitHub Actions CI: daily cron + PR validation (2-job pipeline)
+- ✅ Health Score: 100/100 EXCELLENT
+
+**Extension API Tests (Sprint 8):**
+- ✅ `tests/unit/popup/popup-api.spec.js` (33 tests) — message builders, validation, themes
+- ✅ `popup/popup-testable.js` — extracted pure functions (11 functions)
+- ✅ `tests/unit/background/api-fault-injection.spec.js` (20 tests) — MV3 fault injection
+- ✅ `tests/unit/dsp/advanced-stress-tests.spec.js` (15 tests) — DSP stress tests
+- ✅ `tests/unit/content/context-invalidated.spec.js` (23 tests) — context invalidation
+- ✅ `scripts/validate.js` — Chrome API call detector (no deprecated API calls)
+
+**Side Panel Migration:**
+- ✅ `manifest.json` — action removed, side_panel configured
+- ✅ Side panel only (popup deprecated)
+- ✅ Delay metrics freeze fix — analysis tap independent of wet/dry crossfade
+
+**Tests:** 330 total (319 unit + 11 e2e), Coverage: 93.7%
+
+### v1.4.0 (2026-07-29) — Validation, Logging, Effects Chain
 
 **Новые фичи:**
 - ✅ **Glitch Heatmap** — Canvas visualisation glitch frequency over time
@@ -369,23 +495,45 @@
 
 ## Roadmap
 
-### Sprint 1 (Настоящий план)
-- [x] Этап 0: README + Tech debt cleanup (deduplication applyMetrics, listener leak fix, beforeunload race, var→const/let)
-- [x] Этап 1: Overlay widget (content script, draggable Canvas, position persistence)
-- [x] Этап 2: Performance (rAF throttle, Array.from → Float32Array, buffer pooling)
-- [x] Этап 3: Oscilloscope options (Freeze, Zoom, Log scale, Clear)
-- [x] Версия 1.0: Error handling, keepalive, documentation, stereo support
+Полный список задач с деталями: [TASKS.md](TASKS.md)
 
-### Sprint 2
-- [x] Radix-2 Cooley-Tukey FFT (1024 pts, Hanning window, true freq bins)
-- [x] Jest unit tests for RMS module (33/33 passed)
-- [x] Precomputed twiddle factors table (zero Math.cos/sin per frame)
-- [x] Split-screen oscilloscope (live vs reference comparison)
-- [x] Glitch Heatmap (time × bands visualization)
-- [x] Multiple capture sources (Tab / Mic / Combined)
-- [x] Centralized config manager
-- [ ] Web MIDI export (popup blocked → needs background worker or standalone page)
-- [ ] Тестирование на AI-генераторах (Suno, Udio, ElevenLabs)
+> **Все спринты завершены:** 10 релизов, MVP v1.6.0 (AI Detection) complete
+
+### Sprint 1-5
+- Все задачи выполнены — см. [TASKS.md](TASKS.md)
+
+### Sprint 6
+- Все задачи выполнены — см. [TASKS.md](TASKS.md)
+
+### Sprint 7 — Scheduler & Test Agent ✅
+- Полный scheduler pipeline (orchestrator, agent analysis, task generation)
+- GitHub Actions CI: daily cron + PR validation
+- Health Score: 100/100 EXCELLENT
+
+### Sprint 8 — Chrome Extension API Tests ✅
+- 58 новых unit тестов (popup-api, fault-injection, stress-tests, context-invalidated)
+- popup-testable.js extracted pure functions
+- Chrome API call detector (validate.js)
+
+### Sprint 9 — Vector Expansion ✅
+- ✅ Coverage expansion: 4 → 8+ файлов
+- ✅ E2E hardening: 11 → 56 тестов (Playwright UI)
+- ✅ Documentation refresh (README, GIGACODE, TASKS)
+- ✅ Coverage 93.7%, Health Score 100/100
+
+### Sprint 10 — AI Detection MVP ✅ 🚀
+- ✅ MFCC extraction + temporal stats
+- ✅ Logistic Regression AI Detection (88% accuracy)
+- ✅ JS inference engine (zero dependencies)
+- ✅ 34 новых unit теста
+- ✅ **MVP Release v1.6.0**
+
+### Post-MVP Backlog
+- ⏳ Web MIDI export (blocked — popup API limitation)
+- ⏳ Session export (JSON/WAV)
+- ⏳ History viewer (replay past sessions)
+- ⏳ AI Detection v2: retraining pipeline, expanded training data
+- ⏳ Offline mode (graceful degradation without Service Worker)
 
 ---
 
@@ -398,4 +546,4 @@
 
 ---
 
-**Версия:** 1.2.0  |  **Дата:** 2026-07-29  |  **Статус:** Glitch Heatmap + Multi-Source Capture + Config Manager
+**Версия:** 1.6.0-MVP  |  **Дата:** 2026-08-04  |  **Статус:** 🚀 AI Detection MVP Complete (826 unit tests, 56 E2E)
