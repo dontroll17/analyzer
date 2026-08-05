@@ -372,14 +372,26 @@ test.describe('E2E UI Interactions', () => {
     await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(1000);
 
+    // Dismiss alert() dialogs to prevent event loop blocking
+    page.on('dialog', async (dialog) => {
+      await dialog.dismiss();
+    });
+
+    // Click with timeout to prevent hanging on alert()
     let errors = 0;
     try {
-      await page.click('#exportBtn');
+      await Promise.race([
+        page.click('#exportBtn'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('click timeout')), 3000))
+      ]);
     } catch (e) {
       errors++;
     }
     try {
-      await page.click('#exportLogBtn');
+      await Promise.race([
+        page.click('#exportLogBtn'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('click timeout')), 3000))
+      ]);
     } catch (e) {
       errors++;
     }

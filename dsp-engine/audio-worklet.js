@@ -285,6 +285,11 @@ class AudioAnalyzer extends AudioWorkletProcessor {
       requiredConsecutiveFrames: 2  // Требуем 2 кадра аномалии подряд!
     };
 
+    // === L-3: DSP timeout/failure detection ===
+    this._workletError = false;
+    this._errorCount = 0;
+    this._maxErrorFrames = 10; // Threshold to flag sustained failure
+
     this.consecutiveGlitchFrames = 0; // Счетчик кадров подряд
     
     this.glitchState = 'STABLE';
@@ -767,121 +772,139 @@ class AudioAnalyzer extends AudioWorkletProcessor {
   }
 
   process(inputs, outputs, parameters) {
-    const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
-    
-    // Debug: log actual frame count per channel
-    if (!this._processCount) this._processCount = 0;
-    this._processCount++;
-    if (this._processCount === 1 || this._processCount === 100 || this._processCount % 500 === 0) {
-      // Debug logging removed for production
-    }
-    
-    const input = inputs[0];
-    const output = outputs[0];
-    
-    // === DEFENSIVE GUARDS ===
-    // Guard 1: If input is missing or empty, passthrough + return (no metrics this block)
-    if (!input || input.length === 0) {
-      // Still passthrough if output exists
-      if (output && output.length > 0) {
-        for (let ch = 0; ch < output.length; ch++) {
-          if (output[ch]) output[ch].fill(0);
+    try {
+      const processStartTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
+      
+      // Debug: log actual frame count per channel
+      if (!this._processCount) this._processCount = 0;
+      this._processCount++;
+      if (this._processCount === 1 || this._processCount === 100 || this._processCount % 500 === 0) {
+        // Debug logging removed for production
+      }
+      
+      const input = inputs[0];
+      const output = outputs[0];
+      
+      // === DEFENSIVE GUARDS ===
+      // Guard 1: If input is missing or empty, passthrough + return (no metrics this block)
+      if (!input || input.length === 0) {
+        // Still passthrough if output exists
+        if (output && output.length > 0) {
+          for (let ch = 0; ch < output.length; ch++) {
+            if (output[ch]) output[ch].fill(0);
+          }
         }
+        return true;
       }
-      return true;
-    }
-    
-    // Guard 2: Validate all sample data — reject NaN/Infinity to prevent metric corruption
-    let hasInvalidData = false;
-    for (let ch = 0; ch < input.length; ch++) {
-      const channelData = input[ch];
-      if (!channelData || channelData.length === 0) {
-        hasInvalidData = true;
-        break;
-      }
-      for (let i = 0; i < channelData.length; i++) {
-        if (!Number.isFinite(channelData[i])) {
+      
+      // Guard 2: Validate all sample data — reject NaN/Infinity to prevent metric corruption
+      let hasInvalidData = false;
+      for (let ch = 0; ch < input.length; ch++) {
+        const channelData = input[ch];
+        if (!channelData || channelData.length === 0) {
           hasInvalidData = true;
           break;
         }
-      }
-      if (hasInvalidData) break;
-    }
-    
-    // If invalid data detected, passthrough zeros and skip metrics
-    if (hasInvalidData) {
-      if (output && output.length > 0) {
-        for (let ch = 0; ch < output.length; ch++) {
-          if (output[ch]) output[ch].fill(0);
+        for (let i = 0; i < channelData.length; i++) {
+          if (!Number.isFinite(channelData[i])) {
+            hasInvalidData = true;
+            break;
+          }
         }
-      }
-      return true;
-    }
-    // === END DEFENSIVE GUARDS ===
-    
-    // 1. Пробрасываем звук на динамики
-    if (output && output.length > 0) {
-      for (let channel = 0; channel < Math.min(input.length, output.length); channel++) {
-        if (output[channel]) {
-          output[channel].set(input[channel]);
-        }
-      }
-    }
-
-    // 2. Буферизация по каналам
-    // inputs[0] — массив блоков: inputs[0][0] = левый, inputs[0][1] = правый
-    if (input && input.length > 0) {
-      // Определяем количество каналов при первом вызове (фиксируем на всю сессию)
-      if (this.channelCount === 0) {
-        this.channelCount = input.length;
+        if (hasInvalidData) break;
       }
       
-      for (let ch = 0; ch < input.length; ch++) {
-        const channelData = input[ch];
-        const numSamples = channelData.length;
-        
-        for (let i = 0; i < numSamples; i++) {
-          this.inputBuffers[ch][this.bufferCounts[ch]] = channelData[i];
-          this.bufferCounts[ch]++;
-          
-          if (this.bufferCounts[ch] >= this.bufferSize) {
-            this.processChannelFrame(ch);
-            this.bufferCounts[ch] = 0;
+      // If invalid data detected, passthrough zeros and skip metrics
+      if (hasInvalidData) {
+        if (output && output.length > 0) {
+          for (let ch = 0; ch < output.length; ch++) {
+            if (output[ch]) output[ch].fill(0);
+          }
+        }
+        return true;
+      }
+      // === END DEFENSIVE GUARDS ===
+      
+      // 1. Пробрасываем звук на динамики
+      if (output && output.length > 0) {
+        for (let channel = 0; channel < Math.min(input.length, output.length); channel++) {
+          if (output[channel]) {
+            output[channel].set(input[channel]);
           }
         }
       }
-      
-      // Отправляем фрейм когда ВСЕ каналы заполнены:
-      // Mono (channelCount=1): достаточно левого
-      // Stereo (channelCount=2): нужны оба канала — иначе мерцает MONO/STEREO
-      if (this.leftReady && (this.channelCount === 1 || this.rightReady)) {
-        // === P.2: Two-level DSP quantization ===
-        // Increment decimation counter
-        this._quantumInCycle = (this._quantumInCycle + 1) % this.DECIMATION_K;
-        const isHeavyFrame = (this._quantumInCycle === 0); // Every K-th quantum
-        
-        if (isHeavyFrame) {
-          this.processHeavyFrame(); // FFT/MFCC/HNR/AI every K quanta
-        } else {
-          this.processLightFrame(); // RMS/peak/glitch every quantum
+
+      // 2. Буферизация по каналам
+      // inputs[0] — массив блоков: inputs[0][0] = левый, inputs[0][1] = правый
+      if (input && input.length > 0) {
+        // Определяем количество каналов при первом вызове (фиксируем на всю сессию)
+        if (this.channelCount === 0) {
+          this.channelCount = input.length;
         }
-        this.leftReady = false;
-        this.rightReady = false;
-        this.leftFrameData = null;
-        this.rightFrameData = null;
+        
+        for (let ch = 0; ch < input.length; ch++) {
+          const channelData = input[ch];
+          const numSamples = channelData.length;
+          
+          for (let i = 0; i < numSamples; i++) {
+            this.inputBuffers[ch][this.bufferCounts[ch]] = channelData[i];
+            this.bufferCounts[ch]++;
+            
+            if (this.bufferCounts[ch] >= this.bufferSize) {
+              this.processChannelFrame(ch);
+              this.bufferCounts[ch] = 0;
+            }
+          }
+        }
+        
+        // Отправляем фрейм когда ВСЕ каналы заполнены:
+        // Mono (channelCount=1): достаточно левого
+        // Stereo (channelCount=2): нужны оба канала — иначе мерцает MONO/STEREO
+        if (this.leftReady && (this.channelCount === 1 || this.rightReady)) {
+          // === P.2: Two-level DSP quantization ===
+          // Increment decimation counter
+          this._quantumInCycle = (this._quantumInCycle + 1) % this.DECIMATION_K;
+          const isHeavyFrame = (this._quantumInCycle === 0); // Every K-th quantum
+          
+          if (isHeavyFrame) {
+            this.processHeavyFrame(); // FFT/MFCC/HNR/AI every K quanta
+          } else {
+            this.processLightFrame(); // RMS/peak/glitch every quantum
+          }
+          this.leftReady = false;
+          this.rightReady = false;
+          this.leftFrameData = null;
+          this.rightFrameData = null;
+        }
       }
+      
+      // Measure DSP processing time
+      const nowTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
+      const processElapsed = nowTime - processStartTime;
+      // Smooth with exponential moving average (alpha=0.1)
+      if (!this.lastDspTimeMs) {
+        this.lastDspTimeMs = processElapsed;
+      } else {
+        this.lastDspTimeMs += (processElapsed - this.lastDspTimeMs) * 0.1;
+      }
+      return true;
+    } catch (err) {
+      // L-3: DSP timeout/failure detection — prevent silent failures
+      this._errorCount++;
+      this._workletError = true;
+      
+      // Passthrough on error — null-safe access, don't let exception propagate to WebAudio
+      try {
+        const outChannel = inputs?.[0] && outputs?.[0];
+        if (outChannel) {
+          for (let ch = 0; ch < outChannel.length; ch++) {
+            if (outChannel[ch]) outChannel[ch].fill(0);
+          }
+        }
+      } catch (_) {}
+      
+      return true; // Always return true to prevent graph destruction
     }
-    
-    // Measure DSP processing time
-    const nowTime = (typeof self !== 'undefined' && self.performance?.now) ? self.performance.now() : Date.now();
-    const processElapsed = nowTime - processStartTime;
-    // Smooth with exponential moving average (alpha=0.1)
-    if (!this.lastDspTimeMs) {
-      this.lastDspTimeMs = processElapsed;
-    } else {
-      this.lastDspTimeMs += (processElapsed - this.lastDspTimeMs) * 0.1;
-    }
-    return true;
   }
 
   /**

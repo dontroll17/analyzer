@@ -15,7 +15,7 @@
     "test:e2e:sw": "npx playwright test sw-lifecycle",
     "test:e2e:memory": "npx playwright test memory-stability",
     "test:e2e:stress": "npx playwright test --grep @stress",
-    "generate:fixtures": "python tests/e2e/fixtures/generate-audio.py",
+    "generate:fixtures": "node scripts/generate-audio-fixtures.js",
     "test:coverage": "npx vitest run --coverage",
     "test:all": "npm test && npm run test:e2e",
     "validate": "node scripts/validate.js",

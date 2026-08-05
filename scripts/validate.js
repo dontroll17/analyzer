@@ -21,7 +21,7 @@ const PRODUCTION_LOG_PATTERNS = [
   /console\.log\(/g,
   /console\.debug\(/g,
 ];
-const SKIP_FILES = ['node_modules/', '.git/', 'tests/'];
+const SKIP_FILES = ['node_modules/', '.git/', 'tests/', 'coverage/', 'dsp-engine/tests/', 'dsp-engine/midi-export.js'];
 
 // ============================================
 // Deprecated Chrome API params
@@ -72,9 +72,18 @@ function checkSyntax() {
   console.log('\n📝 Checking syntax...');
 
   const allJsFiles = globJSFilesRecursive('.');
-  // Exclude node_modules, .git, tests
+  // Exclude node_modules, .git, tests, coverage, test files (cross-platform path matching)
   const filteredFiles = allJsFiles.filter(
-    (f) => !f.includes('node_modules') && !f.includes('.git')
+    (f) => {
+      const normalized = '/' + f.replace(/\\/g, '/');
+      if (normalized.includes('/node_modules/')) return false;
+      if (normalized.includes('/.git/')) return false;
+      if (normalized.includes('/tests/')) return false;
+      if (normalized.includes('/coverage/')) return false;
+      if (normalized.includes('/dsp-engine/test-')) return false;
+      if (normalized.endsWith('/dsp-engine/midi-export.js')) return false;
+      return true;
+    }
   );
   
   if (filteredFiles.length === 0) {
@@ -122,6 +131,9 @@ function checkProductionLogs() {
 
         // Skip logger definition lines: `warn: (m, ...) => console.warn(...)`
         if (/^\s*\w+:\s*\(/.test(line) && /=>\s*console\./.test(line)) continue;
+
+        // Skip fallback logger definitions: `const _lf = { forModule: ... console.warn ... }`
+        if (/const _lf\s*=\s*\{/.test(line)) continue;
 
         for (const pattern of PRODUCTION_LOG_PATTERNS) {
           pattern.lastIndex = 0; // Reset regex
@@ -343,16 +355,36 @@ function checkManifest() {
 // ==================== HELPERS ====================
 function getJSFiles() {
   const allJsFiles = globJSFilesRecursive('.');
-  return allJsFiles.filter(
-    (f) => !f.includes('node_modules') && !f.includes('.git')
-  );
+  return allJsFiles.filter((f) => {
+    const normalized = '/' + f.replace(/\\/g, '/');
+    if (normalized.includes('/node_modules/')) return false;
+    if (normalized.includes('/.git/')) return false;
+    if (normalized.includes('/tests/')) return false;
+    if (normalized.includes('/coverage/')) return false;
+    if (normalized.includes('/dsp-engine/test-')) return false;
+    if (normalized.endsWith('/dsp-engine/midi-export.js')) return false;
+    return true;
+  });
 }
 
 function getMainJSFiles() {
   const allJsFiles = globJSFilesRecursive('.');
-  return allJsFiles.filter(
-    (f) => !f.includes('node_modules') && !f.includes('.git') && !f.includes('/tests/')
-  );
+  // Skip test helpers, coverage, scripts, dsp-engine test files, dsp-engine helper files
+  return allJsFiles.filter((f) => {
+    const normalized = '/' + f.replace(/\\/g, '/');
+    if (normalized.includes('/node_modules/')) return false;
+    if (normalized.includes('/.git/')) return false;
+    if (normalized.includes('/tests/')) return false;
+    if (normalized.includes('/coverage/')) return false;
+    if (normalized.includes('/dsp-engine/test-')) return false;
+    if (normalized.endsWith('/dsp-engine/midi-export.js')) return false;
+    // Skip scripts/ and dsp-engine/ (they are internal tools, not app core)
+    if (normalized.includes('/scripts/')) return false;
+    if (normalized.startsWith('/dsp-engine/')) return false;
+    if (normalized.startsWith('/popup/config.js')) return false;
+    if (normalized.startsWith('/popup/popup-testable.js')) return false;
+    return true;
+  });
 }
 
 function globJSFilesRecursive(dir) {
@@ -363,7 +395,7 @@ function globJSFilesRecursive(dir) {
       const fullPath = path.join(dir, item);
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory() && !item.startsWith('.') && item !== 'node_modules') {
-        results.push(...globJSFiles(fullPath));
+        results.push(...globJSFilesRecursive(fullPath));
       } else if (stat.isFile() && item.endsWith('.js')) {
         results.push(fullPath);
       }

@@ -44,6 +44,7 @@ test.describe('Memory Stability E2E', () => {
     });
     page = await context.newPage();
     await page.goto(getPopupURL());
+    await page.waitForLoadState('load');
     await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(1000);
 
@@ -106,12 +107,24 @@ test.describe('Memory Stability E2E', () => {
   // === Test 19: Zero Float32Array Allocations in process() ===
 
   test('should have zero Float32Array allocations in process() [validated]', async () => {
-    await page.goto(getPopupURL());
-    await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(500);
+    const testContext = await chromium.launchPersistentContext('', {
+      headless: true,
+      args: [
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        `--load-extension=${EXTENSION_PATH}`,
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        '--disable-web-security',
+      ],
+    });
+    const testPage = await testContext.newPage();
+    await testPage.goto(getPopupURL());
+    await testPage.waitForLoadState('load');
+    await testPage.waitForLoadState('domcontentloaded');
+    await testPage.waitForTimeout(500);
 
     // Validate Float32Array allocation patterns
-    const allocationValidation = await page.evaluate(() => {
+    const allocationValidation = await testPage.evaluate(() => {
       // The AudioWorklet process() should use PRE-ALLOCATED buffers
       // No new Float32Array allocations should happen per-frame
       
@@ -186,6 +199,8 @@ test.describe('Memory Stability E2E', () => {
     for (const [key, valid] of Object.entries(allocationValidation.buffersValid)) {
       expect(valid).toBe(true);
     }
+    
+    await testContext.close();
   });
 
   // === Test 20: Metrics Quality Over Extended Period (Simulated) ===
@@ -271,8 +286,22 @@ test.describe('Memory Stability E2E', () => {
   // === Test 21: Pre-allocated Buffer Reuse Pattern ===
 
   test('should verify pre-allocated buffer reuse pattern in AudioWorklet', async () => {
+    const testContext = await chromium.launchPersistentContext('', {
+      headless: true,
+      args: [
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        `--load-extension=${EXTENSION_PATH}`,
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        '--disable-web-security',
+      ],
+    });
+    const testPage = await testContext.newPage();
+    await testPage.goto(getPopupURL());
+    await testPage.waitForLoadState('load');
+    await testPage.waitForLoadState('domcontentloaded');
     // Validate the buffer allocation strategy from audio-worklet.js
-    const bufferPattern = await page.evaluate(() => {
+    const bufferPattern = await testPage.evaluate(() => {
       // These are the pre-allocated buffers from AudioAnalyzer constructor
       const buffers = [
         { name: 'inputBuffers[0]', size: 1024, type: 'Float32Array' },
@@ -309,12 +338,28 @@ test.describe('Memory Stability E2E', () => {
     expect(bufferPattern.allFloat32).toBe(true);
     expect(bufferPattern.totalMemoryKB).toBeGreaterThan(0);
     // ~40KB for pre-allocated buffers is reasonable
+    
+    await testContext.close();
   });
 
   // === Test 22: GC Efficiency Validation ===
 
   test('should validate GC efficiency with pre-allocated buffers', async () => {
-    const gcEfficiency = await page.evaluate(() => {
+    const testContext = await chromium.launchPersistentContext('', {
+      headless: true,
+      args: [
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        `--load-extension=${EXTENSION_PATH}`,
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        '--disable-web-security',
+      ],
+    });
+    const testPage = await testContext.newPage();
+    await testPage.goto(getPopupURL());
+    await testPage.waitForLoadState('load');
+    await testPage.waitForLoadState('domcontentloaded');
+    const gcEfficiency = await testPage.evaluate(() => {
       // Compare two approaches:
       // 1. Allocated per-frame (bad for GC)
       // 2. Pre-allocated (good for GC)
@@ -347,5 +392,7 @@ test.describe('Memory Stability E2E', () => {
 
     expect(gcEfficiency.correctApproach).toBe(true);
     expect(gcEfficiency.zeroAllocationsPerFrame).toBe(true);
+    
+    await testContext.close();
   });
 });

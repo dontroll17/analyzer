@@ -52,6 +52,36 @@ let cleanupScheduled = false;
 let lastMetrics = null;
 let currentCaptureSource = 'tab'; // 'tab' | 'mic' | 'combined'
 
+// === L-4: Service worker restart detection ===
+let _swRestartDetected = false;
+let _isOffline = false;
+const _swRestartHandler = () => {
+  // SW went offline — likely restarted or extension updated
+  if (_isOffline) return; // Already handled
+  _isOffline = true;
+  log.warn('SW offline detected (L-4) — performing graceful cleanup');
+  
+  // Stop capture if active
+  if (audioContext && audioContext.state !== 'closed') {
+    try {
+      _performCleanup();
+    } catch (e) {
+      log.error('L-4: Cleanup on offline failed:', e.message);
+    }
+  }
+};
+
+const _swOnlineHandler = () => {
+  _isOffline = false;
+  _swRestartDetected = true; // Mark that a restart occurred
+  log.info('SW online after restart (L-4) — _swRestartDetected=true');
+  
+  // Reset restart flag after 5s to avoid stale detections
+  setTimeout(() => {
+    _swRestartDetected = false;
+  }, 5000);
+};
+
 // Crossfade constants: τ = 15ms for equal-power trig crossfade
 const CROSSFADE_TAU = 0.015; // 15ms time constant in seconds
 
@@ -557,6 +587,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   return false;
 });
+
+// === L-4: Service worker restart detection ===
+window.addEventListener('offline', _swRestartHandler);
+window.addEventListener('online', _swOnlineHandler);
 
 async function startCapture(source, tabStreamId) {
   log.info('startCapture called, source:', source, 'tabStreamId:', tabStreamId ? 'present' : 'null');
@@ -1346,5 +1380,10 @@ function _performCleanup() {
     audioContext.close().catch(() => {});
     audioContext = null;
   }
+  
+  // L-4: Cleanup SW restart detection listeners
+  window.removeEventListener('offline', _swRestartHandler);
+  window.removeEventListener('online', _swOnlineHandler);
+  
   safeSendMessage({ type: '_OFFSCREEN_ENDED' });
 }

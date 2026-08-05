@@ -202,6 +202,10 @@ const EFFECTS_DEFAULTS = {
   delay: { active: false, delayTime: 0, feedback: 0, mix: 0 }
 };
 
+// Effects send debounce — 100ms interval to prevent spamming offscreen
+let _effectsSendDebounce = null;
+let _pendingEffectsSend = null;
+
 // Effects local state
 let effectsSettings = JSON.parse(JSON.stringify(EFFECTS_DEFAULTS));
 let effectsUIEnabled = false; // Whether sliders are enabled (capture active)
@@ -2443,9 +2447,7 @@ if (resetSensitivityBtn) {
 // Effects Helper Functions
 // ============================================
 
-// Effects send debounce — 100ms interval to prevent spamming offscreen
-let _effectsSendDebounce = null;
-let _pendingEffectsSend = null;
+// _effectsSendDebounce and _pendingEffectsSend are declared near EFFECTS_DEFAULTS (line ~206)
 
 function scheduleEffectsSend(type, active, params) {
   const payload = { type, active, params };

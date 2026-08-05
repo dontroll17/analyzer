@@ -35,6 +35,9 @@ let overlayMode = 'expanded'; // 'expanded' | 'compact' | 'mini'
 let isDragging = false;
 let dragOffsetX = 0;
 let dragOffsetY = 0;
+let _rafId = null; // rAF handle for waveform/heatmap drawing
+let _dragMoveHandler = null; // stored mousemove handler for cleanup
+let _dragUpHandler = null; // stored mouseup handler for cleanup
 
 // (No global handlers — inline handlers are created/removed in mousedown/mouseup)
 
@@ -297,10 +300,14 @@ function getGlitchColor(state) {
 function drawOverlayCanvas(rms) {
   if (!ctx) return;
   
-  const w = canvasEl.width;
-  const h = canvasEl.height;
-  
-  ctx.clearRect(0, 0, w, h);
+  // Store rAF handle for cleanup in destroyOverlay()
+  _rafId = requestAnimationFrame(() => {
+    if (!ctx) return;
+    
+    const w = canvasEl.width;
+    const h = canvasEl.height;
+    
+    ctx.clearRect(0, 0, w, h);
   
   // Draw simple waveform placeholder (flat line with small bumps)
   const normalizedRMS = Math.min(1, rms * 2);
@@ -344,6 +351,7 @@ function drawOverlayCanvas(rms) {
     }
     ctx.stroke();
   }
+  });
 }
 
 // Update overlay display
@@ -787,11 +795,17 @@ function injectOverlay() {
       if (!isDragging) return;
       isDragging = false;
       overlayEl.classList.remove('dragging');
+      // Store handlers for cleanup in destroyOverlay()
+      _dragMoveHandler = null;
+      _dragUpHandler = null;
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       savePosition();
     };
     
+    // Store handlers for cleanup
+    _dragMoveHandler = onMouseMove;
+    _dragUpHandler = onMouseUp;
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   });
@@ -885,8 +899,13 @@ function hideOverlay() {
 // Called on context invalidation, hide, or max reconnect attempts.
 // Performs complete cleanup: cancels rAF, removes Shadow DOM, nulls all cached refs.
 function destroyOverlay() {
-  // Cancel any pending rAF (waveform draw timers)
-  // Note: we don't have a stored rAF handle, but we clear the flag
+  // Cancel pending rAF (waveform/heatmap drawing)
+  if (_rafId !== null) {
+    cancelAnimationFrame(_rafId);
+    _rafId = null;
+  }
+  
+  // Clear waveform draw flags
   pendingOscDraw = null;
   pendingWaveformUpdate = false;
   
@@ -921,6 +940,20 @@ function destroyOverlay() {
     miniBadgeHideTimer = null;
   }
   
+  // === P.5: Cleanup document-level drag handlers ===
+  // These were added in mousedown listener, must be removed to prevent memory leaks
+  if (_dragMoveHandler) {
+    document.removeEventListener('mousemove', _dragMoveHandler);
+    _dragMoveHandler = null;
+  }
+  if (_dragUpHandler) {
+    document.removeEventListener('mouseup', _dragUpHandler);
+    _dragUpHandler = null;
+  }
+  
+  // Clear pin state
+  isPinned = false;
+  
   // Null all cached DOM references to prevent stale access
   canvasEl = null;
   ctx = null;
@@ -943,7 +976,6 @@ function destroyOverlay() {
   captureActive = false;
   reconnectAttempts = 0;
   
-  // === P.5: Full event listener cleanup to prevent memory leaks ===
   // Remove page-level listeners
   document.removeEventListener('visibilitychange', _visibilityHandler);
   window.removeEventListener('beforeunload', _beforeUnloadHandler);
