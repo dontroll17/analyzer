@@ -1,9 +1,9 @@
-// delay-processor-testable.js — Pure logic extracted from DelayProcessor AudioWorkletProcessor
-// Exports stateless processing functions for testing
+// dsp-engine/delay-utils.js — Pure delay effect utilities for production use
+// Stateless functions that work with Float32Array buffers directly
+// No AudioContext, no Web Audio API dependencies
 
 /**
  * Process a single channel of audio through the delay effect.
- * This is the pure core logic extracted from DelayProcessor.process()
  * 
  * @param {Float32Array} input - Input audio samples
  * @param {number} delayTime - Delay time in seconds (0 to 1.0)
@@ -38,6 +38,9 @@ function processDelayChannel(input, delayTime, feedback, mix, sampleRate, buffer
 
 /**
  * Create a delay buffer of given size.
+ * @param {number} maxDelay - Maximum delay in seconds
+ * @param {number} sampleRate - Sample rate
+ * @returns {Float32Array}
  */
 function createDelayBuffer(maxDelay, sampleRate) {
   return new Float32Array(Math.ceil(maxDelay * sampleRate));

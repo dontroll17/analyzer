@@ -1,13 +1,12 @@
 # Gigacode
 .gigacode_vsc/
-coverage/
+
 # Chrome extension build files
 *.crx
 *.pem
 
 # IDE files
 .idea/
-TASKS.md
 .vscode/
 *.swp
 *.swo
@@ -19,7 +18,7 @@ Thumbs.db
 
 # Node modules (если будут использоваться)
 node_modules/
-playwright-report/
+
 # Distribution files
 dist/
 build/
@@ -30,11 +29,3 @@ build/
 
 # Backup files
 *~
-
-# Test files (not part of extension)
-test-results/
-
-jest.config.js
-jest.setup.js
-babelrc
-TASKS.md

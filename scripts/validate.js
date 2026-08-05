@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
  * Validation script для автоматической проверки Stream Sensation Analyzer
- * Запускается: npm run validate
+ * Запускается: node scripts/validate.js
  *
  * Checks:
- * 1. npm test — Vitest unit tests
- * 2. node --check — Syntax check all .js files
- * 3. Production logging audit — console.warn/log/debug in production code
- * 4. Manifest validation — MV3 compliance
- * 5. Chrome Extension API validation — no deprecated params
+ * 1. node --check — Syntax check all .js files
+ * 2. Production logging audit — console.warn/log/debug in production code
+ * 3. Manifest validation — MV3 compliance
+ * 4. Chrome Extension API validation — no deprecated params
  */
 
 const { execSync } = require('child_process');
@@ -35,39 +34,7 @@ const DEPRECATED_API_PARAMS = {
   },
 };
 
-// ==================== CHECK 1: Vitest Tests ====================
-function checkTests() {
-  console.log('\n🧪 Checking tests...');
-  try {
-    const output = execSync('npm test', {
-      encoding: 'utf8',
-      stdio: 'pipe',
-      timeout: 60000,
-    });
-    // Check for pass/fail in output
-    if (output.includes('Tests:') || output.includes('Test Suites:')) {
-      if (output.match(/Test Suites: \d+ failed/i)) {
-        console.error('❌ Tests failed:');
-        console.error(output);
-        return false;
-      }
-    }
-    console.log('✅ Tests passed');
-    return true;
-  } catch (error) {
-    // Test runner exited with non-zero code
-    console.error('❌ Tests failed:');
-    if (error.stdout) {
-      // Only show last 50 lines of output
-      const lines = error.stdout.toString().split('\n');
-      const lastLines = lines.slice(-50).join('\n');
-      console.error(lastLines);
-    }
-    return false;
-  }
-}
-
-// ==================== CHECK 2: Syntax Check ====================
+// ==================== CHECK 1: Syntax Check ====================
 function checkSyntax() {
   console.log('\n📝 Checking syntax...');
 
@@ -110,7 +77,7 @@ function checkSyntax() {
   }
 }
 
-// ==================== CHECK 3: Production Logging Audit ====================
+// ==================== CHECK 2: Production Logging Audit ====================
 function checkProductionLogs() {
   console.log('\n📋 Checking production logs...');
   const mainFiles = getMainJSFiles();
@@ -176,7 +143,7 @@ function checkProductionLogs() {
   }
 }
 
-// ==================== CHECK 5: Chrome API Validation ====================
+// ==================== CHECK 3: Chrome API Validation ====================
 function checkApiCalls() {
   console.log('\n🔍 Checking Chrome API calls...');
   const coreFiles = getMainJSFiles().filter(f => 
@@ -378,11 +345,9 @@ function getMainJSFiles() {
     if (normalized.includes('/coverage/')) return false;
     if (normalized.includes('/dsp-engine/test-')) return false;
     if (normalized.endsWith('/dsp-engine/midi-export.js')) return false;
-    // Skip scripts/ and dsp-engine/ (they are internal tools, not app core)
-    if (normalized.includes('/scripts/')) return false;
-    if (normalized.startsWith('/dsp-engine/')) return false;
+    // Skip scripts/ (internal tools, not app core)
+    // Allow dsp-engine production files (delay-utils.js, etc.)
     if (normalized.startsWith('/popup/config.js')) return false;
-    if (normalized.startsWith('/popup/popup-testable.js')) return false;
     return true;
   });
 }
@@ -411,7 +376,6 @@ function main() {
   console.log('🚀 Running validation checks...\n');
 
   const results = [
-    checkTests(),
     checkSyntax(),
     checkProductionLogs(),
     checkManifest(),

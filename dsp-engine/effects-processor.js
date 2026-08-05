@@ -4,7 +4,7 @@
 // Can be tested in any environment (Vitest, Node.js)
 
 const { createLimiterCurve } = require('./limiter.js');
-const { processDelayChannel, createDelayBuffer, DEFAULT_SAMPLE_RATE } = require('./tests/delay-processor-testable.js');
+const { processDelayChannel, createDelayBuffer, DEFAULT_SAMPLE_RATE } = require('./delay-utils.js');
 
 /**
  * dB to linear conversion
