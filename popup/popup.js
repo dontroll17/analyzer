@@ -24,10 +24,15 @@ const DROP_COUNT_KEY = 'ssa_audio_drop_count';
 const CAPTURING_KEY = 'ssa_capturing';
 const PERSISTENT_METRICS_KEY = 'ssa_metrics_queue';
 
-// === Force reset stale state immediately on popup open ===
-// This is the first line of defense against stale capture state
-chrome.runtime.sendMessage({ type: 'FORCE_RESET' }, () => {
-  void chrome.runtime.lastError;
+// === Force reset stale state ONLY when capture was active ===
+// H-6: Unconditional FORCE_RESET erases metrics from active sessions
+// Now only sends reset if storage indicates stale capturing state
+chrome.storage.local.get([CAPTURING_KEY], (result) => {
+  if (result && result[CAPTURING_KEY]) {
+    chrome.runtime.sendMessage({ type: 'FORCE_RESET' }, () => {
+      void chrome.runtime.lastError;
+    });
+  }
 });
 
 // ============================================
@@ -1404,6 +1409,15 @@ async function initAudioProcessing(stream) {
     } catch (e) {
       // getSettings() not available in all browsers
       log.info('getSettings() not available — using default sampleRate:', targetSampleRate);
+    }
+    
+    // === C-3: Close previous AudioContext BEFORE creating new one ===
+    // Prevents memory leak when popup is re-started without full page reload
+    if (popupAudioContext && popupAudioContext.state !== 'closed') {
+      log.info('C-3: Closing stale AudioContext before re-init');
+      try {
+        popupAudioContext.close();
+      } catch (_) {}
     }
     
     popupAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });

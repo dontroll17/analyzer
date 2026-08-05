@@ -63,6 +63,7 @@ let _effectsState = {
   compressor: { enabled: false, threshold: -24, knee: 30, ratio: 12, attack: 0.003, release: 0.250 },
   limiter: { enabled: false, threshold: -1, attack: 0.001, release: 0.1 },
   eq: {
+    enabled: false,
     hpf: { enabled: false, frequency: 20 },
     lpf: { enabled: false, frequency: 22050 },
     peaking: { enabled: false, frequency: 1000, gain: 0, Q: 1 }
