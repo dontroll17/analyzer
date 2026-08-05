@@ -472,7 +472,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       _capturedTabId = message.capturedTabId || null;
       
       log.info('START_CAPTURE: sending _OFFSCREEN_START to offscreen');
-      safeSendMessage({ type: '_OFFSCREEN_START', captureSource }, handleStartResponse);
+      safeSendMessage({ type: '_OFFSCREEN_START', captureSource, tabStreamId: message.tabStreamId }, handleStartResponse);
     })();
       
       // Return true to keep channel open for async response
